@@ -1,0 +1,23 @@
+# Python/runtime
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# IDE
+.idea/
+.vscode/
+
+# Local datasets and generated training artifacts
+IMU_Dataset/
+outputs/
+.codex-local/
+
+# Local agent planning state
+task_plan.md
+findings.md
+progress.md
+
+# OS files
+Thumbs.db
+.DS_Store

@@ -1,0 +1,139 @@
+# IMU 健身动作 BP 神经网络识别
+
+本项目使用六轴 IMU 数据识别 11 类健身动作，并将训练完成的 BP 神经网络导出为 ESP32-S3 可直接使用的 C 头文件。
+
+项目严格采用以下技术路线：
+
+```text
+六轴 IMU -> 手工特征 -> 标准化 -> BP 全连接网络 -> C 头文件 -> ESP32-S3
+```
+
+不使用 CNN、RNN、LSTM 或 Transformer 作为部署模型。
+
+## 目录结构
+
+```text
+IMU_BPNN_Classification/
+├─ python/                 Python 训练、评估、导出与测试代码
+├─ esp32/                  ESP32-S3 端代码和达标后生成的模型头文件
+│  ├─ include/
+│  └─ src/
+├─ pc/                     上位机端代码与通信协议说明
+├─ docs/                   原始方案、优化设计和实施记录
+├─ README.md               中文项目说明
+└─ .gitignore
+```
+
+数据集、虚拟环境、训练输出和本机缓存不会提交到仓库。
+
+## 数据集
+
+数据集来源：[G1ow9711/IMU_Datasrt](https://github.com/G1ow9711/IMU_Datasrt)。
+
+将数据放到：
+
+```text
+IMU_Dataset/imu_dataset_for_final/
+```
+
+数据包含陀螺仪 `gx, gy, gz` 和加速度计 `ax, ay, az`，采样率为 25 Hz。
+
+## Python 环境
+
+在项目根目录创建虚拟环境并安装依赖：
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r python\requirements.txt
+```
+
+运行测试：
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest python.test_train_export
+```
+
+运行完整训练：
+
+```powershell
+.\.venv\Scripts\python.exe -u python\train_export.py `
+  --dataset-dir IMU_Dataset\imu_dataset_for_final
+```
+
+训练会逐 epoch 输出总损失、交叉熵、跨文件监督对比损失、弱类 margin、验证准确率、宏平均 F1、弱类 F1、最差类别 F1 和早停状态。
+
+![逐 epoch 可见训练过程](docs/训练过程截图.png)
+
+## 特征与 BP 网络
+
+当前特征维度为 264：
+
+- 112 个全局统计特征；
+- 48 个原始四阶段时序特征；
+- 24 个峰值、频率、谱熵和自相关特征；
+- 48 个窗口内标准化四阶段形状特征；
+- 32 个分位数、偏度、峰度和最大跳变特征。
+
+方向鲁棒特征包括重力方向上的垂直分量和垂直于重力的水平分量。训练增强使用六轴同步有限角度旋转、非循环时间变形和轻微传感器噪声。
+
+BP 网络结构：
+
+```text
+264 -> 96 -> 64 -> 32 -> 11
+```
+
+训练时使用原始文件均衡采样、跨文件监督对比损失和弱混淆类别 margin；这些训练辅助项不会进入 ESP32 推理代码。
+
+代码还保留实验性的跳跃动作形状专家开关：
+
+```powershell
+--enable-family-specialist
+```
+
+该专家只使用 94 个幅值不敏感特征。当前数据上的消融结果低于平铺 BP，因此默认关闭，不作为正式模型。
+
+优化依据及方法取舍见 [docs/论文依据与优化取舍.md](docs/论文依据与优化取舍.md)。
+
+## 输出文件
+
+训练结果默认写入本地 `outputs/`：
+
+```text
+best_model.pt
+scaler_and_config.npz
+training_report.json
+confusion_matrix.png
+training_console.log
+```
+
+部署门槛按动作逐类验收：
+
+```text
+每个动作的测试集召回率 >= 0.90
+```
+
+召回率定义为该动作测试样本中被正确识别的比例。只有 11 个动作全部达标，才生成正式 `outputs/esp32_bp_model.h`，并同步到 `esp32/include/esp32_bp_model.h`。未达标时保留训练报告，但不发布模型头文件；`--export-when-below-target` 只用于本地诊断，不会覆盖 ESP32 代码区。
+
+## 当前验证状态
+
+- Python 单元测试覆盖特征顺序、方向不变性、时间变形、活动过滤、文件均衡、训练损失、逐 epoch 日志和 C 头文件合同。
+- 生成的 C 特征提取器已使用 MinGW C99 编译，并与 Python 的 264 项特征逐值对照；最大绝对误差约为 `4.58e-05`。
+- 当前最佳平铺 BP 使用 2.5 秒窗口，测试准确率 `94.61%`，宏平均 F1 `93.49%`。
+
+当前最佳模型的未达标类别：
+
+| 动作 | 测试召回率 |
+|---|---:|
+| `jumping_squat` | 72.64% |
+| `squat` | 89.56% |
+| `tuck_jump` | 84.43% |
+
+其余 8 类均达到 90%。因果 logits 平滑可把 `squat` 和 `tuck_jump` 提升到 99.60% 和 100%，但 `jumping_squat` 仍只有 80.07%，且 41 个窗口约对应 20 秒延迟，因此未作为正式实时方案。
+
+失败主要集中在 `IMU-2023-05-17-16_38_15_jumping_squat.txt`。该会话峰值约为 800°/s 和 6–7g，明显高于同类训练文件，波形强度接近 `jumping_jack`。继续在当前测试文件上调参会导致测试集过拟合；下一轮应补采高强度 `jumping_squat` 的跨人员、跨会话和不同佩戴方向数据。
+
+当前逐类 90% 门槛未满足，所以仓库中不会出现正式 `esp32/include/esp32_bp_model.h`。本地最佳结果以 `outputs/round4_264_features_20260711/` 为准。
+
+## 说明
+
+原始数据没有采集者 ID，因此当前结果能够证明原始文件之间无泄漏，但不能声称严格的跨人员泛化。正式部署前应使用目标手表采集独立用户、独立会话和不同佩戴方向的数据作为最终盲测集。
