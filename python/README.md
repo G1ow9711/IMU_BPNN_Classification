@@ -10,4 +10,6 @@
 
 当前默认流程使用 264 项手工特征和单个平铺 BP。`--enable-family-specialist` 为跳跃四类形状专家消融开关，当前结果较差，默认不启用。`--primary-artifact-dir` 可加载已有主 BP，只训练专家网络。
 
+`--validation-only` 用于测试隔离的消融训练：保留逐 epoch 日志和验证指标，但不构建测试窗口、不输出测试指标、不触发 ESP32 头文件导出。验证结果保存在 `validation_report.json`。
+
 所有命令均从仓库根目录执行，具体命令见根目录 `README.md`。

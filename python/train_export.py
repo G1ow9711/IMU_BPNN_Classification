@@ -1192,7 +1192,10 @@ def train_one_experiment(
     seed: int,
     primary_artifact_dir: Optional[Path] = None,
     enable_family_specialist: bool = False,
+    validation_only: bool = False,
 ) -> Dict[str, object]:
+    if validation_only and enable_family_specialist:
+        raise ValueError("Family specialist is not supported in validation-only mode")
     window_len, step_len = window_lengths(window_seconds)
     train_records, val_records, test_records = split_records_by_file(records, seed)
     rest_threshold = estimate_rest_threshold(train_records, window_len, step_len)
@@ -1221,16 +1224,21 @@ def train_one_experiment(
         rng=rng,
         progress_label=f"window={window_seconds:.1f}s split=val",
     )
-    test_x_raw, test_y, _, test_stats = build_samples(
-        test_records,
-        window_len,
-        step_len,
-        rest_threshold,
-        active_point_threshold,
-        augment=False,
-        rng=rng,
-        progress_label=f"window={window_seconds:.1f}s split=test",
-    )
+    if validation_only:
+        test_x_raw = np.empty((0, train_x_raw.shape[1]), dtype=np.float32)
+        test_y = np.empty(0, dtype=np.int64)
+        test_stats: Dict[str, int] = {"skipped_validation_only": 1}
+    else:
+        test_x_raw, test_y, _, test_stats = build_samples(
+            test_records,
+            window_len,
+            step_len,
+            rest_threshold,
+            active_point_threshold,
+            augment=False,
+            rng=rng,
+            progress_label=f"window={window_seconds:.1f}s split=test",
+        )
 
     print(
         f"start window={window_seconds:.1f}s window_len={window_len} step_len={step_len} "
@@ -1269,7 +1277,14 @@ def train_one_experiment(
             flush=True,
         )
     flat_val_acc, flat_val_f1, flat_val_pred = evaluate(model, val_x, val_y, device)
-    flat_test_acc, flat_test_f1, flat_test_pred = evaluate(model, test_x, test_y, device)
+    if validation_only:
+        flat_test_acc = float("nan")
+        flat_test_f1 = float("nan")
+        flat_test_pred = np.empty(0, dtype=np.int64)
+    else:
+        flat_test_acc, flat_test_f1, flat_test_pred = evaluate(
+            model, test_x, test_y, device
+        )
     training_meta: Dict[str, object] = {"primary": train_meta}
     if enable_family_specialist:
         specialist = train_family_specialist(
@@ -1325,23 +1340,43 @@ def train_one_experiment(
         test_pred = flat_test_pred
     val_acc = float(accuracy_score(val_y, val_pred))
     val_f1 = float(f1_score(val_y, val_pred, average="macro", zero_division=0))
-    test_acc = float(accuracy_score(test_y, test_pred))
-    test_f1 = float(f1_score(test_y, test_pred, average="macro", zero_division=0))
+    if validation_only:
+        test_acc = float("nan")
+        test_f1 = float("nan")
+    else:
+        test_acc = float(accuracy_score(test_y, test_pred))
+        test_f1 = float(
+            f1_score(test_y, test_pred, average="macro", zero_division=0)
+        )
     val_weak_recall, val_min_recall, val_recalls = weak_and_min_recall(
         val_y, val_pred, class_names
     )
-    test_weak_recall, test_min_recall, test_recalls = weak_and_min_recall(
-        test_y, test_pred, class_names
-    )
+    if validation_only:
+        test_acc = float("nan")
+        test_weak_recall = float("nan")
+        test_min_recall = float("nan")
+        test_recalls = np.full(len(class_names), np.nan, dtype=np.float64)
+    else:
+        test_weak_recall, test_min_recall, test_recalls = weak_and_min_recall(
+            test_y, test_pred, class_names
+        )
 
-    print(
-        f"window={window_seconds:.1f}s "
-        f"train={len(train_y)} val={len(val_y)} test={len(test_y)} "
-        f"val_acc={val_acc:.4f} val_f1={val_f1:.4f} "
-        f"val_min_recall={val_min_recall:.4f} "
-        f"test_acc={test_acc:.4f} test_f1={test_f1:.4f} "
-        f"test_min_recall={test_min_recall:.4f}"
-    )
+    if validation_only:
+        print(
+            f"window={window_seconds:.1f}s train={len(train_y)} val={len(val_y)} "
+            f"val_acc={val_acc:.4f} val_f1={val_f1:.4f} "
+            f"val_min_recall={val_min_recall:.4f} "
+            "validation_only=true test_evaluation_skipped=true"
+        )
+    else:
+        print(
+            f"window={window_seconds:.1f}s "
+            f"train={len(train_y)} val={len(val_y)} test={len(test_y)} "
+            f"val_acc={val_acc:.4f} val_f1={val_f1:.4f} "
+            f"val_min_recall={val_min_recall:.4f} "
+            f"test_acc={test_acc:.4f} test_f1={test_f1:.4f} "
+            f"test_min_recall={test_min_recall:.4f}"
+        )
 
     return {
         "window_seconds": window_seconds,
@@ -1384,10 +1419,12 @@ def train_one_experiment(
         "test_sample_count": int(len(test_y)),
         "train_file_count": len(train_records),
         "val_file_count": len(val_records),
-        "test_file_count": len(test_records),
+        "test_file_count": 0 if validation_only else len(test_records),
         "train_files": [str(record.path) for record in train_records],
         "val_files": [str(record.path) for record in val_records],
-        "test_files": [str(record.path) for record in test_records],
+        "test_files": (
+            [] if validation_only else [str(record.path) for record in test_records]
+        ),
         "sample_stats": {"train": train_stats, "val": val_stats, "test": test_stats},
         "training": training_meta,
     }
@@ -2295,6 +2332,81 @@ def save_outputs(
     )
 
 
+def save_validation_outputs(
+    best_result: Dict[str, object],
+    all_results: Sequence[Dict[str, object]],
+    class_names: Sequence[str],
+    feature_names: Sequence[str],
+    output_dir: Path,
+) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    model = best_result["model"]
+    assert isinstance(model, BPNet)
+    torch.save(model.state_dict(), output_dir / "best_model.pt")
+    np.savez(
+        output_dir / "scaler_and_config.npz",
+        mean=np.asarray(best_result["mean"], dtype=np.float32),
+        std=np.asarray(best_result["std"], dtype=np.float32),
+        class_names=np.asarray(class_names),
+        feature_names=np.asarray(feature_names),
+        window_len=np.asarray([int(best_result["window_len"])]),
+        step_len=np.asarray([int(best_result["step_len"])]),
+        sample_rate=np.asarray([SAMPLE_RATE]),
+        rest_threshold=np.asarray(
+            [float(best_result["rest_threshold"])], dtype=np.float32
+        ),
+        active_point_threshold=np.asarray(
+            [float(best_result["active_point_threshold"])], dtype=np.float32
+        ),
+    )
+    validation_keys = {
+        "window_seconds",
+        "window_len",
+        "step_len",
+        "rest_threshold",
+        "active_point_threshold",
+        "val_acc",
+        "val_f1",
+        "val_weak_recall",
+        "val_min_recall",
+        "val_class_recalls",
+        "flat_val_acc",
+        "flat_val_f1",
+        "train_sample_count",
+        "val_sample_count",
+        "train_file_count",
+        "val_file_count",
+        "train_files",
+        "val_files",
+        "sample_stats",
+    }
+    report = {
+        "mode": "validation_only",
+        "seed": SEED,
+        "sample_rate": SAMPLE_RATE,
+        "class_names": list(class_names),
+        "feature_names": list(feature_names),
+        "best_window_seconds": best_result["window_seconds"],
+        "val_acc": best_result["val_acc"],
+        "val_f1": best_result["val_f1"],
+        "val_min_recall": best_result["val_min_recall"],
+        "val_class_recalls": best_result["val_class_recalls"],
+        "classification_report": classification_report(
+            np.asarray(best_result["y_val"]),
+            np.asarray(best_result["val_pred"]),
+            target_names=class_names,
+            output_dict=True,
+            zero_division=0,
+        ),
+        "all_experiments": [
+            {key: result[key] for key in validation_keys if key in result}
+            for result in all_results
+        ],
+    }
+    with (output_dir / "validation_report.json").open("w", encoding="utf-8") as file:
+        json.dump(report, file, ensure_ascii=False, indent=2)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train IMU BP model and export ESP32 header.")
     parser.add_argument("--dataset-dir", type=Path, default=None)
@@ -2306,6 +2418,11 @@ def parse_args() -> argparse.Namespace:
         help="Reuse a validated primary BP model and train only the family specialist.",
     )
     parser.add_argument("--enable-family-specialist", action="store_true")
+    parser.add_argument(
+        "--validation-only",
+        action="store_true",
+        help="Train and select with validation data without constructing or evaluating test windows.",
+    )
     parser.add_argument("--seed", type=int, default=SEED)
     parser.add_argument("--export-when-below-target", action="store_true")
     parser.add_argument("--max-epochs", type=int, default=MAX_EPOCHS)
@@ -2338,7 +2455,8 @@ def main() -> None:
         f"window_seconds={args.window_seconds} augment_times={AUGMENT_TIMES} "
         f"max_rotation_degrees={MAX_ROTATION_DEGREES:.1f} "
         f"supcon_weight={SUPCON_WEIGHT:.3f} hard_pair_weight={HARD_PAIR_WEIGHT:.3f} "
-        f"family_specialist={args.enable_family_specialist}"
+        f"family_specialist={args.enable_family_specialist} "
+        f"validation_only={args.validation_only}"
     )
 
     all_results: List[Dict[str, object]] = []
@@ -2351,6 +2469,7 @@ def main() -> None:
             args.seed,
             primary_artifact_dir=args.primary_artifact_dir,
             enable_family_specialist=args.enable_family_specialist,
+            validation_only=args.validation_only,
         )
         all_results.append(result)
 
@@ -2362,6 +2481,33 @@ def main() -> None:
             float(item["val_acc"]),
         ),
     )
+    if args.validation_only:
+        save_validation_outputs(
+            best_result,
+            all_results,
+            class_names,
+            feature_names,
+            args.output_dir,
+        )
+        print("========== best validation experiment ==========")
+        print(
+            f"best_window={best_result['window_seconds']}s "
+            f"val_acc={best_result['val_acc']:.4f} "
+            f"val_f1={best_result['val_f1']:.4f} "
+            f"val_min_recall={best_result['val_min_recall']:.4f}"
+        )
+        print(
+            classification_report(
+                np.asarray(best_result["y_val"]),
+                np.asarray(best_result["val_pred"]),
+                target_names=class_names,
+                zero_division=0,
+            )
+        )
+        print("validation_only=true test_evaluation_skipped=true header_export_skipped=true")
+        print(f"outputs={args.output_dir.resolve()}")
+        return
+
     reached_target = save_outputs(
         best_result,
         all_results,

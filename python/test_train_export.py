@@ -2,6 +2,7 @@ import unittest
 import tempfile
 import contextlib
 import io
+import json
 import sys
 from pathlib import Path
 from unittest import mock
@@ -36,6 +37,16 @@ class TrainExportCoreTests(unittest.TestCase):
             args = te.parse_args()
 
         self.assertEqual(args.primary_artifact_dir, Path("outputs/round2"))
+
+    def test_parse_args_accepts_validation_only_mode(self):
+        with mock.patch.object(
+            sys,
+            "argv",
+            ["train_export.py", "--validation-only", "--window-seconds", "2.5"],
+        ):
+            args = te.parse_args()
+
+        self.assertTrue(args.validation_only)
 
     def test_convert_raw_imu_units_uses_plan_scales(self):
         raw = np.array([[16.4, -32.8, 49.2, 4096.0, -8192.0, 2048.0, 0.0, 0.0]])
@@ -369,6 +380,45 @@ class TrainExportCoreTests(unittest.TestCase):
             self.assertFalse(reached)
             self.assertTrue(below_output.exists())
             self.assertFalse(below_repository.exists())
+
+    def test_validation_only_outputs_omit_test_metrics_and_header(self):
+        feature_names = te.build_feature_names()
+        model = te.BPNet(len(feature_names), 3, dropout=0.0)
+        result = {
+            "window_seconds": 2.5,
+            "window_len": 62,
+            "step_len": 12,
+            "rest_threshold": 0.08,
+            "active_point_threshold": 0.02,
+            "model": model,
+            "mean": np.zeros(len(feature_names), dtype=np.float32),
+            "std": np.ones(len(feature_names), dtype=np.float32),
+            "val_acc": 0.91,
+            "val_f1": 0.90,
+            "val_weak_recall": 0.89,
+            "val_min_recall": 0.88,
+            "val_class_recalls": {"a": 0.88, "b": 0.91, "c": 0.93},
+            "y_val": np.array([0, 1, 2], dtype=np.int64),
+            "val_pred": np.array([0, 1, 2], dtype=np.int64),
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir)
+            te.save_validation_outputs(
+                result,
+                [result],
+                ["a", "b", "c"],
+                feature_names,
+                output_dir,
+            )
+
+            report = json.loads(
+                (output_dir / "validation_report.json").read_text(encoding="utf-8")
+            )
+            self.assertTrue((output_dir / "best_model.pt").exists())
+            self.assertTrue((output_dir / "scaler_and_config.npz").exists())
+            self.assertFalse((output_dir / "esp32_bp_model.h").exists())
+        self.assertEqual(report["mode"], "validation_only")
+        self.assertNotIn("test_acc", report)
 
     def test_deployment_gate_requires_every_class_recall_at_least_90_percent(self):
         y_true = np.repeat(np.arange(3, dtype=np.int64), 10)
