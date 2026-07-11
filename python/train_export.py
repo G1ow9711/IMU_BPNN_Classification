@@ -45,18 +45,10 @@ FAMILY_SPECIALIST_CLASS_NAMES = [
     "tuck_jump",
 ]
 HARD_CONFUSION_PAIRS = {
-    "jumping_jack": ["jumping_squat"],
-    "jumping_lunge": ["tuck_jump", "jumping_squat", "lunge"],
-    "jumping_squat": [
-        "squat",
-        "jumping_jack",
-        "tuck_jump",
-        "jumping_lunge",
-        "lunge",
-    ],
-    "lunge": ["jumping_lunge", "jumping_squat"],
-    "squat": ["jumping_squat", "tuck_jump"],
-    "tuck_jump": ["jumping_lunge", "jumping_squat", "squat"],
+    "squat": ["jumping_squat"],
+    "jumping_squat": ["squat", "jumping_jack", "tuck_jump"],
+    "tuck_jump": ["jumping_lunge", "jumping_squat"],
+    "jumping_lunge": ["tuck_jump", "jumping_squat"],
 }
 TARGET_MIN_CLASS_RECALL = 0.90
 

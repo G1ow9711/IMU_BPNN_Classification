@@ -431,25 +431,6 @@ class TrainExportCoreTests(unittest.TestCase):
 
         self.assertGreater(float(wrong_loss), float(correct_loss))
 
-    def test_hard_pair_margin_covers_observed_symmetric_confusions(self):
-        scenarios = [
-            (["jumping_jack", "jumping_squat"], 0),
-            (["lunge", "jumping_lunge"], 0),
-            (["squat", "tuck_jump"], 0),
-        ]
-        for class_names, true_index in scenarios:
-            with self.subTest(class_names=class_names):
-                labels = torch.tensor([true_index])
-                wrong_order = torch.tensor([[0.0, 2.0]])
-                correct_order = torch.tensor([[2.0, 0.0]])
-                wrong_loss = te.hard_pair_margin_loss(
-                    wrong_order, labels, class_names
-                )
-                correct_loss = te.hard_pair_margin_loss(
-                    correct_order, labels, class_names
-                )
-                self.assertGreater(float(wrong_loss), float(correct_loss))
-
     def test_bpnet_exposes_32_value_training_embedding(self):
         model = te.BPNet(input_dim=264, class_count=11, dropout=0.0)
         batch = torch.zeros((3, 264), dtype=torch.float32)
