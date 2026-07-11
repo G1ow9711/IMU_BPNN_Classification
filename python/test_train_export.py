@@ -98,47 +98,20 @@ class TrainExportCoreTests(unittest.TestCase):
             atol=1e-6,
         )
 
-    def test_extract_features_returns_276_ordered_values_for_six_axis_window(self):
+    def test_extract_features_returns_264_ordered_values_for_six_axis_window(self):
         window = np.arange(62 * 6, dtype=np.float32).reshape(62, 6)
 
         features = te.extract_features(window)
 
         feature_names = te.build_feature_names()
-        self.assertEqual(features.shape, (276,))
-        self.assertEqual(len(feature_names), 276)
+        self.assertEqual(features.shape, (264,))
+        self.assertEqual(len(feature_names), 264)
         self.assertEqual(feature_names[112], "acc_vertical_phase0_mean")
         self.assertEqual(feature_names[160], "acc_vertical_high_activity_ratio")
         self.assertEqual(feature_names[184], "acc_vertical_normalized_phase0_mean")
         self.assertEqual(feature_names[232], "acc_vertical_q10")
-        self.assertEqual(feature_names[264], "event_takeoff_position")
-        self.assertEqual(feature_names[-1], "event_post_takeoff_gyro_energy_ratio")
+        self.assertNotIn("acc_vertical_argmax_abs_position", feature_names)
         self.assertTrue(np.all(np.isfinite(features)))
-
-    def test_event_features_use_earliest_extrema_and_are_finite(self):
-        window = np.zeros((6, 6), dtype=np.float32)
-        window[:, 5] = np.array([5.0, -3.0, -3.0, 4.0, 4.0, 4.0])
-        window[:, 0] = np.array([0.0, 6.0, 6.0, 2.0, 1.0, 0.0])
-
-        features = te.event_features(window)
-
-        self.assertEqual(len(features), 12)
-        self.assertTrue(np.all(np.isfinite(features)))
-        self.assertAlmostEqual(features[0], 1.0 / 5.0)
-        self.assertAlmostEqual(features[1], 3.0 / 5.0)
-        self.assertAlmostEqual(features[2], 2.0 / 5.0)
-        self.assertAlmostEqual(features[3], 4.0 / 3.0)
-        self.assertAlmostEqual(features[8], 1.0 / 5.0)
-
-    def test_event_features_zero_landing_dependents_when_takeoff_is_last(self):
-        window = np.zeros((6, 6), dtype=np.float32)
-        window[:, 5] = np.array([2.0, 2.0, 2.0, 2.0, 2.0, -10.0])
-        window[:, 0] = np.arange(6, dtype=np.float32)
-
-        features = te.event_features(window)
-
-        self.assertAlmostEqual(features[0], 1.0)
-        for index in (1, 2, 3, 9, 11):
-            self.assertEqual(features[index], 0.0)
 
     def test_normalized_phase_features_ignore_offset_and_positive_scale(self):
         signal = np.linspace(-2.0, 3.0, 64, dtype=np.float32) ** 3
@@ -473,7 +446,7 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertIn("val_weak_recall=", log)
         self.assertIn("val_min_recall=", log)
 
-    def test_exported_header_contains_276_feature_pipeline_and_activity_thresholds(self):
+    def test_exported_header_contains_264_feature_pipeline_and_activity_thresholds(self):
         feature_names = te.build_feature_names()
         model = te.BPNet(input_dim=len(feature_names), class_count=3, dropout=0.0)
         result = {
@@ -495,14 +468,13 @@ class TrainExportCoreTests(unittest.TestCase):
             )
 
             header = header_path.read_text(encoding="utf-8")
-        self.assertIn("#define FEATURE_DIM 276", header)
+        self.assertIn("#define FEATURE_DIM 264", header)
         self.assertIn("REST_MOTION_THRESHOLD", header)
         self.assertIn("ACTIVE_POINT_THRESHOLD", header)
         self.assertIn("append_phase_features", header)
         self.assertIn("append_temporal_features", header)
         self.assertIn("append_normalized_phase_features", header)
         self.assertIn("append_impact_distribution_features", header)
-        self.assertIn("append_event_features", header)
         self.assertIn("spectral_entropy", header)
         self.assertIn("gravity_norm", header)
         self.assertIn("bp_predict_from_window", header)
