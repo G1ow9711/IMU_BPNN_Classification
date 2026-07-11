@@ -16,6 +16,197 @@ except ModuleNotFoundError:
 
 
 DEFAULT_PAIR_CLASSES = ["jumping_jack", "jumping_lunge", "squat", "tuck_jump"]
+CANDIDATE_EVENT_FEATURE_NAMES = [
+    "event_takeoff_position",
+    "event_landing_position",
+    "event_takeoff_to_landing_interval",
+    "event_landing_to_takeoff_peak_ratio",
+    "event_free_flight_ratio",
+    "event_longest_free_flight_run_ratio",
+    "event_vertical_diff_max_abs",
+    "event_vertical_diff_peak_position",
+    "event_gyro_peak_position",
+    "event_gyro_to_landing_peak_lag",
+    "event_gyro_vertical_correlation",
+    "event_post_takeoff_gyro_energy_ratio",
+]
+
+
+def candidate_event_features(window: np.ndarray) -> np.ndarray:
+    series = training.build_feature_series(window)
+    vertical = np.asarray(series["acc_vertical"], dtype=np.float32)
+    acc_mag = np.asarray(series["acc_mag"], dtype=np.float32)
+    gyro_mag = np.asarray(series["gyro_mag"], dtype=np.float32)
+    n = len(vertical)
+    if n == 0:
+        return np.zeros(len(CANDIDATE_EVENT_FEATURE_NAMES), dtype=np.float32)
+    position_denominator = float(max(n - 1, 1))
+
+    takeoff_index = int(np.argmin(vertical))
+    takeoff_position = takeoff_index / position_denominator
+    has_landing = takeoff_index + 1 < n
+    if has_landing:
+        landing_index = takeoff_index + 1 + int(
+            np.argmax(vertical[takeoff_index + 1 :])
+        )
+        landing_position = landing_index / position_denominator
+        takeoff_to_landing = (landing_index - takeoff_index) / position_denominator
+        takeoff_peak = abs(float(vertical[takeoff_index]))
+        landing_peak_ratio = (
+            abs(float(vertical[landing_index])) / takeoff_peak
+            if takeoff_peak > 1e-6
+            else 0.0
+        )
+    else:
+        landing_index = 0
+        landing_position = 0.0
+        takeoff_to_landing = 0.0
+        landing_peak_ratio = 0.0
+
+    free_flight = acc_mag < 0.70
+    free_flight_ratio = float(np.mean(free_flight))
+    longest_run = 0
+    current_run = 0
+    for is_free_flight in free_flight.tolist():
+        current_run = current_run + 1 if is_free_flight else 0
+        longest_run = max(longest_run, current_run)
+    longest_free_flight_run_ratio = longest_run / float(n)
+
+    if n > 1:
+        vertical_diff = np.abs(np.diff(vertical))
+        vertical_diff_index = int(np.argmax(vertical_diff))
+        vertical_diff_max = float(vertical_diff[vertical_diff_index])
+        vertical_diff_position = (vertical_diff_index + 1) / position_denominator
+    else:
+        vertical_diff_max = 0.0
+        vertical_diff_position = 0.0
+
+    gyro_peak_index = int(np.argmax(gyro_mag))
+    gyro_peak_position = gyro_peak_index / position_denominator
+    gyro_to_landing_lag = (
+        (gyro_peak_index - landing_index) / position_denominator
+        if has_landing
+        else 0.0
+    )
+    centered_gyro = gyro_mag - float(np.mean(gyro_mag))
+    centered_vertical = vertical - float(np.mean(vertical))
+    correlation_denominator = math.sqrt(
+        float(np.dot(centered_gyro, centered_gyro))
+        * float(np.dot(centered_vertical, centered_vertical))
+    )
+    gyro_vertical_correlation = (
+        float(np.dot(centered_gyro, centered_vertical)) / correlation_denominator
+        if correlation_denominator > 1e-12
+        else 0.0
+    )
+    total_gyro_energy = float(np.dot(gyro_mag, gyro_mag))
+    post_takeoff_gyro_energy_ratio = (
+        float(np.dot(gyro_mag[takeoff_index + 1 :], gyro_mag[takeoff_index + 1 :]))
+        / total_gyro_energy
+        if has_landing and total_gyro_energy > 1e-12
+        else 0.0
+    )
+    return np.asarray(
+        [
+            takeoff_position,
+            landing_position,
+            takeoff_to_landing,
+            landing_peak_ratio,
+            free_flight_ratio,
+            longest_free_flight_run_ratio,
+            vertical_diff_max,
+            vertical_diff_position,
+            gyro_peak_position,
+            gyro_to_landing_lag,
+            gyro_vertical_correlation,
+            post_takeoff_gyro_energy_ratio,
+        ],
+        dtype=np.float32,
+    )
+
+
+def build_analysis_samples(
+    records: Sequence[training.ImuRecord],
+    window_len: int,
+    step_len: int,
+    rest_threshold: float,
+    active_point_threshold: float,
+    progress_label: str,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, int]]:
+    features: List[np.ndarray] = []
+    labels: List[int] = []
+    file_ids: List[int] = []
+    stats = {
+        "too_short": 0,
+        "rest_filtered": 0,
+        "kept_windows": 0,
+        "files_without_valid_window": 0,
+    }
+    for file_id, record in enumerate(records):
+        if file_id == 0 or file_id % 10 == 0:
+            print(
+                f"features {progress_label} file={file_id + 1}/{len(records)} "
+                f"kept={stats['kept_windows']}",
+                flush=True,
+            )
+        data = training.load_imu_file(record.path)
+        if len(data) < window_len:
+            stats["too_short"] += 1
+            continue
+        record_kept = 0
+        for window in training.iter_windows(data, window_len, step_len):
+            if not training.keep_window_for_label(
+                window,
+                record.label,
+                rest_threshold,
+                active_point_threshold,
+            ):
+                stats["rest_filtered"] += 1
+                continue
+            features.append(
+                np.concatenate(
+                    [training.extract_features(window), candidate_event_features(window)]
+                )
+            )
+            labels.append(record.label_idx)
+            file_ids.append(file_id)
+            stats["kept_windows"] += 1
+            record_kept += 1
+        if record_kept == 0:
+            stats["files_without_valid_window"] += 1
+            if record.label in training.HIGH_DYNAMIC_CLASSES:
+                continue
+            fallback_windows = list(training.iter_windows(data, window_len, step_len))
+            if fallback_windows:
+                scored = [(training.motion_score(window), window) for window in fallback_windows]
+                if record.label == training.SIT_CLASS_NAME:
+                    _, selected_window = min(scored, key=lambda item: item[0])
+                else:
+                    _, selected_window = max(scored, key=lambda item: item[0])
+                features.append(
+                    np.concatenate(
+                        [
+                            training.extract_features(selected_window),
+                            candidate_event_features(selected_window),
+                        ]
+                    )
+                )
+                labels.append(record.label_idx)
+                file_ids.append(file_id)
+                stats["kept_windows"] += 1
+    if not features:
+        raise ValueError("No samples generated for feature analysis")
+    print(
+        f"features {progress_label} file={len(records)}/{len(records)} "
+        f"kept={stats['kept_windows']} complete=true",
+        flush=True,
+    )
+    return (
+        np.vstack(features).astype(np.float32),
+        np.asarray(labels, dtype=np.int64),
+        np.asarray(file_ids, dtype=np.int64),
+        stats,
+    )
 
 
 def fisher_scores(features: np.ndarray, labels: np.ndarray) -> np.ndarray:
@@ -139,29 +330,25 @@ def main() -> None:
     step_len = int(report["all_experiments"][0]["step_len"])
     rest_threshold = float(report["all_experiments"][0]["rest_threshold"])
     active_threshold = float(report["all_experiments"][0]["active_point_threshold"])
-    rng = np.random.default_rng(training.SEED)
-    train_x, train_y, train_file_ids, train_stats = training.build_samples(
+    train_x, train_y, train_file_ids, train_stats = build_analysis_samples(
         train_records,
         window_len,
         step_len,
         rest_threshold,
         active_threshold,
-        augment=False,
-        rng=rng,
         progress_label="separability_train",
     )
-    val_x, val_y, val_file_ids, val_stats = training.build_samples(
+    val_x, val_y, val_file_ids, val_stats = build_analysis_samples(
         val_records,
         window_len,
         step_len,
         rest_threshold,
         active_threshold,
-        augment=False,
-        rng=rng,
         progress_label="separability_val",
     )
 
-    feature_names = training.build_feature_names()
+    production_feature_names = training.build_feature_names()
+    feature_names = production_feature_names + CANDIDATE_EVENT_FEATURE_NAMES
     train_fisher = fisher_scores(train_x, train_y)
     val_fisher = fisher_scores(val_x, val_y)
     file_train_x, file_train_y = aggregate_file_medians(train_x, train_y, train_file_ids)
@@ -174,7 +361,7 @@ def main() -> None:
     target_idx = label_to_idx[args.target_class]
     pair_classes = args.pair_classes or DEFAULT_PAIR_CLASSES
     pair_reports: Dict[str, object] = {}
-    event_start = len(feature_names) - len(training.EVENT_FEATURE_NAMES)
+    event_start = len(production_feature_names)
     event_indices = list(range(event_start, len(feature_names)))
     for pair_class in pair_classes:
         other_idx = label_to_idx[pair_class]

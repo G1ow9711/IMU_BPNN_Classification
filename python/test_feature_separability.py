@@ -6,6 +6,17 @@ from python import analyze_feature_separability as analysis
 
 
 class FeatureSeparabilityTests(unittest.TestCase):
+    def test_candidate_event_features_are_finite_and_complete(self) -> None:
+        window = np.zeros((62, 6), dtype=np.float32)
+        window[:, 0] = np.linspace(0.0, 100.0, 62)
+        window[:, 5] = 1.0 + 0.5 * np.sin(np.linspace(0.0, 4.0 * np.pi, 62))
+
+        features = analysis.candidate_event_features(window)
+
+        self.assertEqual(len(features), len(analysis.CANDIDATE_EVENT_FEATURE_NAMES))
+        self.assertEqual(len(features), 12)
+        self.assertTrue(np.isfinite(features).all())
+
     def test_fisher_scores_rank_separated_feature_first(self) -> None:
         features = np.asarray(
             [

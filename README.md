@@ -38,6 +38,26 @@ IMU_Dataset/imu_dataset_for_final/
 
 数据包含陀螺仪 `gx, gy, gz` 和加速度计 `ax, ay, az`，采样率为 25 Hz。
 
+### 决赛 `jumping_squat` 会话
+
+仓库额外提供 `python/finals_jumping_squat_manifest.json` 和校验脚本，用于接入根目录 `决赛/MATLAB/实测数据集/A类活动` 中的三次独立录制。数据本身仍不提交仓库。
+
+| 文件 | SHA-256 | 行数 | 用途 |
+|---|---|---:|---|
+| `jumping_squat_scy1_20.txt` | `FE10A5B4...BDE0F379` | 2975 | 仅追加到训练集 |
+| `jumping_squat_scy2_20.txt` | `E9A02819...6C3A52C9` | 2977 | 仅追加到训练集 |
+| `jumping_squat_scy3_20.txt` | `4B4C5420...9C189111` | 2969 | 延迟外部盲测 |
+
+准备数据：
+
+```powershell
+.\.venv\Scripts\python.exe python\prepare_finals_dataset.py `
+  --source-dir "..\决赛\MATLAB\实测数据集\A类活动" `
+  --output-dir IMU_Dataset\finals_jumping_squat
+```
+
+脚本先校验哈希、行数和重复内容，再复制为 `train/jumping_squat` 与 `external_holdout/jumping_squat`。基础 189 个文件先完成文件级划分，`scy1/scy2` 随后只追加到训练集；`scy3` 只允许在验证候选通过后加载。
+
 ## Python 环境
 
 在项目根目录创建虚拟环境并安装依赖：
@@ -47,10 +67,10 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r python\requirements.txt
 ```
 
-运行测试：
+运行全部测试：
 
 ```powershell
-.\.venv\Scripts\python.exe -m unittest python.test_train_export
+.\.venv\Scripts\python.exe -m unittest discover -s python -p "test_*.py"
 ```
 
 运行完整训练：
@@ -103,6 +123,30 @@ BP 网络结构：
 
 该模式不构建测试窗口、不计算测试指标，也不导出 C 头文件；结果写入 `validation_report.json`。候选方案只有先超过既有验证基线，才允许进行一次正式测试评估。
 
+加入决赛训练会话的验证隔离命令：
+
+```powershell
+.\.venv\Scripts\python.exe -u python\train_export.py `
+  --dataset-dir IMU_Dataset\imu_dataset_for_final `
+  --extra-train-dir IMU_Dataset\finals_jumping_squat\train `
+  --external-holdout-dir IMU_Dataset\finals_jumping_squat\external_holdout `
+  --validation-only `
+  --window-seconds 2.5
+```
+
+分析训练/验证特征分离度：
+
+```powershell
+.\.venv\Scripts\python.exe python\analyze_feature_separability.py `
+  --dataset-dir IMU_Dataset\imu_dataset_for_final `
+  --extra-train-dir IMU_Dataset\finals_jumping_squat\train `
+  --validation-report outputs\round9_finals_event_validation_20260711\validation_report.json `
+  --output-json outputs\feature_separability.json `
+  --output-csv outputs\feature_separability_top.csv
+```
+
+分析器只读取训练/验证文件，输出 Fisher 分数、文件级 Fisher 分数、训练/验证同方向 Cohen's d，以及候选特征与现有特征的相关性。
+
 优化依据及方法取舍见 [docs/论文依据与优化取舍.md](docs/论文依据与优化取舍.md)。
 
 ## 输出文件
@@ -132,6 +176,8 @@ training_console.log
 - 当前最佳平铺 BP 使用 2.5 秒窗口，测试准确率 `94.61%`，宏平均 F1 `93.49%`。
 - 两项后续方案仅在验证集消融：320 维周期形状特征得到验证准确率 `90.33%`、宏平均 F1 `89.97%`、最小类别召回 `78.19%`；保重力动态强度增强得到 `90.68%`、`90.35%`、`78.76%`。二者均低于 264 维基线的 `91.63%`、`91.16%`、`79.92%`，未读取测试指标，也未进入正式模型。
 - 将原模型与动态增强模型做验证集 logits 加权融合后，最优权重仍为原模型 `100%`，因此未采用双 BP 部署。
+- 决赛数据扩展和事件特征也严格只做验证消融：264 维加 `scy1/scy2` 得到 `90.95%/90.68%/78.38%`；12 项事件候选得到 `92.31%/92.01%/78.76%`；按分离度精选 3 项后得到 `90.82%/90.41%/78.78%`。三组数字依次为验证准确率、宏平均 F1、最小类别召回，均未同时超过固定基线 `91.63%/91.16%/79.92%`，因此测试集和 `scy3` 都未读取。
+- 分离度分析表明 `event_gyro_vertical_correlation` 对四组易混动作最稳定；自由落体比例及最长连续比例主要区分 `jumping_squat` 与 `jumping_jack`；事件垂直跳变与现有特征相关系数为 `1.0`，属于重复特征。生产提取器因此恢复为 264 维，12 项候选只保留在分析工具中。
 
 当前最佳模型的未达标类别：
 
