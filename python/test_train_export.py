@@ -146,20 +146,42 @@ class TrainExportCoreTests(unittest.TestCase):
             atol=1e-6,
         )
 
-    def test_extract_features_returns_264_ordered_values_for_six_axis_window(self):
+    def test_extract_features_returns_276_ordered_values_for_six_axis_window(self):
         window = np.arange(62 * 6, dtype=np.float32).reshape(62, 6)
 
         features = te.extract_features(window)
 
         feature_names = te.build_feature_names()
-        self.assertEqual(features.shape, (264,))
-        self.assertEqual(len(feature_names), 264)
+        self.assertEqual(features.shape, (276,))
+        self.assertEqual(len(feature_names), 276)
         self.assertEqual(feature_names[112], "acc_vertical_phase0_mean")
         self.assertEqual(feature_names[160], "acc_vertical_high_activity_ratio")
         self.assertEqual(feature_names[184], "acc_vertical_normalized_phase0_mean")
         self.assertEqual(feature_names[232], "acc_vertical_q10")
+        self.assertEqual(
+            feature_names[264], "morph_acc_vertical_horizontal_energy_ratio"
+        )
+        self.assertEqual(
+            feature_names[-1], "impact_aligned_acc_horizontal_mag_phase3_mean"
+        )
         self.assertNotIn("acc_vertical_argmax_abs_position", feature_names)
         self.assertTrue(np.all(np.isfinite(features)))
+
+    def test_motion_morphology_features_ignore_circular_window_phase(self):
+        timeline = np.arange(63, dtype=np.float32)
+        window = np.zeros((63, 6), dtype=np.float32)
+        window[:, 0] = 40.0 * np.sin(2.0 * np.pi * timeline / 21.0)
+        window[:, 1] = 25.0 * np.cos(2.0 * np.pi * timeline / 21.0)
+        window[:, 3] = 0.15 * np.sin(2.0 * np.pi * timeline / 21.0)
+        window[:, 4] = 0.10 * np.cos(2.0 * np.pi * timeline / 21.0)
+        window[:, 5] = 1.0 + 0.55 * np.sin(2.0 * np.pi * timeline / 21.0)
+
+        original = te.motion_morphology_features(window)
+        shifted = te.motion_morphology_features(np.roll(window, 7, axis=0))
+
+        self.assertEqual(len(original), 12)
+        self.assertTrue(np.isfinite(original).all())
+        np.testing.assert_allclose(original, shifted, atol=2e-5, rtol=2e-5)
 
     def test_normalized_phase_features_ignore_offset_and_positive_scale(self):
         signal = np.linspace(-2.0, 3.0, 64, dtype=np.float32) ** 3
@@ -501,7 +523,7 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertEqual(metadata["ema_decay"], 0.9)
         self.assertEqual(metadata["label_smoothing"], 0.05)
 
-    def test_exported_header_contains_264_feature_pipeline_and_activity_thresholds(self):
+    def test_exported_header_contains_276_feature_pipeline_and_activity_thresholds(self):
         feature_names = te.build_feature_names()
         model = te.BPNet(input_dim=len(feature_names), class_count=3, dropout=0.0)
         result = {
@@ -523,13 +545,14 @@ class TrainExportCoreTests(unittest.TestCase):
             )
 
             header = header_path.read_text(encoding="utf-8")
-        self.assertIn("#define FEATURE_DIM 264", header)
+        self.assertIn("#define FEATURE_DIM 276", header)
         self.assertIn("REST_MOTION_THRESHOLD", header)
         self.assertIn("ACTIVE_POINT_THRESHOLD", header)
         self.assertIn("append_phase_features", header)
         self.assertIn("append_temporal_features", header)
         self.assertIn("append_normalized_phase_features", header)
         self.assertIn("append_impact_distribution_features", header)
+        self.assertIn("append_motion_morphology_features", header)
         self.assertIn("spectral_entropy", header)
         self.assertIn("gravity_norm", header)
         self.assertIn("bp_predict_from_window", header)

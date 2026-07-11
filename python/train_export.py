@@ -105,6 +105,20 @@ IMPACT_DISTRIBUTION_FEATURES = [
     "excess_kurtosis",
     "max_abs_diff",
 ]
+MOTION_MORPHOLOGY_FEATURE_NAMES = [
+    "morph_acc_vertical_horizontal_energy_ratio",
+    "morph_acc_gyro_horizontal_correlation",
+    "impact_aligned_acc_vertical_phase0_max_abs",
+    "impact_aligned_gyro_horizontal_mag_phase0_max_abs",
+    "impact_aligned_acc_horizontal_mag_phase0_max_abs",
+    "impact_aligned_gyro_vertical_phase1_max_abs",
+    "impact_aligned_acc_vertical_phase3_max_abs",
+    "impact_aligned_acc_horizontal_mag_phase3_max_abs",
+    "impact_aligned_gyro_horizontal_mag_phase3_max_abs",
+    "impact_aligned_gyro_vertical_phase2_mean",
+    "impact_aligned_gyro_vertical_phase3_mean",
+    "impact_aligned_acc_horizontal_mag_phase3_mean",
+]
 
 HIDDEN1 = 96
 HIDDEN2 = 64
@@ -618,6 +632,84 @@ def build_feature_series(window: np.ndarray) -> Dict[str, np.ndarray]:
     return series
 
 
+def _finite_ratio(numerator: float, denominator: float) -> float:
+    return numerator / denominator if abs(denominator) > 1e-12 else 0.0
+
+
+def _centered_correlation(left: np.ndarray, right: np.ndarray) -> float:
+    left_centered = np.asarray(left, dtype=np.float64) - float(np.mean(left))
+    right_centered = np.asarray(right, dtype=np.float64) - float(np.mean(right))
+    denominator = math.sqrt(
+        float(np.dot(left_centered, left_centered))
+        * float(np.dot(right_centered, right_centered))
+    )
+    return (
+        float(np.dot(left_centered, right_centered)) / denominator
+        if denominator > 1e-12
+        else 0.0
+    )
+
+
+def motion_morphology_features(window: np.ndarray) -> np.ndarray:
+    series = build_feature_series(window)
+    vertical = np.asarray(series["acc_vertical"], dtype=np.float32)
+    n = len(vertical)
+    if n == 0:
+        return np.zeros(len(MOTION_MORPHOLOGY_FEATURE_NAMES), dtype=np.float32)
+
+    circular_difference = np.abs(vertical - np.roll(vertical, 1))
+    impact_index = int(np.argmax(circular_difference))
+    alignment_shift = (3 * n) // 4 - impact_index
+    aligned: Dict[str, np.ndarray] = {}
+    for source in (
+        "acc_vertical",
+        "acc_horizontal_mag",
+        "gyro_vertical",
+        "gyro_horizontal_mag",
+    ):
+        values = np.asarray(series[source], dtype=np.float32)
+        centered = values - float(np.mean(values))
+        std = float(np.std(centered))
+        normalized = centered / std if std > 1e-6 else np.zeros_like(centered)
+        aligned[source] = np.roll(normalized, alignment_shift)
+
+    def phase_stat(source: str, phase: int, max_abs: bool) -> float:
+        values = aligned[source]
+        start = (phase * n) // 4
+        end = ((phase + 1) * n) // 4
+        segment = values[start:end]
+        return (
+            float(np.max(np.abs(segment)))
+            if max_abs
+            else float(np.mean(segment))
+        )
+
+    vertical_centered = vertical - float(np.mean(vertical))
+    horizontal = np.asarray(series["acc_horizontal_mag"], dtype=np.float32)
+    horizontal_centered = horizontal - float(np.mean(horizontal))
+    gyro_horizontal = np.asarray(series["gyro_horizontal_mag"], dtype=np.float32)
+    return np.asarray(
+        [
+            _finite_ratio(
+                float(np.dot(vertical_centered, vertical_centered)),
+                float(np.dot(horizontal_centered, horizontal_centered)),
+            ),
+            _centered_correlation(horizontal_centered, gyro_horizontal),
+            phase_stat("acc_vertical", 0, True),
+            phase_stat("gyro_horizontal_mag", 0, True),
+            phase_stat("acc_horizontal_mag", 0, True),
+            phase_stat("gyro_vertical", 1, True),
+            phase_stat("acc_vertical", 3, True),
+            phase_stat("acc_horizontal_mag", 3, True),
+            phase_stat("gyro_horizontal_mag", 3, True),
+            phase_stat("gyro_vertical", 2, False),
+            phase_stat("gyro_vertical", 3, False),
+            phase_stat("acc_horizontal_mag", 3, False),
+        ],
+        dtype=np.float32,
+    )
+
+
 def extract_features(window: np.ndarray) -> np.ndarray:
     data = np.asarray(window, dtype=np.float32)
     if data.ndim != 2 or data.shape[1] != 6:
@@ -635,6 +727,7 @@ def extract_features(window: np.ndarray) -> np.ndarray:
         features.extend(normalized_phase_features(series[source]))
     for source in PHASE_SOURCE_NAMES:
         features.extend(impact_distribution_features(series[source]))
+    features.extend(motion_morphology_features(data))
     return np.asarray(features, dtype=np.float32)
 
 
@@ -657,6 +750,7 @@ def build_feature_names() -> List[str]:
     for source in PHASE_SOURCE_NAMES:
         for feature in IMPACT_DISTRIBUTION_FEATURES:
             names.append(f"{source}_{feature}")
+    names.extend(MOTION_MORPHOLOGY_FEATURE_NAMES)
     return names
 
 
@@ -2021,6 +2115,123 @@ static inline void append_temporal_features(const float* x, int n, float* featur
     feature[(*idx)++] = (float)autocorr_peak_lag / (float)SAMPLE_RATE_HZ;
 }
 
+static inline float impact_aligned_phase_stat(
+    const float* x,
+    int n,
+    int alignment_shift,
+    int phase,
+    int use_max_abs
+) {
+    float sum = 0.0f;
+    float sum2 = 0.0f;
+    for (int i = 0; i < n; i++) {
+        sum += x[i];
+        sum2 += x[i] * x[i];
+    }
+    float mean = sum / (float)n;
+    float variance = sum2 / (float)n - mean * mean;
+    if (variance < 0.0f) variance = 0.0f;
+    float std = sqrtf(variance);
+    int start = (phase * n) / PHASE_SEGMENTS;
+    int end = ((phase + 1) * n) / PHASE_SEGMENTS;
+    float phase_sum = 0.0f;
+    float max_abs = 0.0f;
+    for (int aligned_index = start; aligned_index < end; aligned_index++) {
+        int source_index = aligned_index - alignment_shift;
+        while (source_index < 0) source_index += n;
+        while (source_index >= n) source_index -= n;
+        float normalized = std > 1e-6f ? (x[source_index] - mean) / std : 0.0f;
+        phase_sum += normalized;
+        float absolute = fabsf(normalized);
+        if (absolute > max_abs) max_abs = absolute;
+    }
+    return use_max_abs ? max_abs : phase_sum / (float)(end - start);
+}
+
+static inline void append_motion_morphology_features(
+    const float sources[4][WINDOW_LEN],
+    float* feature,
+    int* idx
+) {
+    const float* acc_vertical = sources[0];
+    const float* acc_horizontal = sources[1];
+    const float* gyro_vertical = sources[2];
+    const float* gyro_horizontal = sources[3];
+    int impact_index = 0;
+    float max_circular_difference = -1.0f;
+    for (int i = 0; i < WINDOW_LEN; i++) {
+        int previous = i == 0 ? WINDOW_LEN - 1 : i - 1;
+        float difference = fabsf(acc_vertical[i] - acc_vertical[previous]);
+        if (difference > max_circular_difference) {
+            max_circular_difference = difference;
+            impact_index = i;
+        }
+    }
+    int alignment_shift = (3 * WINDOW_LEN) / 4 - impact_index;
+
+    float acc_vertical_sum = 0.0f;
+    float acc_horizontal_sum = 0.0f;
+    float gyro_horizontal_sum = 0.0f;
+    for (int i = 0; i < WINDOW_LEN; i++) {
+        acc_vertical_sum += acc_vertical[i];
+        acc_horizontal_sum += acc_horizontal[i];
+        gyro_horizontal_sum += gyro_horizontal[i];
+    }
+    float acc_vertical_mean = acc_vertical_sum / (float)WINDOW_LEN;
+    float acc_horizontal_mean = acc_horizontal_sum / (float)WINDOW_LEN;
+    float gyro_horizontal_mean = gyro_horizontal_sum / (float)WINDOW_LEN;
+    float vertical_energy = 0.0f;
+    float horizontal_energy = 0.0f;
+    float gyro_horizontal_energy = 0.0f;
+    float horizontal_gyro_dot = 0.0f;
+    for (int i = 0; i < WINDOW_LEN; i++) {
+        float vertical = acc_vertical[i] - acc_vertical_mean;
+        float horizontal = acc_horizontal[i] - acc_horizontal_mean;
+        float gyro = gyro_horizontal[i] - gyro_horizontal_mean;
+        vertical_energy += vertical * vertical;
+        horizontal_energy += horizontal * horizontal;
+        gyro_horizontal_energy += gyro * gyro;
+        horizontal_gyro_dot += horizontal * gyro;
+    }
+    feature[(*idx)++] = horizontal_energy > 1e-12f
+        ? vertical_energy / horizontal_energy
+        : 0.0f;
+    float correlation_denominator = sqrtf(horizontal_energy * gyro_horizontal_energy);
+    feature[(*idx)++] = correlation_denominator > 1e-12f
+        ? horizontal_gyro_dot / correlation_denominator
+        : 0.0f;
+    feature[(*idx)++] = impact_aligned_phase_stat(
+        acc_vertical, WINDOW_LEN, alignment_shift, 0, 1
+    );
+    feature[(*idx)++] = impact_aligned_phase_stat(
+        gyro_horizontal, WINDOW_LEN, alignment_shift, 0, 1
+    );
+    feature[(*idx)++] = impact_aligned_phase_stat(
+        acc_horizontal, WINDOW_LEN, alignment_shift, 0, 1
+    );
+    feature[(*idx)++] = impact_aligned_phase_stat(
+        gyro_vertical, WINDOW_LEN, alignment_shift, 1, 1
+    );
+    feature[(*idx)++] = impact_aligned_phase_stat(
+        acc_vertical, WINDOW_LEN, alignment_shift, 3, 1
+    );
+    feature[(*idx)++] = impact_aligned_phase_stat(
+        acc_horizontal, WINDOW_LEN, alignment_shift, 3, 1
+    );
+    feature[(*idx)++] = impact_aligned_phase_stat(
+        gyro_horizontal, WINDOW_LEN, alignment_shift, 3, 1
+    );
+    feature[(*idx)++] = impact_aligned_phase_stat(
+        gyro_vertical, WINDOW_LEN, alignment_shift, 2, 0
+    );
+    feature[(*idx)++] = impact_aligned_phase_stat(
+        gyro_vertical, WINDOW_LEN, alignment_shift, 3, 0
+    );
+    feature[(*idx)++] = impact_aligned_phase_stat(
+        acc_horizontal, WINDOW_LEN, alignment_shift, 3, 0
+    );
+}
+
 static inline float bp_window_motion_score(const float window[WINDOW_LEN][AXIS_NUM]) {
     float gyro_sum = 0.0f;
     float gyro_sum2 = 0.0f;
@@ -2082,6 +2293,7 @@ static inline void extract_features_from_window(const float window[WINDOW_LEN][A
     int idx = 0;
     float temp[WINDOW_LEN];
     float phase_sources[4][WINDOW_LEN];
+    float morphology_sources[4][WINDOW_LEN];
     int phase_lengths[4] = { WINDOW_LEN, WINDOW_LEN, WINDOW_LEN, WINDOW_LEN - 1 };
 
     /* gx, gy, gz, ax, ay, az */
@@ -2161,6 +2373,7 @@ static inline void extract_features_from_window(const float window[WINDOW_LEN][A
             window[i][5] * gravity_z;
         temp[i] = vertical;
         phase_sources[0][i] = vertical;
+        morphology_sources[0][i] = vertical;
     }
     append_series_features(temp, WINDOW_LEN, feature, &idx);
 
@@ -2175,6 +2388,7 @@ static inline void extract_features_from_window(const float window[WINDOW_LEN][A
         if (horizontal_squared < 0.0f) horizontal_squared = 0.0f;
         temp[i] = sqrtf(horizontal_squared);
         phase_sources[1][i] = temp[i];
+        morphology_sources[1][i] = temp[i];
     }
     append_series_features(temp, WINDOW_LEN, feature, &idx);
 
@@ -2184,6 +2398,7 @@ static inline void extract_features_from_window(const float window[WINDOW_LEN][A
             window[i][0] * gravity_x +
             window[i][1] * gravity_y +
             window[i][2] * gravity_z;
+        morphology_sources[2][i] = temp[i];
     }
     append_series_features(temp, WINDOW_LEN, feature, &idx);
 
@@ -2200,6 +2415,7 @@ static inline void extract_features_from_window(const float window[WINDOW_LEN][A
         float horizontal_squared = total_squared - vertical * vertical;
         if (horizontal_squared < 0.0f) horizontal_squared = 0.0f;
         temp[i] = sqrtf(horizontal_squared);
+        morphology_sources[3][i] = temp[i];
     }
     append_series_features(temp, WINDOW_LEN, feature, &idx);
 
@@ -2223,6 +2439,7 @@ static inline void extract_features_from_window(const float window[WINDOW_LEN][A
             phase_sources[source], phase_lengths[source], feature, &idx
         );
     }
+    append_motion_morphology_features(morphology_sources, feature, &idx);
 }
 
 static inline float relu_float(float x) {

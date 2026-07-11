@@ -30,6 +30,117 @@ CANDIDATE_EVENT_FEATURE_NAMES = [
     "event_gyro_vertical_correlation",
     "event_post_takeoff_gyro_energy_ratio",
 ]
+MORPHOLOGY_SOURCE_NAMES = [
+    "acc_vertical",
+    "acc_horizontal_mag",
+    "gyro_vertical",
+    "gyro_horizontal_mag",
+]
+CANDIDATE_MORPHOLOGY_FEATURE_NAMES = [
+    f"impact_aligned_{source}_phase{phase}_{feature}"
+    for source in MORPHOLOGY_SOURCE_NAMES
+    for phase in range(4)
+    for feature in ("mean", "max_abs")
+] + [
+    "morph_vertical_positive_energy_ratio",
+    "morph_vertical_impulse_balance",
+    "morph_vertical_peak_balance",
+    "morph_vertical_extrema_circular_separation",
+    "morph_acc_vertical_horizontal_energy_ratio",
+    "morph_gyro_vertical_horizontal_energy_ratio",
+    "morph_acc_vertical_gyro_magnitude_correlation",
+    "morph_acc_gyro_horizontal_correlation",
+]
+
+
+def _safe_ratio(numerator: float, denominator: float) -> float:
+    return numerator / denominator if abs(denominator) > 1e-12 else 0.0
+
+
+def _safe_correlation(left: np.ndarray, right: np.ndarray) -> float:
+    left_centered = np.asarray(left, dtype=np.float64) - float(np.mean(left))
+    right_centered = np.asarray(right, dtype=np.float64) - float(np.mean(right))
+    denominator = math.sqrt(
+        float(np.dot(left_centered, left_centered))
+        * float(np.dot(right_centered, right_centered))
+    )
+    return (
+        float(np.dot(left_centered, right_centered)) / denominator
+        if denominator > 1e-12
+        else 0.0
+    )
+
+
+def candidate_morphology_features(window: np.ndarray) -> np.ndarray:
+    series = training.build_feature_series(window)
+    vertical = np.asarray(series["acc_vertical"], dtype=np.float32)
+    n = len(vertical)
+    if n == 0:
+        return np.zeros(len(CANDIDATE_MORPHOLOGY_FEATURE_NAMES), dtype=np.float32)
+
+    # Circular impact alignment preserves periodic motion shape while removing
+    # the arbitrary starting phase of overlapping inference windows.
+    circular_difference = np.abs(vertical - np.roll(vertical, 1))
+    impact_index = int(np.argmax(circular_difference))
+    target_index = (3 * n) // 4
+    alignment_shift = target_index - impact_index
+
+    result: List[float] = []
+    aligned_sources: Dict[str, np.ndarray] = {}
+    for source in MORPHOLOGY_SOURCE_NAMES:
+        values = np.asarray(series[source], dtype=np.float32)
+        centered = values - float(np.mean(values))
+        std = float(np.std(centered))
+        normalized = centered / std if std > 1e-6 else np.zeros_like(centered)
+        aligned = np.roll(normalized, alignment_shift)
+        aligned_sources[source] = aligned
+        for phase in range(4):
+            start = (phase * n) // 4
+            end = ((phase + 1) * n) // 4
+            segment = aligned[start:end]
+            result.extend([float(np.mean(segment)), float(np.max(np.abs(segment)))])
+
+    vertical_centered = vertical - float(np.mean(vertical))
+    vertical_positive = vertical_centered[vertical_centered > 0.0]
+    vertical_negative = vertical_centered[vertical_centered < 0.0]
+    positive_energy = float(np.dot(vertical_positive, vertical_positive))
+    negative_energy = float(np.dot(vertical_negative, vertical_negative))
+    positive_impulse = float(np.sum(vertical_positive))
+    negative_impulse = abs(float(np.sum(vertical_negative)))
+    vertical_max = float(np.max(vertical_centered))
+    vertical_min = abs(float(np.min(vertical_centered)))
+    aligned_vertical = aligned_sources["acc_vertical"]
+    max_index = int(np.argmax(aligned_vertical))
+    min_index = int(np.argmin(aligned_vertical))
+    extrema_distance = abs(max_index - min_index)
+    circular_distance = min(extrema_distance, n - extrema_distance) / float(n)
+
+    acc_horizontal = np.asarray(series["acc_horizontal_mag"], dtype=np.float32)
+    gyro_vertical = np.asarray(series["gyro_vertical"], dtype=np.float32)
+    gyro_horizontal = np.asarray(series["gyro_horizontal_mag"], dtype=np.float32)
+    gyro_magnitude = np.asarray(series["gyro_mag"], dtype=np.float32)
+    acc_horizontal_centered = acc_horizontal - float(np.mean(acc_horizontal))
+    gyro_vertical_centered = gyro_vertical - float(np.mean(gyro_vertical))
+    gyro_horizontal_centered = gyro_horizontal - float(np.mean(gyro_horizontal))
+    result.extend(
+        [
+            _safe_ratio(positive_energy, positive_energy + negative_energy),
+            _safe_ratio(positive_impulse, negative_impulse),
+            _safe_ratio(vertical_max, vertical_min),
+            circular_distance,
+            _safe_ratio(
+                float(np.dot(vertical_centered, vertical_centered)),
+                float(np.dot(acc_horizontal_centered, acc_horizontal_centered)),
+            ),
+            _safe_ratio(
+                float(np.dot(gyro_vertical_centered, gyro_vertical_centered)),
+                float(np.dot(gyro_horizontal_centered, gyro_horizontal_centered)),
+            ),
+            _safe_correlation(vertical_centered, gyro_magnitude),
+            _safe_correlation(acc_horizontal_centered, gyro_horizontal_centered),
+        ]
+    )
+    return np.asarray(result, dtype=np.float32)
 
 
 def candidate_event_features(window: np.ndarray) -> np.ndarray:
@@ -165,7 +276,11 @@ def build_analysis_samples(
                 continue
             features.append(
                 np.concatenate(
-                    [training.extract_features(window), candidate_event_features(window)]
+                    [
+                        training.extract_features(window),
+                        candidate_event_features(window),
+                        candidate_morphology_features(window),
+                    ]
                 )
             )
             labels.append(record.label_idx)
@@ -188,6 +303,7 @@ def build_analysis_samples(
                         [
                             training.extract_features(selected_window),
                             candidate_event_features(selected_window),
+                            candidate_morphology_features(selected_window),
                         ]
                     )
                 )
@@ -348,7 +464,11 @@ def main() -> None:
     )
 
     production_feature_names = training.build_feature_names()
-    feature_names = production_feature_names + CANDIDATE_EVENT_FEATURE_NAMES
+    feature_names = (
+        production_feature_names
+        + CANDIDATE_EVENT_FEATURE_NAMES
+        + CANDIDATE_MORPHOLOGY_FEATURE_NAMES
+    )
     train_fisher = fisher_scores(train_x, train_y)
     val_fisher = fisher_scores(val_x, val_y)
     file_train_x, file_train_y = aggregate_file_medians(train_x, train_y, train_file_ids)
@@ -362,7 +482,9 @@ def main() -> None:
     pair_classes = args.pair_classes or DEFAULT_PAIR_CLASSES
     pair_reports: Dict[str, object] = {}
     event_start = len(production_feature_names)
-    event_indices = list(range(event_start, len(feature_names)))
+    morphology_start = event_start + len(CANDIDATE_EVENT_FEATURE_NAMES)
+    event_indices = list(range(event_start, morphology_start))
+    morphology_indices = list(range(morphology_start, len(feature_names)))
     for pair_class in pair_classes:
         other_idx = label_to_idx[pair_class]
         stable, train_effect, val_effect = stable_pair_effect(
@@ -391,6 +513,15 @@ def main() -> None:
             "event_features_stable_ge_0_5": int(
                 np.sum(stable[event_indices] >= 0.5)
             ),
+            "morphology_features": [
+                effect_record(i)
+                for i in sorted(
+                    morphology_indices, key=lambda item: stable[item], reverse=True
+                )
+            ],
+            "morphology_features_stable_ge_0_5": int(
+                np.sum(stable[morphology_indices] >= 0.5)
+            ),
         }
 
     correlation = np.corrcoef(train_x, rowvar=False)
@@ -399,6 +530,20 @@ def main() -> None:
         prior_correlations = np.abs(correlation[index, :event_start])
         finite_correlations = prior_correlations[np.isfinite(prior_correlations)]
         event_novelty.append(
+            {
+                "index": index,
+                "name": feature_names[index],
+                "max_abs_correlation_with_prior_features": float(
+                    np.max(finite_correlations) if len(finite_correlations) else 0.0
+                ),
+            }
+        )
+
+    morphology_novelty = []
+    for index in morphology_indices:
+        prior_correlations = np.abs(correlation[index, :morphology_start])
+        finite_correlations = prior_correlations[np.isfinite(prior_correlations)]
+        morphology_novelty.append(
             {
                 "index": index,
                 "name": feature_names[index],
@@ -430,6 +575,19 @@ def main() -> None:
         )
         for index in sorted(event_indices, key=lambda item: stable_fisher[item], reverse=True)
     ]
+    morphology_features = [
+        feature_record(
+            index,
+            feature_names,
+            train_fisher,
+            val_fisher,
+            file_train_fisher,
+            file_val_fisher,
+        )
+        for index in sorted(
+            morphology_indices, key=lambda item: stable_fisher[item], reverse=True
+        )
+    ]
     result = {
         "scope": "train_validation_only",
         "test_read": False,
@@ -438,6 +596,7 @@ def main() -> None:
         "class_names": class_names,
         "feature_count": len(feature_names),
         "event_feature_count": len(event_indices),
+        "morphology_feature_count": len(morphology_indices),
         "train_window_count": len(train_x),
         "val_window_count": len(val_x),
         "train_file_count": len(train_records),
@@ -447,6 +606,8 @@ def main() -> None:
         "top_features": top_features,
         "event_features": event_features,
         "event_novelty": event_novelty,
+        "morphology_features": morphology_features,
+        "morphology_novelty": morphology_novelty,
         "target_pair_effects": pair_reports,
     }
     args.output_json.parent.mkdir(parents=True, exist_ok=True)

@@ -6,6 +6,25 @@ from python import analyze_feature_separability as analysis
 
 
 class FeatureSeparabilityTests(unittest.TestCase):
+    def test_candidate_morphology_features_are_shift_invariant_and_finite(self) -> None:
+        timeline = np.arange(63, dtype=np.float32)
+        window = np.zeros((63, 6), dtype=np.float32)
+        window[:, 0] = 40.0 * np.sin(2.0 * np.pi * timeline / 21.0)
+        window[:, 1] = 25.0 * np.cos(2.0 * np.pi * timeline / 21.0)
+        window[:, 3] = 0.15 * np.sin(2.0 * np.pi * timeline / 21.0)
+        window[:, 4] = 0.10 * np.cos(2.0 * np.pi * timeline / 21.0)
+        window[:, 5] = 1.0 + 0.55 * np.sin(2.0 * np.pi * timeline / 21.0)
+
+        original = analysis.candidate_morphology_features(window)
+        shifted = analysis.candidate_morphology_features(np.roll(window, 7, axis=0))
+
+        self.assertEqual(
+            len(original), len(analysis.CANDIDATE_MORPHOLOGY_FEATURE_NAMES)
+        )
+        self.assertEqual(len(original), 40)
+        self.assertTrue(np.isfinite(original).all())
+        np.testing.assert_allclose(original, shifted, atol=2e-5, rtol=2e-5)
+
     def test_candidate_event_features_are_finite_and_complete(self) -> None:
         window = np.zeros((62, 6), dtype=np.float32)
         window[:, 0] = np.linspace(0.0, 100.0, 62)
