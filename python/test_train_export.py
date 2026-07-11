@@ -68,6 +68,38 @@ class TrainExportCoreTests(unittest.TestCase):
             Path("IMU_Dataset/finals/external_holdout"),
         )
 
+    def test_parse_args_accepts_valid_ema_decay(self):
+        with mock.patch.object(
+            sys,
+            "argv",
+            ["train_export.py", "--ema-decay", "0.9"],
+        ):
+            args = te.parse_args()
+
+        self.assertEqual(args.ema_decay, 0.9)
+
+    def test_ema_decay_rejects_values_outside_zero_to_one(self):
+        for value in ("-0.1", "1.0"):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    te.parse_ema_decay(value)
+
+    def test_update_ema_state_averages_floating_parameters(self):
+        previous = {
+            "weight": torch.tensor([2.0, 4.0]),
+            "step": torch.tensor(3, dtype=torch.int64),
+        }
+        current = {
+            "weight": torch.tensor([6.0, 8.0]),
+            "step": torch.tensor(4, dtype=torch.int64),
+        }
+
+        updated = te.update_ema_state(previous, current, decay=0.75)
+
+        torch.testing.assert_close(updated["weight"], torch.tensor([3.0, 5.0]))
+        self.assertEqual(int(updated["step"]), 4)
+        self.assertIsNot(updated["weight"], current["weight"])
+
     def test_convert_raw_imu_units_uses_plan_scales(self):
         raw = np.array([[16.4, -32.8, 49.2, 4096.0, -8192.0, 2048.0, 0.0, 0.0]])
 
@@ -422,7 +454,7 @@ class TrainExportCoreTests(unittest.TestCase):
         output = io.StringIO()
         try:
             with contextlib.redirect_stdout(output):
-                te.train_model(
+                model, metadata = te.train_model(
                     train_x,
                     train_y,
                     train_file_ids,
@@ -431,6 +463,7 @@ class TrainExportCoreTests(unittest.TestCase):
                     class_names=class_names,
                     device=torch.device("cpu"),
                     progress_label="window=test",
+                    ema_decay=0.9,
                 )
         finally:
             te.MAX_EPOCHS = old_max_epochs
@@ -441,10 +474,13 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertIn("ce=", log)
         self.assertIn("supcon=", log)
         self.assertIn("margin=", log)
+        self.assertIn("ema=0.900", log)
         self.assertIn("val_weak_f1=", log)
         self.assertIn("val_worst_f1=", log)
         self.assertIn("val_weak_recall=", log)
         self.assertIn("val_min_recall=", log)
+        self.assertIsInstance(model, te.BPNet)
+        self.assertEqual(metadata["ema_decay"], 0.9)
 
     def test_exported_header_contains_264_feature_pipeline_and_activity_thresholds(self):
         feature_names = te.build_feature_names()

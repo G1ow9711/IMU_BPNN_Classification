@@ -208,6 +208,27 @@ def set_seed(seed: int) -> None:
     torch.backends.cudnn.benchmark = False
 
 
+def update_ema_state(
+    previous_state: Optional[Dict[str, torch.Tensor]],
+    current_state: Dict[str, torch.Tensor],
+    decay: float,
+) -> Dict[str, torch.Tensor]:
+    if not 0.0 <= decay < 1.0:
+        raise ValueError("EMA decay must be in [0, 1)")
+    if previous_state is None or decay == 0.0:
+        return {name: value.detach().clone() for name, value in current_state.items()}
+    updated: Dict[str, torch.Tensor] = {}
+    for name, current_value in current_state.items():
+        if torch.is_floating_point(current_value):
+            updated[name] = (
+                previous_state[name] * decay
+                + current_value.detach() * (1.0 - decay)
+            ).clone()
+        else:
+            updated[name] = current_value.detach().clone()
+    return updated
+
+
 def resolve_dataset_dir(dataset_dir: Optional[Path]) -> Path:
     candidates = []
     if dataset_dir is not None:
@@ -1038,9 +1059,14 @@ def train_model(
     class_names: Sequence[str],
     device: torch.device,
     progress_label: str = "",
+    ema_decay: float = 0.0,
 ) -> Tuple[BPNet, Dict[str, object]]:
+    if not 0.0 <= ema_decay < 1.0:
+        raise ValueError("EMA decay must be in [0, 1)")
     class_count = len(class_names)
     model = BPNet(train_x.shape[1], class_count).to(device)
+    ema_model = copy.deepcopy(model).to(device) if ema_decay > 0.0 else None
+    ema_state: Optional[Dict[str, torch.Tensor]] = None
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
     loader = make_loader(
@@ -1089,7 +1115,22 @@ def train_model(
             margin_sum += float(margin_loss.item()) * len(batch_x)
             seen += len(batch_x)
 
-        val_acc, val_f1, val_pred = evaluate(model, val_x, val_y, device)
+        if ema_model is not None:
+            ema_state = update_ema_state(
+                ema_state,
+                model.state_dict(),
+                ema_decay,
+            )
+            ema_model.load_state_dict(ema_state)
+            evaluation_model = ema_model
+        else:
+            evaluation_model = model
+        val_acc, val_f1, val_pred = evaluate(
+            evaluation_model,
+            val_x,
+            val_y,
+            device,
+        )
         val_weak_f1, val_worst_f1 = weak_and_worst_f1(
             val_y, val_pred, class_names
         )
@@ -1123,7 +1164,7 @@ def train_model(
         )
         if score > best_score:
             best_score = score
-            best_state = copy.deepcopy(model.state_dict())
+            best_state = copy.deepcopy(evaluation_model.state_dict())
             best_epoch = epoch
             patience_left = PATIENCE
         else:
@@ -1132,6 +1173,7 @@ def train_model(
         print(
             f"{label}epoch={epoch:03d} loss={avg_loss:.4f} "
             f"ce={avg_ce:.4f} supcon={avg_supcon:.4f} margin={avg_margin:.4f} "
+            f"ema={ema_decay:.3f} "
             f"val_acc={val_acc:.4f} val_f1={val_f1:.4f} "
             f"val_weak_f1={val_weak_f1:.4f} val_worst_f1={val_worst_f1:.4f} "
             f"val_weak_recall={val_weak_recall:.4f} val_min_recall={val_min_recall:.4f} "
@@ -1142,7 +1184,11 @@ def train_model(
             break
 
     model.load_state_dict(best_state)
-    return model, {"best_epoch": best_epoch, "history": history}
+    return model, {
+        "best_epoch": best_epoch,
+        "ema_decay": ema_decay,
+        "history": history,
+    }
 
 
 def train_family_specialist(
@@ -1263,6 +1309,7 @@ def train_one_experiment(
     enable_family_specialist: bool = False,
     validation_only: bool = False,
     extra_train_records: Sequence[ImuRecord] = (),
+    ema_decay: float = 0.0,
 ) -> Dict[str, object]:
     if validation_only and enable_family_specialist:
         raise ValueError("Family specialist is not supported in validation-only mode")
@@ -1333,6 +1380,7 @@ def train_one_experiment(
             class_names,
             device,
             progress_label=f"window={window_seconds:.1f}s",
+            ema_decay=ema_decay,
         )
     else:
         model, mean, std = load_primary_artifacts(
@@ -1458,6 +1506,7 @@ def train_one_experiment(
         "step_len": step_len,
         "rest_threshold": rest_threshold,
         "active_point_threshold": active_point_threshold,
+        "ema_decay": ema_decay,
         "model": model,
         "specialist_model": specialist_model,
         "specialist_mean": specialist_mean,
@@ -2297,6 +2346,7 @@ def serializable_experiment(result: Dict[str, object]) -> Dict[str, object]:
         "step_len",
         "rest_threshold",
         "active_point_threshold",
+        "ema_decay",
         "val_acc",
         "val_f1",
         "val_weak_recall",
@@ -2399,6 +2449,9 @@ def save_outputs(
         "active_point_threshold": np.asarray(
             [float(best_result["active_point_threshold"])], dtype=np.float32
         ),
+        "ema_decay": np.asarray(
+            [float(best_result.get("ema_decay", 0.0))], dtype=np.float32
+        ),
     }
     if isinstance(specialist_model, BPNet):
         scaler_config.update(
@@ -2496,6 +2549,9 @@ def save_validation_outputs(
         active_point_threshold=np.asarray(
             [float(best_result["active_point_threshold"])], dtype=np.float32
         ),
+        ema_decay=np.asarray(
+            [float(best_result.get("ema_decay", 0.0))], dtype=np.float32
+        ),
     )
     validation_keys = {
         "window_seconds",
@@ -2503,6 +2559,7 @@ def save_validation_outputs(
         "step_len",
         "rest_threshold",
         "active_point_threshold",
+        "ema_decay",
         "val_acc",
         "val_f1",
         "val_weak_recall",
@@ -2545,6 +2602,13 @@ def save_validation_outputs(
         json.dump(report, file, ensure_ascii=False, indent=2)
 
 
+def parse_ema_decay(value: str) -> float:
+    decay = float(value)
+    if not 0.0 <= decay < 1.0:
+        raise ValueError("EMA decay must be in [0, 1)")
+    return decay
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train IMU BP model and export ESP32 header.")
     parser.add_argument("--dataset-dir", type=Path, default=None)
@@ -2566,6 +2630,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=SEED)
     parser.add_argument("--export-when-below-target", action="store_true")
     parser.add_argument("--max-epochs", type=int, default=MAX_EPOCHS)
+    parser.add_argument(
+        "--ema-decay",
+        type=parse_ema_decay,
+        default=0.0,
+        help="Epoch-level BP parameter EMA decay; 0 disables EMA.",
+    )
     parser.add_argument(
         "--window-seconds",
         type=float,
@@ -2605,6 +2675,7 @@ def main() -> None:
         f"window_seconds={args.window_seconds} augment_times={AUGMENT_TIMES} "
         f"max_rotation_degrees={MAX_ROTATION_DEGREES:.1f} "
         f"supcon_weight={SUPCON_WEIGHT:.3f} hard_pair_weight={HARD_PAIR_WEIGHT:.3f} "
+        f"ema_decay={args.ema_decay:.3f} "
         f"family_specialist={args.enable_family_specialist} "
         f"validation_only={args.validation_only}"
     )
@@ -2621,6 +2692,7 @@ def main() -> None:
             enable_family_specialist=args.enable_family_specialist,
             validation_only=args.validation_only,
             extra_train_records=extra_train_records,
+            ema_decay=args.ema_decay,
         )
         all_results.append(result)
 
