@@ -105,6 +105,20 @@ IMPACT_DISTRIBUTION_FEATURES = [
     "excess_kurtosis",
     "max_abs_diff",
 ]
+EVENT_FEATURE_NAMES = [
+    "event_takeoff_position",
+    "event_landing_position",
+    "event_takeoff_to_landing_interval",
+    "event_landing_to_takeoff_peak_ratio",
+    "event_free_flight_ratio",
+    "event_longest_free_flight_run_ratio",
+    "event_vertical_diff_max_abs",
+    "event_vertical_diff_peak_position",
+    "event_gyro_peak_position",
+    "event_gyro_to_landing_peak_lag",
+    "event_gyro_vertical_correlation",
+    "event_post_takeoff_gyro_energy_ratio",
+]
 
 HIDDEN1 = 96
 HIDDEN2 = 64
@@ -597,6 +611,99 @@ def build_feature_series(window: np.ndarray) -> Dict[str, np.ndarray]:
     return series
 
 
+def event_features(window: np.ndarray) -> List[float]:
+    series = build_feature_series(window)
+    vertical = np.asarray(series["acc_vertical"], dtype=np.float32)
+    acc_mag = np.asarray(series["acc_mag"], dtype=np.float32)
+    gyro_mag = np.asarray(series["gyro_mag"], dtype=np.float32)
+    n = len(vertical)
+    if n == 0:
+        return [0.0] * len(EVENT_FEATURE_NAMES)
+    position_denominator = float(max(n - 1, 1))
+
+    takeoff_index = int(np.argmin(vertical))
+    takeoff_position = takeoff_index / position_denominator
+    has_landing = takeoff_index + 1 < n
+    if has_landing:
+        landing_index = takeoff_index + 1 + int(
+            np.argmax(vertical[takeoff_index + 1 :])
+        )
+        landing_position = landing_index / position_denominator
+        takeoff_to_landing = (landing_index - takeoff_index) / position_denominator
+        takeoff_peak = abs(float(vertical[takeoff_index]))
+        landing_peak_ratio = (
+            abs(float(vertical[landing_index])) / takeoff_peak
+            if takeoff_peak > 1e-6
+            else 0.0
+        )
+    else:
+        landing_index = 0
+        landing_position = 0.0
+        takeoff_to_landing = 0.0
+        landing_peak_ratio = 0.0
+
+    free_flight = acc_mag < 0.70
+    free_flight_ratio = float(np.mean(free_flight))
+    longest_run = 0
+    current_run = 0
+    for is_free_flight in free_flight.tolist():
+        current_run = current_run + 1 if is_free_flight else 0
+        longest_run = max(longest_run, current_run)
+    longest_free_flight_run_ratio = longest_run / float(n)
+
+    if n > 1:
+        vertical_diff = np.abs(np.diff(vertical))
+        vertical_diff_index = int(np.argmax(vertical_diff))
+        vertical_diff_max = float(vertical_diff[vertical_diff_index])
+        vertical_diff_position = (vertical_diff_index + 1) / position_denominator
+    else:
+        vertical_diff_max = 0.0
+        vertical_diff_position = 0.0
+
+    gyro_peak_index = int(np.argmax(gyro_mag))
+    gyro_peak_position = gyro_peak_index / position_denominator
+    gyro_to_landing_lag = (
+        (gyro_peak_index - landing_index) / position_denominator
+        if has_landing
+        else 0.0
+    )
+
+    centered_gyro = gyro_mag - float(np.mean(gyro_mag))
+    centered_vertical = vertical - float(np.mean(vertical))
+    correlation_denominator = math.sqrt(
+        float(np.dot(centered_gyro, centered_gyro))
+        * float(np.dot(centered_vertical, centered_vertical))
+    )
+    gyro_vertical_correlation = (
+        float(np.dot(centered_gyro, centered_vertical)) / correlation_denominator
+        if correlation_denominator > 1e-12
+        else 0.0
+    )
+
+    total_gyro_energy = float(np.dot(gyro_mag, gyro_mag))
+    post_takeoff_gyro_energy_ratio = (
+        float(np.dot(gyro_mag[takeoff_index + 1 :], gyro_mag[takeoff_index + 1 :]))
+        / total_gyro_energy
+        if has_landing and total_gyro_energy > 1e-12
+        else 0.0
+    )
+
+    return [
+        takeoff_position,
+        landing_position,
+        takeoff_to_landing,
+        landing_peak_ratio,
+        free_flight_ratio,
+        longest_free_flight_run_ratio,
+        vertical_diff_max,
+        vertical_diff_position,
+        gyro_peak_position,
+        gyro_to_landing_lag,
+        gyro_vertical_correlation,
+        post_takeoff_gyro_energy_ratio,
+    ]
+
+
 def extract_features(window: np.ndarray) -> np.ndarray:
     data = np.asarray(window, dtype=np.float32)
     if data.ndim != 2 or data.shape[1] != 6:
@@ -614,6 +721,7 @@ def extract_features(window: np.ndarray) -> np.ndarray:
         features.extend(normalized_phase_features(series[source]))
     for source in PHASE_SOURCE_NAMES:
         features.extend(impact_distribution_features(series[source]))
+    features.extend(event_features(data))
     return np.asarray(features, dtype=np.float32)
 
 
@@ -636,6 +744,7 @@ def build_feature_names() -> List[str]:
     for source in PHASE_SOURCE_NAMES:
         for feature in IMPACT_DISTRIBUTION_FEATURES:
             names.append(f"{source}_{feature}")
+    names.extend(EVENT_FEATURE_NAMES)
     return names
 
 
@@ -1862,6 +1971,135 @@ static inline void append_impact_distribution_features(const float* x, int n, fl
     feature[(*idx)++] = max_abs_diff;
 }
 
+static inline void append_event_features(
+    const float* acc_vertical,
+    const float* acc_mag,
+    const float* gyro_mag,
+    int n,
+    float* feature,
+    int* idx
+) {
+    float position_denominator = (float)(n > 1 ? n - 1 : 1);
+
+    int takeoff_index = 0;
+    for (int i = 1; i < n; i++) {
+        if (acc_vertical[i] < acc_vertical[takeoff_index]) takeoff_index = i;
+    }
+    float takeoff_position = (float)takeoff_index / position_denominator;
+
+    int has_landing = takeoff_index + 1 < n;
+    int landing_index = 0;
+    float landing_position = 0.0f;
+    float takeoff_to_landing = 0.0f;
+    float landing_peak_ratio = 0.0f;
+    if (has_landing) {
+        landing_index = takeoff_index + 1;
+        for (int i = takeoff_index + 2; i < n; i++) {
+            if (acc_vertical[i] > acc_vertical[landing_index]) landing_index = i;
+        }
+        landing_position = (float)landing_index / position_denominator;
+        takeoff_to_landing =
+            (float)(landing_index - takeoff_index) / position_denominator;
+        float takeoff_peak = fabsf(acc_vertical[takeoff_index]);
+        if (takeoff_peak > 1e-6f) {
+            landing_peak_ratio = fabsf(acc_vertical[landing_index]) / takeoff_peak;
+        }
+    }
+
+    int free_flight_count = 0;
+    int longest_free_flight_run = 0;
+    int current_free_flight_run = 0;
+    for (int i = 0; i < n; i++) {
+        if (acc_mag[i] < 0.70f) {
+            free_flight_count++;
+            current_free_flight_run++;
+            if (current_free_flight_run > longest_free_flight_run) {
+                longest_free_flight_run = current_free_flight_run;
+            }
+        } else {
+            current_free_flight_run = 0;
+        }
+    }
+    float free_flight_ratio = (float)free_flight_count / (float)n;
+    float longest_free_flight_run_ratio =
+        (float)longest_free_flight_run / (float)n;
+
+    float vertical_diff_max = 0.0f;
+    float vertical_diff_position = 0.0f;
+    if (n > 1) {
+        int vertical_diff_index = 0;
+        vertical_diff_max = fabsf(acc_vertical[1] - acc_vertical[0]);
+        for (int i = 1; i < n - 1; i++) {
+            float difference = fabsf(acc_vertical[i + 1] - acc_vertical[i]);
+            if (difference > vertical_diff_max) {
+                vertical_diff_max = difference;
+                vertical_diff_index = i;
+            }
+        }
+        vertical_diff_position =
+            (float)(vertical_diff_index + 1) / position_denominator;
+    }
+
+    int gyro_peak_index = 0;
+    for (int i = 1; i < n; i++) {
+        if (gyro_mag[i] > gyro_mag[gyro_peak_index]) gyro_peak_index = i;
+    }
+    float gyro_peak_position = (float)gyro_peak_index / position_denominator;
+    float gyro_to_landing_lag = has_landing
+        ? (float)(gyro_peak_index - landing_index) / position_denominator
+        : 0.0f;
+
+    float gyro_sum = 0.0f;
+    float vertical_sum = 0.0f;
+    for (int i = 0; i < n; i++) {
+        gyro_sum += gyro_mag[i];
+        vertical_sum += acc_vertical[i];
+    }
+    float gyro_mean = gyro_sum / (float)n;
+    float vertical_mean = vertical_sum / (float)n;
+    float correlation_numerator = 0.0f;
+    float centered_gyro_energy = 0.0f;
+    float centered_vertical_energy = 0.0f;
+    for (int i = 0; i < n; i++) {
+        float centered_gyro = gyro_mag[i] - gyro_mean;
+        float centered_vertical = acc_vertical[i] - vertical_mean;
+        correlation_numerator += centered_gyro * centered_vertical;
+        centered_gyro_energy += centered_gyro * centered_gyro;
+        centered_vertical_energy += centered_vertical * centered_vertical;
+    }
+    float correlation_denominator = sqrtf(
+        centered_gyro_energy * centered_vertical_energy
+    );
+    float gyro_vertical_correlation = correlation_denominator > 1e-12f
+        ? correlation_numerator / correlation_denominator
+        : 0.0f;
+
+    float total_gyro_energy = 0.0f;
+    float post_takeoff_gyro_energy = 0.0f;
+    for (int i = 0; i < n; i++) {
+        float energy = gyro_mag[i] * gyro_mag[i];
+        total_gyro_energy += energy;
+        if (i > takeoff_index) post_takeoff_gyro_energy += energy;
+    }
+    float post_takeoff_gyro_energy_ratio =
+        has_landing && total_gyro_energy > 1e-12f
+            ? post_takeoff_gyro_energy / total_gyro_energy
+            : 0.0f;
+
+    feature[(*idx)++] = takeoff_position;
+    feature[(*idx)++] = landing_position;
+    feature[(*idx)++] = takeoff_to_landing;
+    feature[(*idx)++] = landing_peak_ratio;
+    feature[(*idx)++] = free_flight_ratio;
+    feature[(*idx)++] = longest_free_flight_run_ratio;
+    feature[(*idx)++] = vertical_diff_max;
+    feature[(*idx)++] = vertical_diff_position;
+    feature[(*idx)++] = gyro_peak_position;
+    feature[(*idx)++] = gyro_to_landing_lag;
+    feature[(*idx)++] = gyro_vertical_correlation;
+    feature[(*idx)++] = post_takeoff_gyro_energy_ratio;
+}
+
 static inline void append_temporal_features(const float* x, int n, float* feature, int* idx) {
     float sum = 0.0f;
     float sum2 = 0.0f;
@@ -2024,6 +2262,8 @@ static inline int bp_window_is_dynamic_candidate(const float window[WINDOW_LEN][
 static inline void extract_features_from_window(const float window[WINDOW_LEN][AXIS_NUM], float feature[FEATURE_DIM]) {
     int idx = 0;
     float temp[WINDOW_LEN];
+    float event_gyro_mag[WINDOW_LEN];
+    float event_acc_mag[WINDOW_LEN];
     float phase_sources[4][WINDOW_LEN];
     int phase_lengths[4] = { WINDOW_LEN, WINDOW_LEN, WINDOW_LEN, WINDOW_LEN - 1 };
 
@@ -2039,6 +2279,7 @@ static inline void extract_features_from_window(const float window[WINDOW_LEN][A
         float gy = window[i][1];
         float gz = window[i][2];
         temp[i] = sqrtf(gx * gx + gy * gy + gz * gz);
+        event_gyro_mag[i] = temp[i];
         phase_sources[2][i] = temp[i];
     }
     append_series_features(temp, WINDOW_LEN, feature, &idx);
@@ -2049,6 +2290,7 @@ static inline void extract_features_from_window(const float window[WINDOW_LEN][A
         float ay = window[i][4];
         float az = window[i][5];
         temp[i] = sqrtf(ax * ax + ay * ay + az * az);
+        event_acc_mag[i] = temp[i];
     }
     append_series_features(temp, WINDOW_LEN, feature, &idx);
 
@@ -2166,6 +2408,10 @@ static inline void extract_features_from_window(const float window[WINDOW_LEN][A
             phase_sources[source], phase_lengths[source], feature, &idx
         );
     }
+    append_event_features(
+        phase_sources[0], event_acc_mag, event_gyro_mag,
+        WINDOW_LEN, feature, &idx
+    );
 }
 
 static inline float relu_float(float x) {
