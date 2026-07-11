@@ -48,6 +48,26 @@ class TrainExportCoreTests(unittest.TestCase):
 
         self.assertTrue(args.validation_only)
 
+    def test_parse_args_accepts_additional_dataset_directories(self):
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "train_export.py",
+                "--extra-train-dir",
+                "IMU_Dataset/finals/train",
+                "--external-holdout-dir",
+                "IMU_Dataset/finals/external_holdout",
+            ],
+        ):
+            args = te.parse_args()
+
+        self.assertEqual(args.extra_train_dir, Path("IMU_Dataset/finals/train"))
+        self.assertEqual(
+            args.external_holdout_dir,
+            Path("IMU_Dataset/finals/external_holdout"),
+        )
+
     def test_convert_raw_imu_units_uses_plan_scales(self):
         raw = np.array([[16.4, -32.8, 49.2, 4096.0, -8192.0, 2048.0, 0.0, 0.0]])
 
@@ -56,6 +76,24 @@ class TrainExportCoreTests(unittest.TestCase):
         np.testing.assert_allclose(
             converted[0],
             np.array([1.0, -2.0, 3.0, 1.0, -2.0, 0.5]),
+            rtol=1e-6,
+            atol=1e-6,
+        )
+
+    def test_load_imu_file_accepts_trailing_comma(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "finals.txt"
+            path.write_text(
+                "164,328,-164,4096,0,-4096,1025,\n",
+                encoding="utf-8",
+            )
+
+            loaded = te.load_imu_file(path)
+
+        self.assertEqual(loaded.shape, (1, 6))
+        np.testing.assert_allclose(
+            loaded[0],
+            np.array([10.0, 20.0, -10.0, 1.0, 0.0, -1.0]),
             rtol=1e-6,
             atol=1e-6,
         )
@@ -120,6 +158,116 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertTrue(split_paths[0].isdisjoint(split_paths[2]))
         self.assertTrue(split_paths[1].isdisjoint(split_paths[2]))
         self.assertEqual(sum(len(paths) for paths in split_paths), len(records))
+
+    def test_scan_labeled_dataset_uses_existing_class_map(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            action_dir = root / "jumping_squat"
+            action_dir.mkdir()
+            (action_dir / "scy1.txt").write_text("1,2,3,4,5,6,7,\n", encoding="utf-8")
+
+            records = te.scan_labeled_dataset(root, {"jumping_squat": 3})
+
+        self.assertEqual(
+            records,
+            [te.ImuRecord(action_dir / "scy1.txt", "jumping_squat", 3)],
+        )
+
+    def test_scan_labeled_dataset_rejects_unknown_action(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            action_dir = root / "unknown_action"
+            action_dir.mkdir()
+            (action_dir / "sample.txt").write_text("1,2,3,4,5,6\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "Unknown action"):
+                te.scan_labeled_dataset(root, {"jumping_squat": 3})
+
+    def test_split_records_for_experiment_appends_extra_only_to_train(self):
+        base = [
+            te.ImuRecord(Path(f"class_a/file_{i}.txt"), "class_a", 0)
+            for i in range(8)
+        ] + [
+            te.ImuRecord(Path(f"class_b/file_{i}.txt"), "class_b", 1)
+            for i in range(8)
+        ]
+        extra = [te.ImuRecord(Path("extra/scy1.txt"), "class_a", 0)]
+
+        train, val, test = te.split_records_for_experiment(base, extra, seed=7)
+
+        self.assertIn(extra[0], train)
+        self.assertNotIn(extra[0], val)
+        self.assertNotIn(extra[0], test)
+
+    def test_validation_only_does_not_scan_external_holdout(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            extra_root = root / "extra"
+            action_dir = extra_root / "jumping_squat"
+            action_dir.mkdir(parents=True)
+            (action_dir / "scy1.txt").write_text("1,2,3,4,5,6,7,\n", encoding="utf-8")
+            missing_holdout = root / "missing_holdout"
+
+            extra, holdout = te.load_additional_records(
+                extra_root,
+                missing_holdout,
+                {"jumping_squat": 3},
+                validation_only=True,
+            )
+
+        self.assertEqual(len(extra), 1)
+        self.assertEqual(holdout, [])
+
+    def test_external_holdout_reports_separate_jumping_squat_recall(self):
+        class_names = ["jumping_jack", "jumping_squat"]
+        feature_names = te.build_feature_names()
+        model = te.BPNet(len(feature_names), len(class_names), dropout=0.0)
+        with torch.no_grad():
+            for parameter in model.parameters():
+                parameter.zero_()
+            model.net[8].bias[1] = 10.0
+        result = {
+            "model": model,
+            "mean": np.zeros(len(feature_names), dtype=np.float32),
+            "std": np.ones(len(feature_names), dtype=np.float32),
+            "window_len": 50,
+            "step_len": 25,
+            "rest_threshold": 0.0,
+            "active_point_threshold": 0.0,
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "scy3.txt"
+            rows = []
+            for index in range(80):
+                gyro = 2000 if index % 2 else -2000
+                acc_z = 7000 if index % 3 == 0 else 2500
+                rows.append(f"{gyro},0,0,0,0,{acc_z},{index},\n")
+            path.write_text("".join(rows), encoding="utf-8")
+            records = [te.ImuRecord(path, "jumping_squat", 1)]
+
+            report = te.evaluate_external_holdout(
+                result,
+                records,
+                class_names,
+                torch.device("cpu"),
+            )
+
+        self.assertFalse(report["skipped"])
+        self.assertEqual(report["file_count"], 1)
+        self.assertGreater(report["sample_count"], 0)
+        self.assertEqual(report["recall"], 1.0)
+        self.assertEqual(report["files"], [str(path)])
+
+    def test_external_holdout_is_explicitly_skipped_in_validation_mode(self):
+        report = te.evaluate_external_holdout(
+            {},
+            [],
+            ["jumping_squat"],
+            torch.device("cpu"),
+            validation_only=True,
+        )
+
+        self.assertEqual(report, {"skipped": True, "reason": "validation_only"})
 
     def test_gravity_aligned_series_are_invariant_to_joint_rotation(self):
         rng = np.random.default_rng(12)
@@ -419,6 +567,56 @@ class TrainExportCoreTests(unittest.TestCase):
             self.assertFalse((output_dir / "esp32_bp_model.h").exists())
         self.assertEqual(report["mode"], "validation_only")
         self.assertNotIn("test_acc", report)
+
+    def test_full_report_keeps_external_holdout_separate_from_export_gate(self):
+        feature_names = te.build_feature_names()
+        class_names = ["a", "jumping_squat"]
+        model = te.BPNet(len(feature_names), len(class_names), dropout=0.0)
+        result = {
+            "window_seconds": 2.5,
+            "window_len": 62,
+            "step_len": 12,
+            "rest_threshold": 0.08,
+            "active_point_threshold": 0.02,
+            "model": model,
+            "specialist_model": None,
+            "specialist_class_names": [],
+            "mean": np.zeros(len(feature_names), dtype=np.float32),
+            "std": np.ones(len(feature_names), dtype=np.float32),
+            "val_acc": 1.0,
+            "val_f1": 1.0,
+            "test_acc": 1.0,
+            "test_f1": 1.0,
+            "test_min_recall": 1.0,
+            "test_class_recalls": {"a": 1.0, "jumping_squat": 1.0},
+            "y_test": np.array([0, 1], dtype=np.int64),
+            "test_pred": np.array([0, 1], dtype=np.int64),
+            "external_holdout": {
+                "skipped": False,
+                "label": "jumping_squat",
+                "file_count": 1,
+                "sample_count": 10,
+                "recall": 0.8,
+                "files": ["scy3.txt"],
+            },
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            reached = te.save_outputs(
+                result,
+                [result],
+                class_names,
+                feature_names,
+                root / "outputs",
+                export_when_below_target=False,
+                repository_header_path=root / "esp32/include/esp32_bp_model.h",
+            )
+            report = json.loads(
+                (root / "outputs/training_report.json").read_text(encoding="utf-8")
+            )
+
+        self.assertTrue(reached)
+        self.assertEqual(report["external_holdout"]["recall"], 0.8)
 
     def test_deployment_gate_requires_every_class_recall_at_least_90_percent(self):
         y_true = np.repeat(np.arange(3, dtype=np.int64), 10)

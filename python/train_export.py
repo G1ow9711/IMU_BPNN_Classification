@@ -240,6 +240,48 @@ def scan_dataset(dataset_dir: Path) -> Tuple[List[ImuRecord], List[str], Dict[st
     return records, class_names, label_to_idx
 
 
+def scan_labeled_dataset(
+    dataset_dir: Path,
+    label_to_idx: Dict[str, int],
+) -> List[ImuRecord]:
+    dataset_dir = Path(dataset_dir)
+    if not dataset_dir.is_dir():
+        raise FileNotFoundError(f"Additional dataset directory not found: {dataset_dir}")
+    records: List[ImuRecord] = []
+    for class_dir in sorted(path for path in dataset_dir.iterdir() if path.is_dir()):
+        txt_paths = sorted(class_dir.glob("*.txt"))
+        if not txt_paths:
+            continue
+        label = class_dir.name
+        if label not in label_to_idx:
+            raise ValueError(f"Unknown action directory in additional dataset: {label}")
+        records.extend(
+            ImuRecord(path, label, label_to_idx[label]) for path in txt_paths
+        )
+    if not records:
+        raise ValueError(f"No labeled txt files found under {dataset_dir}")
+    return records
+
+
+def load_additional_records(
+    extra_train_dir: Optional[Path],
+    external_holdout_dir: Optional[Path],
+    label_to_idx: Dict[str, int],
+    validation_only: bool,
+) -> Tuple[List[ImuRecord], List[ImuRecord]]:
+    extra_records = (
+        scan_labeled_dataset(extra_train_dir, label_to_idx)
+        if extra_train_dir is not None
+        else []
+    )
+    holdout_records = (
+        scan_labeled_dataset(external_holdout_dir, label_to_idx)
+        if external_holdout_dir is not None and not validation_only
+        else []
+    )
+    return extra_records, holdout_records
+
+
 def convert_raw_imu_units(raw: np.ndarray) -> np.ndarray:
     data = np.asarray(raw, dtype=np.float32)
     if data.ndim == 1:
@@ -253,7 +295,12 @@ def convert_raw_imu_units(raw: np.ndarray) -> np.ndarray:
 
 
 def load_imu_file(path: Path) -> np.ndarray:
-    raw = np.loadtxt(path, delimiter=",", dtype=np.float32)
+    raw = np.loadtxt(
+        path,
+        delimiter=",",
+        dtype=np.float32,
+        usecols=tuple(range(6)),
+    )
     return convert_raw_imu_units(raw)
 
 
@@ -631,6 +678,28 @@ def split_records_by_file(
         stratify=temp_labels,
     )
     return list(train_records), list(val_records), list(test_records)
+
+
+def split_records_for_experiment(
+    base_records: Sequence[ImuRecord],
+    extra_train_records: Sequence[ImuRecord] = (),
+    seed: int = SEED,
+) -> Tuple[List[ImuRecord], List[ImuRecord], List[ImuRecord]]:
+    train_records, val_records, test_records = split_records_by_file(
+        base_records,
+        seed,
+    )
+    base_paths = {record.path.resolve() for record in base_records}
+    extra_paths = [record.path.resolve() for record in extra_train_records]
+    duplicate_paths = base_paths.intersection(extra_paths)
+    if duplicate_paths:
+        raise ValueError(
+            "Extra training records duplicate base dataset paths: "
+            + ", ".join(str(path) for path in sorted(duplicate_paths))
+        )
+    if len(extra_paths) != len(set(extra_paths)):
+        raise ValueError("Extra training records contain duplicate paths")
+    return train_records + list(extra_train_records), val_records, test_records
 
 
 def euler_rotation_matrix(rx: float, ry: float, rz: float) -> np.ndarray:
@@ -1193,11 +1262,16 @@ def train_one_experiment(
     primary_artifact_dir: Optional[Path] = None,
     enable_family_specialist: bool = False,
     validation_only: bool = False,
+    extra_train_records: Sequence[ImuRecord] = (),
 ) -> Dict[str, object]:
     if validation_only and enable_family_specialist:
         raise ValueError("Family specialist is not supported in validation-only mode")
     window_len, step_len = window_lengths(window_seconds)
-    train_records, val_records, test_records = split_records_by_file(records, seed)
+    train_records, val_records, test_records = split_records_for_experiment(
+        records,
+        extra_train_records,
+        seed,
+    )
     rest_threshold = estimate_rest_threshold(train_records, window_len, step_len)
     active_point_threshold = estimate_active_point_threshold(
         train_records, window_len, step_len
@@ -1427,6 +1501,66 @@ def train_one_experiment(
         ),
         "sample_stats": {"train": train_stats, "val": val_stats, "test": test_stats},
         "training": training_meta,
+    }
+
+
+def evaluate_external_holdout(
+    best_result: Dict[str, object],
+    records: Sequence[ImuRecord],
+    class_names: Sequence[str],
+    device: torch.device,
+    validation_only: bool = False,
+) -> Dict[str, object]:
+    if validation_only:
+        return {"skipped": True, "reason": "validation_only"}
+    if not records:
+        return {"skipped": True, "reason": "no_external_holdout"}
+    labels = {record.label for record in records}
+    if labels != {"jumping_squat"}:
+        raise ValueError(
+            "External holdout must contain only jumping_squat records, got "
+            + ", ".join(sorted(labels))
+        )
+
+    window_len = int(best_result["window_len"])
+    step_len = int(best_result["step_len"])
+    rest_threshold = float(best_result["rest_threshold"])
+    active_point_threshold = float(best_result["active_point_threshold"])
+    raw_x, y_true, _, stats = build_samples(
+        records,
+        window_len,
+        step_len,
+        rest_threshold,
+        active_point_threshold,
+        augment=False,
+        rng=np.random.default_rng(SEED),
+        progress_label="external_holdout=jumping_squat",
+    )
+    if len(y_true) == 0:
+        return {
+            "skipped": True,
+            "reason": "no_kept_windows",
+            "file_count": len(records),
+            "files": [str(record.path) for record in records],
+            "sample_stats": stats,
+        }
+    mean = np.asarray(best_result["mean"], dtype=np.float32)
+    std = np.asarray(best_result["std"], dtype=np.float32)
+    x = ((raw_x - mean) / std).astype(np.float32)
+    model = best_result["model"]
+    assert isinstance(model, BPNet)
+    y_pred = predict(model, x, device)
+    jumping_squat_idx = class_names.index("jumping_squat")
+    target = y_true == jumping_squat_idx
+    recall = float(np.mean(y_pred[target] == jumping_squat_idx))
+    return {
+        "skipped": False,
+        "label": "jumping_squat",
+        "file_count": len(records),
+        "sample_count": int(len(y_true)),
+        "recall": recall,
+        "files": [str(record.path) for record in records],
+        "sample_stats": stats,
     }
 
 
@@ -2302,6 +2436,10 @@ def save_outputs(
         "test_f1": best_result["test_f1"],
         "test_min_recall": best_result["test_min_recall"],
         "test_class_recalls": best_result["test_class_recalls"],
+        "external_holdout": best_result.get(
+            "external_holdout",
+            {"skipped": True, "reason": "not_configured"},
+        ),
         "classifier_type": (
             "flat_bp_plus_family_bp_specialist"
             if isinstance(specialist_model, BPNet)
@@ -2410,6 +2548,8 @@ def save_validation_outputs(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train IMU BP model and export ESP32 header.")
     parser.add_argument("--dataset-dir", type=Path, default=None)
+    parser.add_argument("--extra-train-dir", type=Path, default=None)
+    parser.add_argument("--external-holdout-dir", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR)
     parser.add_argument(
         "--primary-artifact-dir",
@@ -2443,13 +2583,23 @@ def main() -> None:
     set_seed(args.seed)
 
     dataset_dir = resolve_dataset_dir(args.dataset_dir)
-    records, class_names, _ = scan_dataset(dataset_dir)
+    records, class_names, label_to_idx = scan_dataset(dataset_dir)
+    extra_train_records, _ = load_additional_records(
+        args.extra_train_dir,
+        args.external_holdout_dir,
+        label_to_idx,
+        validation_only=True,
+    )
     feature_names = build_feature_names()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     print(f"dataset_dir={dataset_dir.resolve()}")
     print(f"device={device}")
     print(f"class_count={len(class_names)} file_count={len(records)} feature_dim={len(feature_names)}")
+    print(
+        f"extra_train_file_count={len(extra_train_records)} "
+        f"external_holdout_loaded=false"
+    )
     print(f"class_names={class_names}")
     print(
         f"window_seconds={args.window_seconds} augment_times={AUGMENT_TIMES} "
@@ -2470,6 +2620,7 @@ def main() -> None:
             primary_artifact_dir=args.primary_artifact_dir,
             enable_family_specialist=args.enable_family_specialist,
             validation_only=args.validation_only,
+            extra_train_records=extra_train_records,
         )
         all_results.append(result)
 
@@ -2507,6 +2658,25 @@ def main() -> None:
         print("validation_only=true test_evaluation_skipped=true header_export_skipped=true")
         print(f"outputs={args.output_dir.resolve()}")
         return
+
+    _, external_holdout_records = load_additional_records(
+        None,
+        args.external_holdout_dir,
+        label_to_idx,
+        validation_only=False,
+    )
+    external_holdout = evaluate_external_holdout(
+        best_result,
+        external_holdout_records,
+        class_names,
+        device,
+    )
+    best_result["external_holdout"] = external_holdout
+    print(
+        f"external_holdout_loaded={not bool(external_holdout['skipped'])} "
+        f"external_holdout_file_count={external_holdout.get('file_count', 0)} "
+        f"external_holdout_recall={external_holdout.get('recall', float('nan')):.4f}"
+    )
 
     reached_target = save_outputs(
         best_result,
