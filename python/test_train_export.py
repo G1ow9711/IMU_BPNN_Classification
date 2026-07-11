@@ -14,11 +14,34 @@ from python import train_export as te
 
 
 class TrainExportCoreTests(unittest.TestCase):
+    def test_deep_narrow_bpnet_has_reviewed_shape_and_parameter_count(self):
+        # 构造 302 维 M1；六分支输入顺序与 M0 完全一致。
+        model = te.DeepNarrowMultiBranchBPNet(input_dim=302, class_count=11, dropout=0.0)
+        # 三个样本用于验证批维不会因新增融合层改变。
+        samples = torch.randn(3, 302)
+
+        # M1 最终共享嵌入按审核方案收缩为 24 维。
+        embeddings = model.forward_features(samples)
+        # 主分类输出仍为 11 类 logits。
+        logits = model(samples)
+        # 汇总全部可训练张量元素，核对 ESP32 参数预算。
+        parameter_count = sum(parameter.numel() for parameter in model.parameters())
+
+        # 六组输入不变，只有弱类分支输出和融合深度变化。
+        self.assertEqual(model.group_input_dims, (112, 48, 24, 48, 32, 38))
+        self.assertEqual(model.group_output_dims, (24, 12, 8, 12, 8, 24))
+        # 共享表示必须为 [批大小,24]。
+        self.assertEqual(tuple(embeddings.shape), (3, 24))
+        # 分类输出必须为 [批大小,11]。
+        self.assertEqual(tuple(logits.shape), (3, 11))
+        # 302 维输入和 11 类输出下，审核公式得到 16739 个参数。
+        self.assertEqual(parameter_count, 16739)
+
     def test_multi_branch_bpnet_keeps_feature_groups_and_32_value_embedding(self):
-        # 构造 294 维候选模型；六组输入必须按生产特征顺序独立编码后融合。
-        model = te.MultiBranchBPNet(input_dim=294, class_count=11, dropout=0.0)
-        # 四个样本覆盖前向批维，输入形状为 [4,294]。
-        samples = torch.randn(4, 294)
+        # 构造 302 维候选模型；六组输入必须按生产特征顺序独立编码后融合。
+        model = te.MultiBranchBPNet(input_dim=302, class_count=11, dropout=0.0)
+        # 四个样本覆盖前向批维，输入形状为 [4,302]。
+        samples = torch.randn(4, 302)
 
         # 训练嵌入供监督对比损失和辅助分类头使用。
         embeddings = model.forward_features(samples)
@@ -29,8 +52,8 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertEqual(tuple(embeddings.shape), (4, 32))
         # 主分类输出必须保持 [批大小,类别数]。
         self.assertEqual(tuple(logits.shape), (4, 11))
-        # 六个分支分别对应 112/48/24/48/32/30 维特征组。
-        self.assertEqual(model.group_input_dims, (112, 48, 24, 48, 32, 30))
+        # 六个分支分别对应 112/48/24/48/32/38 维特征组。
+        self.assertEqual(model.group_input_dims, (112, 48, 24, 48, 32, 38))
 
     def test_multi_branch_auxiliary_loss_is_finite_for_declared_tasks(self):
         # 使用完整 11 类顺序构造多分支模型和每类一个样本。
@@ -38,7 +61,7 @@ class TrainExportCoreTests(unittest.TestCase):
             "good_morning", "jumping_jack", "jumping_lunge", "jumping_squat",
             "lunge", "sit", "squat", "trot", "tuck_jump", "walk", "wave",
         ]
-        model = te.MultiBranchBPNet(294, len(class_names), dropout=0.0)
+        model = te.MultiBranchBPNet(302, len(class_names), dropout=0.0)
         # 嵌入形状为 [11,32]，标签覆盖所有辅助任务正负样本。
         embeddings = torch.randn(len(class_names), 32)
         labels = torch.arange(len(class_names), dtype=torch.long)
@@ -268,7 +291,7 @@ class TrainExportCoreTests(unittest.TestCase):
             atol=1e-6,
         )
 
-    def test_extract_features_returns_294_ordered_values_for_six_axis_window(self):
+    def test_extract_features_returns_302_ordered_values_for_six_axis_window(self):
         # 构造 62 个采样点、六轴顺序为 gx/gy/gz/ax/ay/az 的确定性测试窗口。
         window = np.arange(62 * 6, dtype=np.float32).reshape(62, 6)
 
@@ -277,17 +300,17 @@ class TrainExportCoreTests(unittest.TestCase):
 
         # 获取与 ESP32 头文件共享的特征名称顺序，名称索引必须与数值索引一致。
         feature_names = te.build_feature_names()
-        # 288 维基线追加 6 项有多文件证据的事件对齐候选，总维度必须为 294。
-        self.assertEqual(features.shape, (294,))
+        # 294 维基线追加 8 项三折文件级手腕候选，总维度必须为 302。
+        self.assertEqual(features.shape, (302,))
         # 名称数量必须等于模型输入维度，防止标准化参数与 C 数组错位。
-        self.assertEqual(len(feature_names), 294)
+        self.assertEqual(len(feature_names), 302)
         self.assertEqual(feature_names[112], "acc_vertical_phase0_mean")
         self.assertEqual(feature_names[160], "acc_vertical_high_activity_ratio")
         self.assertEqual(feature_names[184], "acc_vertical_normalized_phase0_mean")
         self.assertEqual(feature_names[232], "acc_vertical_q10")
         self.assertEqual(
-            # 检查最后 30 项弱类特征固定顺序，防止标准化参数和 ESP32 模型错位。
-            feature_names[-30:],
+            # 检查最后 38 项弱类特征固定顺序，防止标准化参数和 ESP32 模型错位。
+            feature_names[-38:],
             [
                 "acc_delta_mag_spectral_mid_band_ratio",
                 "acc_vertical_spectral_high_band_ratio",
@@ -319,10 +342,43 @@ class TrainExportCoreTests(unittest.TestCase):
                 "aligned_landing_impact_width_seconds",
                 "aligned_flight_horizontal_gyro_integral_deg",
                 "aligned_flight_vertical_gyro_integral_abs_deg",
+                "wrist_reversal_rate_hz",
+                "wrist_acf_second_first_ratio",
+                "wrist_out_in_shape_correlation",
+                "wrist_post_event_jerk_half_width_s",
+                "wrist_post_pre_log_energy_ratio",
+                "wrist_recovery_time_ratio",
+                "wrist_cycle_interval_cv",
+                "wrist_harmonic_ratio",
             ],
         )
         self.assertNotIn("acc_vertical_argmax_abs_position", feature_names)
         self.assertTrue(np.all(np.isfinite(features)))
+
+    def test_promoted_wrist_values_match_no_training_analyzer(self):
+        # 延迟导入无训练分析器，明确把它作为候选公式的独立参考实现。
+        from python import analyze_wrist_candidates as wrist_analysis
+
+        # 固定随机种子构造可复现的 62 点手腕六轴窗口。
+        rng = np.random.default_rng(20260712)
+        # 陀螺三轴模拟约 ±250 deg/s 的摆动，形状为 [62,3]。
+        gyro = rng.normal(0.0, 250.0, size=(62, 3))
+        # 加速度三轴以 1g 静态 z 轴为基线并叠加 0.4g 动态变化。
+        acceleration = rng.normal(0.0, 0.4, size=(62, 3))
+        # z 轴加上 1g，使窗口同时覆盖冲击和重力偏置处理。
+        acceleration[:, 2] += 1.0
+        # 按 gx、gy、gz、ax、ay、az 顺序拼成生产输入 [62,6]。
+        window = np.column_stack([gyro, acceleration]).astype(np.float32)
+
+        # 分析器返回 16 项候选，代表本轮训练前的原始公式定义。
+        analyzer_values = wrist_analysis.wrist_scalar_features(window)
+        # 生产提取器返回 302 项，末八项是晋级手腕值。
+        production_values = te.extract_features(window)
+        # 六项补充值在分析器中的固定索引为 3、9、10、11、14、15。
+        expected = analyzer_values[[3, 9, 10, 11, 14, 15]]
+
+        # 生产末六项必须在 float32 精度内逐值等于分析器定义。
+        np.testing.assert_allclose(production_values[-6:], expected, rtol=1e-6, atol=1e-6)
 
     def test_normalized_phase_features_ignore_offset_and_positive_scale(self):
         signal = np.linspace(-2.0, 3.0, 64, dtype=np.float32) ** 3
@@ -711,7 +767,7 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertEqual(metadata["ema_decay"], 0.9)
         self.assertEqual(metadata["label_smoothing"], 0.05)
 
-    def test_exported_header_contains_294_feature_pipeline_and_activity_thresholds(self):
+    def test_exported_header_contains_302_feature_pipeline_and_activity_thresholds(self):
         feature_names = te.build_feature_names()
         model = te.BPNet(input_dim=len(feature_names), class_count=3, dropout=0.0)
         result = {
@@ -733,8 +789,8 @@ class TrainExportCoreTests(unittest.TestCase):
             )
 
             header = header_path.read_text(encoding="utf-8")
-        # 生成头文件必须声明新增事件对齐值后的 294 维，确保 C/Python 数组边界一致。
-        self.assertIn("#define FEATURE_DIM 294", header)
+        # 生成头文件必须声明新增八项手腕值后的 302 维，确保 C/Python 数组边界一致。
+        self.assertIn("#define FEATURE_DIM 302", header)
         self.assertIn("REST_MOTION_THRESHOLD", header)
         self.assertIn("ACTIVE_POINT_THRESHOLD", header)
         self.assertIn("append_phase_features", header)
@@ -743,6 +799,9 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertIn("append_impact_distribution_features", header)
         self.assertIn("spectral_entropy", header)
         self.assertIn("gravity_norm", header)
+        self.assertIn("wrist_reversal_rate_hz", header)
+        self.assertIn("wrist_acf_second_first_ratio", header)
+        self.assertIn("append_additional_wrist_features", header)
         self.assertIn("bp_predict_from_window", header)
 
     def test_model_header_is_published_to_esp32_only_after_target_is_reached(self):
