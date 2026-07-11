@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "label": "jumping_squat",
+  "files": [
+    {
+      "name": "jumping_squat_scy1_20.txt",
+      "sha256": "FE10A5B4D232DDB6D7A7BD791D3F3765008577CAA6CB317C9AF21BD4BDE0F379",
+      "rows": 2975,
+      "role": "extra_train"
+    },
+    {
+      "name": "jumping_squat_scy2_20.txt",
+      "sha256": "E9A02819A55DE955B1861B4EB23C992A9873159984BC8E1C6707053A6C3A52C9",
+      "rows": 2977,
+      "role": "extra_train"
+    },
+    {
+      "name": "jumping_squat_scy3_20.txt",
+      "sha256": "4B4C5420FEBDF52DCC735BE642E450ED1507C0F10E73CD7CD4B82E6A9C189111",
+      "rows": 2969,
+      "role": "external_holdout"
+    }
+  ]
+}
