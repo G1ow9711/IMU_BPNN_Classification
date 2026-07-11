@@ -1,24 +1,93 @@
 {
-  "version": 1,
-  "label": "jumping_squat",
+  "version": 2,
   "files": [
     {
+      "label": "jumping_jack",
+      "source": "A类活动/jumping_jack_scy1_20.txt",
+      "name": "jumping_jack_scy1_20.txt",
+      "sha256": "2CEE134FBC3EEA01941EA2984E33460C302BFD7BF81D31FDA8115BB595E56593",
+      "rows": 2974,
+      "role": "extra_train"
+    },
+    {
+      "label": "jumping_jack",
+      "source": "A类活动/jumping_jack_scy2_20.txt",
+      "name": "jumping_jack_scy2_20.txt",
+      "sha256": "743AA4BC126CC19E8FF073F5D2CB52750F935EC11D8A3CDFB386696691837AF8",
+      "rows": 2975,
+      "role": "extra_train"
+    },
+    {
+      "label": "jumping_jack",
+      "source": "A类活动/jumping_jack_scy3_20.txt",
+      "name": "jumping_jack_scy3_20.txt",
+      "sha256": "9E6925DF63214DE9E417794C0F722523751E50CC47DC74A8D8206A920F0F6534",
+      "rows": 2973,
+      "role": "external_holdout"
+    },
+    {
+      "label": "jumping_lunge",
+      "source": "A类活动/jumping_lunge_scy1_20.txt",
+      "name": "jumping_lunge_scy1_20.txt",
+      "sha256": "942E920B27700BC930AACDE0BAAF4DF7C5C482EC6A7EC3ACEFB6083B073E0BAD",
+      "rows": 2974,
+      "role": "extra_train"
+    },
+    {
+      "label": "jumping_lunge",
+      "source": "A类活动/jumping_lunge_scy2_20.txt",
+      "name": "jumping_lunge_scy2_20.txt",
+      "sha256": "DA237F66D15EC2964314B04E4A51D12C19D4FCA3E4BAEC7A7BF8130C65C126F7",
+      "rows": 2973,
+      "role": "extra_train"
+    },
+    {
+      "label": "jumping_lunge",
+      "source": "A类活动/jumping_lunge_scy3_20.txt",
+      "name": "jumping_lunge_scy3_20.txt",
+      "sha256": "AC67CCF02A15AD9051A071F32B721897B53B8A519B23362AB54E58703EF4DD02",
+      "rows": 2975,
+      "role": "external_holdout"
+    },
+    {
+      "label": "jumping_squat",
+      "source": "A类活动/jumping_squat_scy1_20.txt",
       "name": "jumping_squat_scy1_20.txt",
       "sha256": "FE10A5B4D232DDB6D7A7BD791D3F3765008577CAA6CB317C9AF21BD4BDE0F379",
       "rows": 2975,
       "role": "extra_train"
     },
     {
+      "label": "jumping_squat",
+      "source": "A类活动/jumping_squat_scy2_20.txt",
       "name": "jumping_squat_scy2_20.txt",
       "sha256": "E9A02819A55DE955B1861B4EB23C992A9873159984BC8E1C6707053A6C3A52C9",
       "rows": 2977,
       "role": "extra_train"
     },
     {
+      "label": "jumping_squat",
+      "source": "A类活动/jumping_squat_scy3_20.txt",
       "name": "jumping_squat_scy3_20.txt",
       "sha256": "4B4C5420FEBDF52DCC735BE642E450ED1507C0F10E73CD7CD4B82E6A9C189111",
       "rows": 2969,
       "role": "external_holdout"
+    },
+    {
+      "label": "squat",
+      "source": "B类活动/squat.txt",
+      "name": "squat.txt",
+      "sha256": "E7182B28721680C53F15F7B9B7931066D38A7B8FC5F63E8FB6C20625947C8CE7",
+      "rows": 2974,
+      "role": "extra_train"
+    },
+    {
+      "label": "tuck_jump",
+      "source": "B类活动/tuck_jump.txt",
+      "name": "tuck_jump.txt",
+      "sha256": "8C7C5393BDA194DA049296EA294BA62A6C43EC39434F2547A029BDC40E84B21D",
+      "rows": 2972,
+      "role": "extra_train"
     }
   ]
 }

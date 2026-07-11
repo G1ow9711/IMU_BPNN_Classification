@@ -38,9 +38,9 @@ IMU_Dataset/imu_dataset_for_final/
 
 数据包含陀螺仪 `gx, gy, gz` 和加速度计 `ax, ay, az`，采样率为 25 Hz。
 
-### 决赛 `jumping_squat` 会话
+### 决赛弱类会话
 
-仓库额外提供 `python/finals_jumping_squat_manifest.json` 和校验脚本，用于接入根目录 `决赛/MATLAB/实测数据集/A类活动` 中的三次独立录制。数据本身仍不提交仓库。
+仓库提供 `python/finals_jumping_squat_manifest.json` 和校验脚本，用于接入根目录 `决赛` 中 11 个去重后的独立弱类录制。数据本身不提交仓库。
 
 | 文件 | SHA-256 | 行数 | 用途 |
 |---|---|---:|---|
@@ -56,7 +56,7 @@ IMU_Dataset/imu_dataset_for_final/
   --output-dir IMU_Dataset\finals_jumping_squat
 ```
 
-脚本先校验哈希、行数和重复内容，再复制为 `train/jumping_squat` 与 `external_holdout/jumping_squat`。基础 189 个文件先完成文件级划分，`scy1/scy2` 随后只追加到训练集；`scy3` 只允许在验证候选通过后加载。
+脚本先校验哈希、行数和重复内容，再按清单标签复制到 `train/<动作>` 与 `external_holdout/<动作>`。当前 8 个会话只追加到训练划分，3 个 `scy3` 会话只允许在验证候选通过后加载。
 
 ## Python 环境
 
@@ -80,29 +80,31 @@ python -m venv .venv
   --dataset-dir IMU_Dataset\imu_dataset_for_final
 ```
 
-训练会逐 epoch 输出总损失、交叉熵、跨文件监督对比损失、弱类 margin、验证准确率、宏平均 F1、弱类 F1、最差类别 F1 和早停状态。
+训练会逐 epoch 输出总损失、交叉熵、跨文件监督对比损失、定向类别 margin、训练期辅助损失、验证准确率、宏平均 F1、弱类 F1、最差类别 F1 和早停状态。
 
 ![逐 epoch 可见训练过程](docs/训练过程截图.png)
 
 ## 特征与 BP 网络
 
-当前特征维度为 264：
+当前生产候选特征维度为 294：
 
 - 112 个全局统计特征；
 - 48 个原始四阶段时序特征；
 - 24 个峰值、频率、谱熵和自相关特征；
 - 48 个窗口内标准化四阶段形状特征；
 - 32 个分位数、偏度、峰度和最大跳变特征。
+- 24 个弱类定向频谱、自相关、峰形和跨通道时序耦合特征；
+- 6 个事件对齐特征：水平加速度/角速度各向异性、起跳到落地时间、落地冲击宽度、腾空水平与垂直角速度积分。
 
 方向鲁棒特征包括重力方向上的垂直分量和垂直于重力的水平分量。训练增强使用六轴同步有限角度旋转、非循环时间变形和轻微传感器噪声。
 
-BP 网络结构：
+兼容旧模型和 C 导出器的平铺 BP 结构：
 
 ```text
-264 -> 96 -> 64 -> 32 -> 11
+294 -> 96 -> 64 -> 32 -> 11
 ```
 
-训练时使用原始文件均衡采样、跨文件监督对比损失和弱混淆类别 margin；这些训练辅助项不会进入 ESP32 推理代码。
+Round24 同时验证六分支 BP。六组输入维度为 `(112,48,24,48,32,30)`，分支输出维度为 `(24,12,8,12,8,16)`，拼接后执行 `80 -> 64 -> 32 -> 11`。训练使用 P×K 跨文件批次、跨文件监督对比损失、三组定向 margin 和五个训练期辅助头；辅助头不会进入 ESP32 推理代码。
 
 代码还保留实验性的跳跃动作形状专家开关：
 
@@ -128,8 +130,8 @@ BP 网络结构：
 ```powershell
 .\.venv\Scripts\python.exe -u python\train_export.py `
   --dataset-dir IMU_Dataset\imu_dataset_for_final `
-  --extra-train-dir IMU_Dataset\finals_jumping_squat\train `
-  --external-holdout-dir IMU_Dataset\finals_jumping_squat\external_holdout `
+  --extra-train-dir IMU_Dataset\finals_weak_classes\train `
+  --external-holdout-dir IMU_Dataset\finals_weak_classes\external_holdout `
   --validation-only `
   --window-seconds 2.5
 ```
@@ -139,8 +141,8 @@ BP 网络结构：
 ```powershell
 .\.venv\Scripts\python.exe python\analyze_feature_separability.py `
   --dataset-dir IMU_Dataset\imu_dataset_for_final `
-  --extra-train-dir IMU_Dataset\finals_jumping_squat\train `
-  --validation-report outputs\round9_finals_event_validation_20260711\validation_report.json `
+  --extra-train-dir IMU_Dataset\finals_weak_classes\train `
+  --validation-report outputs\round20_targeted_peak_features_validation_20260711\validation_report.json `
   --output-json outputs\feature_separability.json `
   --output-csv outputs\feature_separability_top.csv
 ```
@@ -164,10 +166,10 @@ training_console.log
 部署门槛按动作逐类验收：
 
 ```text
-每个动作的测试集召回率 >= 0.90
+五个批准弱类的测试集召回率 >= 0.85，其余六类 >= 0.90
 ```
 
-召回率定义为该动作测试样本中被正确识别的比例。只有 11 个动作全部达标，才生成正式 `outputs/esp32_bp_model.h`，并同步到 `esp32/include/esp32_bp_model.h`。未达标时保留训练报告，但不发布模型头文件；`--export-when-below-target` 只用于本地诊断，不会覆盖 ESP32 代码区。
+五个弱类固定为 `jumping_jack`、`jumping_lunge`、`jumping_squat`、`squat`、`tuck_jump`。召回率定义为该动作测试样本中被正确识别的比例。只有 11 类分别达到对应门槛，才生成正式 `outputs/esp32_bp_model.h` 并同步到 `esp32/include/esp32_bp_model.h`。未达标时保留训练报告，但不发布模型头文件。
 
 ## 当前验证状态
 
@@ -178,6 +180,15 @@ training_console.log
 - 将原模型与动态增强模型做验证集 logits 加权融合后，最优权重仍为原模型 `100%`，因此未采用双 BP 部署。
 - 决赛数据扩展和事件特征也严格只做验证消融：264 维加 `scy1/scy2` 得到 `90.95%/90.68%/78.38%`；12 项事件候选得到 `92.31%/92.01%/78.76%`；按分离度精选 3 项后得到 `90.82%/90.41%/78.78%`。三组数字依次为验证准确率、宏平均 F1、最小类别召回，均未同时超过固定基线 `91.63%/91.16%/79.92%`，因此测试集和 `scy3` 都未读取。
 - 分离度分析表明 `event_gyro_vertical_correlation` 对四组易混动作最稳定；自由落体比例及最长连续比例主要区分 `jumping_squat` 与 `jumping_jack`；事件垂直跳变与现有特征相关系数为 `1.0`，属于重复特征。生产提取器因此恢复为 264 维，12 项候选只保留在分析工具中。
+- Round20 的 280 维验证候选达到 `91.57%/91.08%/79.73%`，但 `jumping_squat`、`squat`、`tuck_jump`、`lunge` 和 `wave` 未达各自门槛，因此测试集、`scy3` 和正式头文件保持隔离。
+- Round21 候选在训练前先完成 346 维分离度分析。新增 8 项值将输入扩展到 288 维；MinGW C99 与 Python 在合成和真实决赛窗口上的最大绝对误差为 `6.11e-05`。详细公式和类中位数见 [docs/弱类频谱与峰形特征说明.md](docs/弱类频谱与峰形特征说明.md)。
+- Round21 可视验证训练在 epoch 98 早停并恢复 epoch 53，验证准确率/宏 F1/最低召回为 `91.88%/91.56%/81.47%`。`squat` 和 `wave` 已提升到约 `84.59%/91.21%`，但 `jumping_lunge`、`jumping_squat`、`tuck_jump` 和 `lunge` 仍未达精确门槛，因此未读取测试集或 `scy3`，也未导出正式头文件。
+- Round22 在 Round21 误分类窗口子集上先筛选 7 项三重同方向候选，形成 295 维输入；训练前 56 项测试和 C/Python 真实窗口一致性均已通过。可视训练在 epoch 52 早停并恢复 epoch 7，验证准确率/宏 F1/最低召回为 `91.36%/91.06%/79.34%`，低于 Round21 的 `91.88%/91.56%/81.47%`。Round22 因此被拒绝，未读取测试集或 `scy3`，也未导出正式头文件。
+- Round23 在无训练分离度审计后加入 6 个事件对齐/方向特征，形成 294 维 Python/C 一致管线。平铺 BP 验证为 `91.01%/90.84%/78.76%`，仅 `jumping_lunge` 提升到 `90.61%`，其余弱类仍未达标。
+- Round24 使用六分支 BP、P=11/K=6 跨文件批次、三组定向 margin 和五个训练期辅助头，可视训练在 epoch 80 早停并恢复 epoch 35。验证准确率/宏 F1/最低召回为 `90.95%/90.53%/77.80%`；`jumping_jack 94.47%`、`jumping_lunge 92.36%` 通过，`jumping_squat 80.99%`、`squat 80.41%`、`tuck_jump 77.80%` 未通过，普通类 `wave 89.78%` 也略低于门槛。测试集、`scy3` 和正式头文件继续保持隔离。
+- Round25 在相同 294 维输入和多分支结构上，用原训练窗口计数修正 P×K 交叉熵先验，将 SupCon 权重降到 `0.01`，并使用 `0.20` dropout 与 `0.03` 标签平滑。可视训练在 epoch 60 早停并恢复 epoch 15，验证准确率/宏 F1/最低召回为 `91.04%/90.99%/77.22%`。`jumping_squat 80.41%`、`squat 77.97%`、`tuck_jump 77.22%` 和 `lunge 89.37%` 未达标，因此该全局损失修正被拒绝，测试集、`scy3` 和正式头文件仍未访问。
+- 后续停止单一特征堆叠和同类全局损失微调。下一阶段先在验证文件上做交叉拟合 logit 偏置校准，检查 `jumping_lunge/tuck_jump` 的过预测能否稳定转移给高精度低召回的 `jumping_squat/squat/lunge`；若不足，再训练只覆盖这五类的局部条件 BP，主 11 类 BP 仅负责粗路由。
+- 动作机理、分段公式、联合诊断矩阵和资料依据见 [docs/弱类联合优化方案.md](docs/弱类联合优化方案.md)。
 
 当前最佳模型的未达标类别：
 

@@ -2,6 +2,7 @@ import argparse
 import hashlib
 import json
 import shutil
+from collections import Counter
 from pathlib import Path
 from typing import Dict
 
@@ -31,21 +32,27 @@ def prepare_dataset(
     source_dir = Path(source_dir)
     output_dir = Path(output_dir)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    label = str(manifest.get("label", "")).strip()
+    default_label = str(manifest.get("label", "")).strip()
     entries = manifest.get("files")
-    if not label or not isinstance(entries, list) or not entries:
-        raise ValueError("Manifest requires a label and non-empty files list")
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("Manifest requires a non-empty files list")
 
     verified = []
     seen_hashes: Dict[str, str] = {}
     for entry in entries:
         name = str(entry["name"])
+        label = str(entry.get("label", default_label)).strip()
+        if not label:
+            raise ValueError(f"Manifest entry requires a label: {name}")
+        source_relative = Path(str(entry.get("source", name)))
+        if source_relative.is_absolute() or ".." in source_relative.parts:
+            raise ValueError(f"Unsafe source path for {name}: {source_relative}")
         role = str(entry["role"])
         expected_hash = str(entry["sha256"]).upper()
         expected_rows = int(entry["rows"])
         if role not in VALID_ROLES:
             raise ValueError(f"Unsupported role for {name}: {role}")
-        source_path = source_dir / name
+        source_path = source_dir / source_relative
         if not source_path.is_file():
             raise FileNotFoundError(f"Finals source file not found: {source_path}")
         actual_hash = _sha256(source_path)
@@ -64,19 +71,22 @@ def prepare_dataset(
             raise ValueError(
                 f"Row count mismatch for {name}: expected {expected_rows}, got {actual_rows}"
             )
-        verified.append((source_path, name, role, actual_hash, actual_rows))
+        verified.append((source_path, name, label, role, actual_hash, actual_rows))
 
     prepared_files = []
     role_counts = {"extra_train": 0, "external_holdout": 0}
-    for source_path, name, role, actual_hash, actual_rows in verified:
+    label_counts: Counter[str] = Counter()
+    for source_path, name, label, role, actual_hash, actual_rows in verified:
         partition = "train" if role == "extra_train" else "external_holdout"
         destination = output_dir / partition / label / name
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source_path, destination)
         role_counts[role] += 1
+        label_counts[label] += 1
         prepared_files.append(
             {
                 "name": name,
+                "label": label,
                 "role": role,
                 "sha256": actual_hash,
                 "rows": actual_rows,
@@ -84,12 +94,15 @@ def prepare_dataset(
             }
         )
 
-    return {
-        "label": label,
+    summary = {
         "extra_train_count": role_counts["extra_train"],
         "external_holdout_count": role_counts["external_holdout"],
+        "label_counts": dict(sorted(label_counts.items())),
         "files": prepared_files,
     }
+    if len(label_counts) == 1:
+        summary["label"] = next(iter(label_counts))
+    return summary
 
 
 def parse_args() -> argparse.Namespace:

@@ -14,6 +14,118 @@ from python import train_export as te
 
 
 class TrainExportCoreTests(unittest.TestCase):
+    def test_multi_branch_bpnet_keeps_feature_groups_and_32_value_embedding(self):
+        # 构造 294 维候选模型；六组输入必须按生产特征顺序独立编码后融合。
+        model = te.MultiBranchBPNet(input_dim=294, class_count=11, dropout=0.0)
+        # 四个样本覆盖前向批维，输入形状为 [4,294]。
+        samples = torch.randn(4, 294)
+
+        # 训练嵌入供监督对比损失和辅助分类头使用。
+        embeddings = model.forward_features(samples)
+        # 主分类前向仍输出 11 类 logits，部署时只保留该路径。
+        logits = model(samples)
+
+        # 融合嵌入固定为 32 维，与原 BP 最后一层输入合同一致。
+        self.assertEqual(tuple(embeddings.shape), (4, 32))
+        # 主分类输出必须保持 [批大小,类别数]。
+        self.assertEqual(tuple(logits.shape), (4, 11))
+        # 六个分支分别对应 112/48/24/48/32/30 维特征组。
+        self.assertEqual(model.group_input_dims, (112, 48, 24, 48, 32, 30))
+
+    def test_multi_branch_auxiliary_loss_is_finite_for_declared_tasks(self):
+        # 使用完整 11 类顺序构造多分支模型和每类一个样本。
+        class_names = [
+            "good_morning", "jumping_jack", "jumping_lunge", "jumping_squat",
+            "lunge", "sit", "squat", "trot", "tuck_jump", "walk", "wave",
+        ]
+        model = te.MultiBranchBPNet(294, len(class_names), dropout=0.0)
+        # 嵌入形状为 [11,32]，标签覆盖所有辅助任务正负样本。
+        embeddings = torch.randn(len(class_names), 32)
+        labels = torch.arange(len(class_names), dtype=torch.long)
+
+        # 计算是否跳跃、强腾空、左右交替及两组易混二分类辅助损失。
+        loss = model.auxiliary_loss(embeddings, labels, class_names)
+
+        # 辅助损失必须有限且为正，确保五个训练头均参与优化。
+        self.assertTrue(torch.isfinite(loss))
+        self.assertGreater(float(loss.item()), 0.0)
+
+    def test_pk_file_batch_contains_equal_classes_and_multiple_files(self):
+        # 三类各提供两个文件、每文件两个窗口，便于检查 P=3、K=2 批次。
+        x = np.arange(12 * 4, dtype=np.float32).reshape(12, 4)
+        y = np.repeat(np.arange(3, dtype=np.int64), 4)
+        file_ids = np.tile(np.repeat(np.arange(2, dtype=np.int64), 2), 3)
+
+        # P×K 模式忽略普通 batch_size，按每类 K=2 形成 6 样本批次。
+        loader = te.make_loader(
+            x, y, batch_size=64, shuffle=False, file_ids=file_ids,
+            pk_file_balanced=True, pk_samples_per_class=2, seed=17,
+        )
+        # 读取首批的特征、标签和文件编号。
+        _, batch_y, batch_files = next(iter(loader))
+
+        # 每个类别必须恰好出现两个样本，保证 SupCon 有同类正样本。
+        self.assertEqual(torch.bincount(batch_y, minlength=3).tolist(), [2, 2, 2])
+        # 每类两个样本必须优先来自两个不同文件，避免同文件重叠窗伪正样本。
+        for label in range(3):
+            self.assertEqual(len(torch.unique(batch_files[batch_y == label])), 2)
+
+    def test_parse_args_accepts_integrated_weak_class_training_switches(self):
+        # 模拟第二阶段可见训练命令，三个开关应可同时解析。
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "train_export.py",
+                "--multi-branch",
+                "--pk-batches",
+                "--auxiliary-heads",
+            ],
+        ):
+            # 解析后的布尔值将由 main 传入每个窗口实验。
+            args = te.parse_args()
+
+        # 六组特征分支必须被启用。
+        self.assertTrue(args.multi_branch)
+        # P×K 多文件平衡批次必须被启用。
+        self.assertTrue(args.pk_batches)
+        # 五个训练期辅助任务必须被启用。
+        self.assertTrue(args.auxiliary_heads)
+
+    def test_pk_ce_prior_weights_restore_original_class_mass(self):
+        # 类别 0/1/2 在原训练窗口中分别出现 2/4/6 次，表示非均匀自然先验。
+        labels = np.repeat(np.arange(3, dtype=np.int64), [2, 4, 6])
+
+        # P×K 批次本身均匀，CE 权重应按原窗口计数恢复 1:2:3 的相对质量。
+        weights = te.pk_ce_class_weights(labels, 3, torch.device("cpu"))
+
+        # 权重均值归一到 1，绝对尺度不改变 PyTorch 加权 CE 的归一化结果。
+        self.assertTrue(torch.allclose(weights, torch.tensor([0.5, 1.0, 1.5])))
+
+    def test_parse_args_accepts_round25_regularization_controls(self):
+        # 模拟 Round25 的先验修正、SupCon 权重和多分支 dropout 参数。
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "train_export.py",
+                "--pk-prior-corrected-ce",
+                "--supcon-weight",
+                "0.01",
+                "--dropout",
+                "0.20",
+            ],
+        ):
+            # 解析结果由 main 逐窗口传入 train_model。
+            args = te.parse_args()
+
+        # CE 应启用原训练窗口先验修正。
+        self.assertTrue(args.pk_prior_corrected_ce)
+        # SupCon 权重必须保留浮点精度。
+        self.assertAlmostEqual(args.supcon_weight, 0.01)
+        # 多分支融合层 dropout 应为 20%。
+        self.assertAlmostEqual(args.dropout, 0.20)
+
     def test_parse_args_accepts_targeted_window_list(self):
         with mock.patch.object(
             sys,
@@ -156,18 +268,59 @@ class TrainExportCoreTests(unittest.TestCase):
             atol=1e-6,
         )
 
-    def test_extract_features_returns_264_ordered_values_for_six_axis_window(self):
+    def test_extract_features_returns_294_ordered_values_for_six_axis_window(self):
+        # 构造 62 个采样点、六轴顺序为 gx/gy/gz/ax/ay/az 的确定性测试窗口。
         window = np.arange(62 * 6, dtype=np.float32).reshape(62, 6)
 
+        # 调用生产特征提取器，验证 Python 端最终输入向量的维度和顺序。
         features = te.extract_features(window)
 
+        # 获取与 ESP32 头文件共享的特征名称顺序，名称索引必须与数值索引一致。
         feature_names = te.build_feature_names()
-        self.assertEqual(features.shape, (264,))
-        self.assertEqual(len(feature_names), 264)
+        # 288 维基线追加 6 项有多文件证据的事件对齐候选，总维度必须为 294。
+        self.assertEqual(features.shape, (294,))
+        # 名称数量必须等于模型输入维度，防止标准化参数与 C 数组错位。
+        self.assertEqual(len(feature_names), 294)
         self.assertEqual(feature_names[112], "acc_vertical_phase0_mean")
         self.assertEqual(feature_names[160], "acc_vertical_high_activity_ratio")
         self.assertEqual(feature_names[184], "acc_vertical_normalized_phase0_mean")
         self.assertEqual(feature_names[232], "acc_vertical_q10")
+        self.assertEqual(
+            # 检查最后 30 项弱类特征固定顺序，防止标准化参数和 ESP32 模型错位。
+            feature_names[-30:],
+            [
+                "acc_delta_mag_spectral_mid_band_ratio",
+                "acc_vertical_spectral_high_band_ratio",
+                "gyro_mag_spectral_centroid_hz",
+                "acc_horizontal_mag_spectral_centroid_hz",
+                "acc_vertical_autocorr_first_zero_seconds",
+                "event_gyro_vertical_correlation",
+                "acc_horizontal_mag_autocorr_secondary_peak",
+                "gyro_mag_spectral_high_band_ratio",
+                "acc_vertical_spectral_peak_power_ratio",
+                "acc_delta_mag_spectral_high_band_ratio",
+                "acc_horizontal_mag_spectral_mid_band_ratio",
+                "gyro_mag_spectral_peak_power_ratio",
+                "acc_vertical_spectral_mid_band_ratio",
+                "acc_horizontal_mag_spectral_high_band_ratio",
+                "gyro_mag_positive_peak_amplitude_cv",
+                "acc_vertical_positive_peak_interval_cv",
+                "acc_vertical_to_gyro_mag_max_xcorr",
+                "acc_vertical_to_acc_horizontal_mag_max_xcorr",
+                "acc_vertical_spectral_low_band_ratio",
+                "acc_horizontal_mag_spectral_low_band_ratio",
+                "gyro_mag_spectral_low_band_ratio",
+                "acc_horizontal_mag_autocorr_prominent_peak_count",
+                "acc_horizontal_mag_positive_peak_interval_cv",
+                "acc_horizontal_mag_spectral_peak_power_ratio",
+                "aligned_horizontal_acc_anisotropy",
+                "aligned_horizontal_gyro_anisotropy",
+                "aligned_takeoff_to_landing_seconds",
+                "aligned_landing_impact_width_seconds",
+                "aligned_flight_horizontal_gyro_integral_deg",
+                "aligned_flight_vertical_gyro_integral_abs_deg",
+            ],
+        )
         self.assertNotIn("acc_vertical_argmax_abs_position", feature_names)
         self.assertTrue(np.all(np.isfinite(features)))
 
@@ -316,6 +469,46 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertEqual(report["recall"], 1.0)
         self.assertEqual(report["files"], [str(path)])
 
+    def test_external_holdout_reports_recall_for_each_present_class(self):
+        class_names = ["jumping_jack", "jumping_lunge", "jumping_squat"]
+        feature_names = te.build_feature_names()
+        model = te.BPNet(len(feature_names), len(class_names), dropout=0.0)
+        with torch.no_grad():
+            for parameter in model.parameters():
+                parameter.zero_()
+            model.net[8].bias[0] = 10.0
+        result = {
+            "model": model,
+            "mean": np.zeros(len(feature_names), dtype=np.float32),
+            "std": np.ones(len(feature_names), dtype=np.float32),
+            "window_len": 50,
+            "step_len": 25,
+            "rest_threshold": 0.0,
+            "active_point_threshold": 0.0,
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            records = []
+            for label, label_idx in (("jumping_jack", 0), ("jumping_lunge", 1)):
+                path = root / f"{label}.txt"
+                path.write_text(
+                    "".join(
+                        f"{2000 if index % 2 else -2000},0,0,0,0,7000,{index},\n"
+                        for index in range(80)
+                    ),
+                    encoding="utf-8",
+                )
+                records.append(te.ImuRecord(path, label, label_idx))
+
+            report = te.evaluate_external_holdout(
+                result, records, class_names, torch.device("cpu")
+            )
+
+        self.assertFalse(report["skipped"])
+        self.assertEqual(report["class_recalls"], {"jumping_jack": 1.0, "jumping_lunge": 0.0})
+        self.assertEqual(report["min_recall"], 0.0)
+        self.assertEqual(report["macro_recall"], 0.5)
+
     def test_external_holdout_is_explicitly_skipped_in_validation_mode(self):
         report = te.evaluate_external_holdout(
             {},
@@ -447,14 +640,21 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertLess(float(good_loss), float(bad_loss))
 
     def test_hard_pair_margin_penalizes_confusing_logit_above_true_logit(self):
-        class_names = ["jumping_squat", "squat", "tuck_jump"]
+        # 新方案仅对 lunge 与 squat 施加局部间隔，不再混合普通和跳跃深蹲。
+        class_names = ["lunge", "squat", "tuck_jump"]
+        # 当前样本真实类别为 squat，即索引 1。
         labels = torch.tensor([1])
+        # 错误排序让易混类别 lunge 的 logit 高于真实 squat。
         wrong_order = torch.tensor([[2.0, 0.0, 0.0]])
+        # 正确排序让真实 squat 的 logit 高于 lunge。
         correct_order = torch.tensor([[0.0, 2.0, 0.0]])
 
+        # 计算违反局部间隔时的损失。
         wrong_loss = te.hard_pair_margin_loss(wrong_order, labels, class_names)
+        # 计算满足局部间隔时的损失。
         correct_loss = te.hard_pair_margin_loss(correct_order, labels, class_names)
 
+        # 错误排序必须受到更大惩罚，证明定向约束已生效。
         self.assertGreater(float(wrong_loss), float(correct_loss))
 
     def test_bpnet_exposes_32_value_training_embedding(self):
@@ -511,7 +711,7 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertEqual(metadata["ema_decay"], 0.9)
         self.assertEqual(metadata["label_smoothing"], 0.05)
 
-    def test_exported_header_contains_264_feature_pipeline_and_activity_thresholds(self):
+    def test_exported_header_contains_294_feature_pipeline_and_activity_thresholds(self):
         feature_names = te.build_feature_names()
         model = te.BPNet(input_dim=len(feature_names), class_count=3, dropout=0.0)
         result = {
@@ -533,7 +733,8 @@ class TrainExportCoreTests(unittest.TestCase):
             )
 
             header = header_path.read_text(encoding="utf-8")
-        self.assertIn("#define FEATURE_DIM 264", header)
+        # 生成头文件必须声明新增事件对齐值后的 294 维，确保 C/Python 数组边界一致。
+        self.assertIn("#define FEATURE_DIM 294", header)
         self.assertIn("REST_MOTION_THRESHOLD", header)
         self.assertIn("ACTIVE_POINT_THRESHOLD", header)
         self.assertIn("append_phase_features", header)
@@ -703,6 +904,20 @@ class TrainExportCoreTests(unittest.TestCase):
         np.testing.assert_allclose(recalls, np.full(3, 0.9), atol=1e-7)
         self.assertFalse(failed)
         self.assertAlmostEqual(float(failed_recalls[2]), 0.8)
+
+    def test_deployment_gate_allows_85_percent_for_declared_weak_classes(self):
+        class_names = ["jumping_lunge", "class_a"]
+        y_true = np.repeat(np.arange(2, dtype=np.int64), 20)
+        y_pred = y_true.copy()
+        y_pred[[0, 1, 2]] = 1
+        y_pred[[20, 21]] = 0
+
+        reached, recalls = te.deployment_gate_status(
+            {"y_test": y_true, "test_pred": y_pred}, class_names
+        )
+
+        self.assertTrue(reached)
+        np.testing.assert_allclose(recalls, [0.85, 0.90])
 
     def test_checkpoint_key_prioritizes_minimum_recall_over_macro_f1(self):
         higher_min_recall = te.validation_checkpoint_key(
