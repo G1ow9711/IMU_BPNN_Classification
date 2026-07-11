@@ -32,6 +32,7 @@ ESP32_MODEL_HEADER = PROJECT_ROOT / "esp32" / "include" / "esp32_bp_model.h"
 SAMPLE_RATE = 25
 STEP_SECONDS = 0.5
 WINDOW_SECONDS_LIST = (1.5, 2.0, 2.5)
+WINDOW_SECONDS_CHOICES = WINDOW_SECONDS_LIST + (4.0,)
 TRAIN_RATIO = 0.70
 VAL_RATIO = 0.15
 TEST_RATIO = 0.15
@@ -2669,7 +2670,7 @@ def parse_args() -> argparse.Namespace:
         "--window-seconds",
         type=float,
         nargs="+",
-        choices=WINDOW_SECONDS_LIST,
+        choices=WINDOW_SECONDS_CHOICES,
         default=list(WINDOW_SECONDS_LIST),
     )
     return parser.parse_args()

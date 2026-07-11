@@ -48,6 +48,16 @@ class TrainExportCoreTests(unittest.TestCase):
 
         self.assertTrue(args.validation_only)
 
+    def test_parse_args_accepts_explicit_four_second_context(self):
+        with mock.patch.object(
+            sys,
+            "argv",
+            ["train_export.py", "--window-seconds", "4.0"],
+        ):
+            args = te.parse_args()
+
+        self.assertEqual(args.window_seconds, [4.0])
+
     def test_parse_args_accepts_additional_dataset_directories(self):
         with mock.patch.object(
             sys,
