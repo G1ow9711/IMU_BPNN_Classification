@@ -84,6 +84,22 @@ class TrainExportCoreTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     te.parse_ema_decay(value)
 
+    def test_parse_args_accepts_valid_label_smoothing(self):
+        with mock.patch.object(
+            sys,
+            "argv",
+            ["train_export.py", "--label-smoothing", "0.05"],
+        ):
+            args = te.parse_args()
+
+        self.assertEqual(args.label_smoothing, 0.05)
+
+    def test_label_smoothing_rejects_values_outside_zero_to_one(self):
+        for value in ("-0.1", "1.0"):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    te.parse_label_smoothing(value)
+
     def test_update_ema_state_averages_floating_parameters(self):
         previous = {
             "weight": torch.tensor([2.0, 4.0]),
@@ -464,6 +480,7 @@ class TrainExportCoreTests(unittest.TestCase):
                     device=torch.device("cpu"),
                     progress_label="window=test",
                     ema_decay=0.9,
+                    label_smoothing=0.05,
                 )
         finally:
             te.MAX_EPOCHS = old_max_epochs
@@ -475,12 +492,14 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertIn("supcon=", log)
         self.assertIn("margin=", log)
         self.assertIn("ema=0.900", log)
+        self.assertIn("smooth=0.050", log)
         self.assertIn("val_weak_f1=", log)
         self.assertIn("val_worst_f1=", log)
         self.assertIn("val_weak_recall=", log)
         self.assertIn("val_min_recall=", log)
         self.assertIsInstance(model, te.BPNet)
         self.assertEqual(metadata["ema_decay"], 0.9)
+        self.assertEqual(metadata["label_smoothing"], 0.05)
 
     def test_exported_header_contains_264_feature_pipeline_and_activity_thresholds(self):
         feature_names = te.build_feature_names()

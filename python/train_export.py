@@ -1060,14 +1060,17 @@ def train_model(
     device: torch.device,
     progress_label: str = "",
     ema_decay: float = 0.0,
+    label_smoothing: float = 0.0,
 ) -> Tuple[BPNet, Dict[str, object]]:
     if not 0.0 <= ema_decay < 1.0:
         raise ValueError("EMA decay must be in [0, 1)")
+    if not 0.0 <= label_smoothing < 1.0:
+        raise ValueError("Label smoothing must be in [0, 1)")
     class_count = len(class_names)
     model = BPNet(train_x.shape[1], class_count).to(device)
     ema_model = copy.deepcopy(model).to(device) if ema_decay > 0.0 else None
     ema_state: Optional[Dict[str, torch.Tensor]] = None
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
     loader = make_loader(
         train_x,
@@ -1174,6 +1177,7 @@ def train_model(
             f"{label}epoch={epoch:03d} loss={avg_loss:.4f} "
             f"ce={avg_ce:.4f} supcon={avg_supcon:.4f} margin={avg_margin:.4f} "
             f"ema={ema_decay:.3f} "
+            f"smooth={label_smoothing:.3f} "
             f"val_acc={val_acc:.4f} val_f1={val_f1:.4f} "
             f"val_weak_f1={val_weak_f1:.4f} val_worst_f1={val_worst_f1:.4f} "
             f"val_weak_recall={val_weak_recall:.4f} val_min_recall={val_min_recall:.4f} "
@@ -1187,6 +1191,7 @@ def train_model(
     return model, {
         "best_epoch": best_epoch,
         "ema_decay": ema_decay,
+        "label_smoothing": label_smoothing,
         "history": history,
     }
 
@@ -1310,6 +1315,7 @@ def train_one_experiment(
     validation_only: bool = False,
     extra_train_records: Sequence[ImuRecord] = (),
     ema_decay: float = 0.0,
+    label_smoothing: float = 0.0,
 ) -> Dict[str, object]:
     if validation_only and enable_family_specialist:
         raise ValueError("Family specialist is not supported in validation-only mode")
@@ -1381,6 +1387,7 @@ def train_one_experiment(
             device,
             progress_label=f"window={window_seconds:.1f}s",
             ema_decay=ema_decay,
+            label_smoothing=label_smoothing,
         )
     else:
         model, mean, std = load_primary_artifacts(
@@ -1507,6 +1514,7 @@ def train_one_experiment(
         "rest_threshold": rest_threshold,
         "active_point_threshold": active_point_threshold,
         "ema_decay": ema_decay,
+        "label_smoothing": label_smoothing,
         "model": model,
         "specialist_model": specialist_model,
         "specialist_mean": specialist_mean,
@@ -2347,6 +2355,7 @@ def serializable_experiment(result: Dict[str, object]) -> Dict[str, object]:
         "rest_threshold",
         "active_point_threshold",
         "ema_decay",
+        "label_smoothing",
         "val_acc",
         "val_f1",
         "val_weak_recall",
@@ -2452,6 +2461,9 @@ def save_outputs(
         "ema_decay": np.asarray(
             [float(best_result.get("ema_decay", 0.0))], dtype=np.float32
         ),
+        "label_smoothing": np.asarray(
+            [float(best_result.get("label_smoothing", 0.0))], dtype=np.float32
+        ),
     }
     if isinstance(specialist_model, BPNet):
         scaler_config.update(
@@ -2552,6 +2564,9 @@ def save_validation_outputs(
         ema_decay=np.asarray(
             [float(best_result.get("ema_decay", 0.0))], dtype=np.float32
         ),
+        label_smoothing=np.asarray(
+            [float(best_result.get("label_smoothing", 0.0))], dtype=np.float32
+        ),
     )
     validation_keys = {
         "window_seconds",
@@ -2560,6 +2575,7 @@ def save_validation_outputs(
         "rest_threshold",
         "active_point_threshold",
         "ema_decay",
+        "label_smoothing",
         "val_acc",
         "val_f1",
         "val_weak_recall",
@@ -2609,6 +2625,13 @@ def parse_ema_decay(value: str) -> float:
     return decay
 
 
+def parse_label_smoothing(value: str) -> float:
+    smoothing = float(value)
+    if not 0.0 <= smoothing < 1.0:
+        raise ValueError("Label smoothing must be in [0, 1)")
+    return smoothing
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train IMU BP model and export ESP32 header.")
     parser.add_argument("--dataset-dir", type=Path, default=None)
@@ -2635,6 +2658,12 @@ def parse_args() -> argparse.Namespace:
         type=parse_ema_decay,
         default=0.0,
         help="Epoch-level BP parameter EMA decay; 0 disables EMA.",
+    )
+    parser.add_argument(
+        "--label-smoothing",
+        type=parse_label_smoothing,
+        default=0.0,
+        help="Cross-entropy label smoothing; 0 disables smoothing.",
     )
     parser.add_argument(
         "--window-seconds",
@@ -2676,6 +2705,7 @@ def main() -> None:
         f"max_rotation_degrees={MAX_ROTATION_DEGREES:.1f} "
         f"supcon_weight={SUPCON_WEIGHT:.3f} hard_pair_weight={HARD_PAIR_WEIGHT:.3f} "
         f"ema_decay={args.ema_decay:.3f} "
+        f"label_smoothing={args.label_smoothing:.3f} "
         f"family_specialist={args.enable_family_specialist} "
         f"validation_only={args.validation_only}"
     )
@@ -2693,6 +2723,7 @@ def main() -> None:
             validation_only=args.validation_only,
             extra_train_records=extra_train_records,
             ema_decay=args.ema_decay,
+            label_smoothing=args.label_smoothing,
         )
         all_results.append(result)
 
