@@ -43,6 +43,10 @@ MOTION_TRIGGER_RATIO = 0.20
 MOTION_CONTEXT_SECONDS = 0.50
 # 部署端因果 logit 平滑保存当前及过去 14 个重叠窗口，最大历史范围约 6.72 秒。
 TEMPORAL_LOGIT_HISTORY = 15
+# Round39 固定验证选择的 Round29 基础 M0 logit 权重。
+ENSEMBLE_BASE_LOGIT_WEIGHT = 0.85
+# Round39 固定验证选择的 Round37 掩码 M0 logit 权重；两者之和必须为 1。
+ENSEMBLE_MASKED_LOGIT_WEIGHT = 0.15
 TRAIN_RATIO = 0.70
 VAL_RATIO = 0.15
 TEST_RATIO = 0.15
@@ -131,6 +135,10 @@ IMPACT_DISTRIBUTION_FEATURES = [
     "excess_kurtosis",
     "max_abs_diff",
 ]
+# 297 维顺序中归一化四阶段组从索引 184 开始，前置组为 112+48+24 维。
+NORMALIZED_PHASE_MODEL_START = 184
+# 归一化四阶段组包含 4 个信号×4 阶段×3 统计量，共 48 维，半开区间终点为 232。
+NORMALIZED_PHASE_MODEL_END = 232
 WEAK_CLASS_FEATURE_NAMES = [
     "acc_delta_mag_spectral_mid_band_ratio",
     "acc_vertical_spectral_high_band_ratio",
@@ -268,6 +276,82 @@ class CausalLogitSmoother:
         # 写指针循环前进，末槽之后回到零槽。
         self.next_index = (self.next_index + 1) % self.history_length
         # 逐类累计和除以有效窗口数，返回 float32 无量纲平均 logits。
+        return (self.running_sum / float(self.count)).astype(np.float32)
+
+
+def combine_ensemble_logits(
+    base_logits: np.ndarray,
+    masked_logits: np.ndarray,
+    masked_weight: float = ENSEMBLE_MASKED_LOGIT_WEIGHT,
+) -> np.ndarray:
+    """按固定验证权重组合两个同类别顺序 M0 的无量纲 logits。"""
+    # base 和 masked 可为 [类别数] 或 [样本数,类别数]，形状必须完全相同。
+    base = np.asarray(base_logits, dtype=np.float32)
+    # masked 转为 float32，避免两个模型输出精度不同。
+    masked = np.asarray(masked_logits, dtype=np.float32)
+    # 形状不一致会使窗口或类别错位，立即拒绝。
+    if base.shape != masked.shape:
+        # 错误消息同时报告两个形状，便于定位批次或类别合同错误。
+        raise ValueError(f"Ensemble logit shapes differ: {base.shape} vs {masked.shape}")
+    # 至少需要一个类别维；空标量不能表示分类 logits。
+    if base.ndim == 0 or base.shape[-1] <= 0:
+        # 拒绝空类别输入，防止 argmax 在部署层失败。
+        raise ValueError("Ensemble logits must have a non-empty class dimension")
+    # 任一模型出现 NaN 或无穷值时拒绝融合，防止异常分数进入动作段长期状态。
+    if not np.all(np.isfinite(base)) or not np.all(np.isfinite(masked)):
+        # 调用方应丢弃当前窗口并记录模型或标准化异常，不能用零值静默替换。
+        raise ValueError("Ensemble logits must be finite")
+    # 权重必须有限且位于 [0,1]，否则不再是两个模型的凸组合。
+    if not np.isfinite(masked_weight) or not 0.0 <= masked_weight <= 1.0:
+        # 不静默夹紧，避免验证选择和部署权重不一致。
+        raise ValueError("masked_weight must be finite and in [0, 1]")
+    # base_weight 与 masked_weight 和为 1，保持两个模型 logit 总尺度稳定。
+    base_weight = np.float32(1.0 - float(masked_weight))
+    # 返回 float32 凸组合；时间复杂度 O(样本数×类别数)，无额外模型参数。
+    return base_weight * base + np.float32(masked_weight) * masked
+
+
+class CausalBoutLogitAccumulator:
+    """从活动段开始累计当前及全部过去 logits，并在动作段结束时显式重置。"""
+
+    def __init__(self, class_count: int) -> None:
+        # class_count 必须为正，代表两个 M0 共享的输出类别数。
+        if class_count <= 0:
+            # 非正类别数无法建立累计向量。
+            raise ValueError("class_count must be positive")
+        # class_count 保存每次 update 要求的 logits 长度。
+        self.class_count = int(class_count)
+        # running_sum 形状 [类别数]，float64 降低长动作段累计舍入误差。
+        self.running_sum = np.zeros(self.class_count, dtype=np.float64)
+        # count 是当前活动段从开始到当前的窗口数，重置后为 0。
+        self.count = 0
+
+    def reset(self) -> None:
+        """在静止、动作切换、设备重连或用户切换时清空当前动作段证据。"""
+        # 清零全部类别累计和，防止前一动作影响后一动作。
+        self.running_sum.fill(0.0)
+        # 窗口计数归零，下一次 update 只由当前窗口决定。
+        self.count = 0
+
+    def update(self, logits: np.ndarray) -> np.ndarray:
+        """加入当前 [类别数] logits 并返回从动作段开始到当前的因果均值。"""
+        # values 转为 float32 一维数组，允许调用方传列表或 NumPy 向量。
+        values = np.asarray(logits, dtype=np.float32).reshape(-1)
+        # 类别维必须与构造时完全一致。
+        if values.shape != (self.class_count,):
+            # 异常包含实际和期望形状，防止类别顺序错位。
+            raise ValueError(
+                f"Expected logits shape ({self.class_count},), got {values.shape}"
+            )
+        # 非有限 logits 会永久污染累计和，必须在进入状态前拒绝。
+        if not np.all(np.isfinite(values)):
+            # NaN/Inf 通常来自模型或标准化异常，调用方应丢弃当前窗口并记录错误。
+            raise ValueError("Bout logits must be finite")
+        # 累加当前窗口全部类别分数，只使用当前和过去证据。
+        self.running_sum += values.astype(np.float64)
+        # 当前动作段有效窗口数增加一。
+        self.count += 1
+        # 累计和除以窗口数得到无量纲平均 logits，并转为部署一致的 float32。
         return (self.running_sum / float(self.count)).astype(np.float32)
 
 
@@ -2305,6 +2389,32 @@ def standardize(
     )
 
 
+def apply_model_feature_mask(
+    standardized_features: np.ndarray,
+    suppress_normalized_phase: bool,
+) -> np.ndarray:
+    """按候选配置把冗余归一化阶段组替换为训练均值对应的零标准分。"""
+    # values 必须是形状 [样本数,297] 的无量纲标准化特征。
+    values = np.asarray(standardized_features, dtype=np.float32)
+    # 二维和固定特征维度是多分支切片及 ESP32 模型合同的前提。
+    if values.ndim != 2 or values.shape[1] != len(build_feature_names()):
+        # 错误消息包含实际形状，便于发现旧 296/302 维工件或专家特征误用。
+        raise ValueError(
+            f"Expected standardized model features (n, {len(build_feature_names())}), "
+            f"got {values.shape}"
+        )
+    # masked 是独立副本，避免训练、验证和后续消融共享数组时产生隐式修改。
+    masked = values.copy()
+    # 开关关闭时保持 Round29 基线输入完全不变。
+    if not suppress_normalized_phase:
+        # 返回副本，调用方可安全原地处理而不影响上游标准化数组。
+        return masked
+    # 48 个归一化阶段标准分设为 0，等价于把原始特征替换为训练集均值。
+    masked[:, NORMALIZED_PHASE_MODEL_START:NORMALIZED_PHASE_MODEL_END] = 0.0
+    # 返回形状不变的 [样本数,297] 输入，模型参数和分支边界无需改变。
+    return masked
+
+
 def family_subset(
     x: np.ndarray,
     y: np.ndarray,
@@ -2960,6 +3070,7 @@ def train_one_experiment(
     pk_prior_corrected_ce: bool = False,
     supcon_weight: float = SUPCON_WEIGHT,
     dropout: float = DROPOUT,
+    suppress_normalized_phase: bool = False,
 ) -> Dict[str, object]:
     window_len, step_len = window_lengths(window_seconds)
     train_records, val_records, test_records = split_records_for_experiment(
@@ -3019,6 +3130,12 @@ def train_one_experiment(
         train_x, val_x, test_x, mean, std = standardize(
             train_x_raw, val_x_raw, test_x_raw
         )
+        # 主模型训练输入先应用候选掩码，保证被屏蔽列在全部优化步骤中恒为零。
+        train_x = apply_model_feature_mask(train_x, suppress_normalized_phase)
+        # 验证输入使用同一掩码，早停和模型选择不能依赖训练时不可见的列。
+        val_x = apply_model_feature_mask(val_x, suppress_normalized_phase)
+        # 完整模式测试输入和验证模式空数组均保持同一 [样本数,297] 合同。
+        test_x = apply_model_feature_mask(test_x, suppress_normalized_phase)
         model, train_meta = train_model(
             train_x,
             train_y,
@@ -3050,6 +3167,12 @@ def train_one_experiment(
         train_x = ((train_x_raw - mean) / std).astype(np.float32)
         val_x = ((val_x_raw - mean) / std).astype(np.float32)
         test_x = ((test_x_raw - mean) / std).astype(np.float32)
+        # 加载主模型时也按当前显式开关处理训练输入，供后续专家流程和一致性检查使用。
+        train_x = apply_model_feature_mask(train_x, suppress_normalized_phase)
+        # 固定主模型验证输入执行相同掩码。
+        val_x = apply_model_feature_mask(val_x, suppress_normalized_phase)
+        # 固定主模型测试输入执行相同掩码；验证模式下数组为空但维度合法。
+        test_x = apply_model_feature_mask(test_x, suppress_normalized_phase)
         train_meta = {"loaded_from": str(Path(primary_artifact_dir).resolve())}
         print(
             f"primary_model_loaded={Path(primary_artifact_dir).resolve()}",
@@ -3183,6 +3306,7 @@ def train_one_experiment(
         "pk_prior_corrected_ce": pk_prior_corrected_ce,
         "supcon_weight": supcon_weight,
         "dropout": dropout,
+        "suppress_normalized_phase": suppress_normalized_phase,
         "model": model,
         "specialist_model": specialist_model,
         "specialist_mean": specialist_mean,
@@ -3273,6 +3397,11 @@ def evaluate_external_holdout(
     mean = np.asarray(best_result["mean"], dtype=np.float32)
     std = np.asarray(best_result["std"], dtype=np.float32)
     x = ((raw_x - mean) / std).astype(np.float32)
+    # 外部推理严格复用候选保存的主模型输入掩码，默认 False 兼容旧工件。
+    x = apply_model_feature_mask(
+        x,
+        bool(best_result.get("suppress_normalized_phase", False)),
+    )
     model = best_result["model"]
     # 外部留出集允许评估平铺 BP 或多分支候选，两者均实现 nn.Module 前向接口。
     assert isinstance(model, nn.Module)
@@ -3373,6 +3502,8 @@ def export_esp32_header(
     specialist_model = result.get("specialist_model")
     has_specialist = isinstance(specialist_model, BPNet)
     specialist_names = list(result.get("specialist_class_names", []))
+    # suppress_normalized_phase 决定主 BP 是否把 48 个冗余阶段特征固定为训练均值零分。
+    suppress_normalized_phase = bool(result.get("suppress_normalized_phase", False))
     specialist_lines: List[str] = []
     specialist_feature_dim = 0
     if has_specialist:
@@ -3429,6 +3560,9 @@ def export_esp32_header(
         f"#define SAMPLE_RATE_HZ {SAMPLE_RATE}",
         f"#define FEATURE_DIM {len(feature_names)}",
         f"#define CLASS_NUM {len(class_names)}",
+        f"#define SUPPRESS_NORMALIZED_PHASE {1 if suppress_normalized_phase else 0}",
+        f"#define NORMALIZED_PHASE_MODEL_START {NORMALIZED_PHASE_MODEL_START}",
+        f"#define NORMALIZED_PHASE_MODEL_END {NORMALIZED_PHASE_MODEL_END}",
         f"#define HAS_FAMILY_SPECIALIST {1 if has_specialist else 0}",
         f"#define SPECIALIST_CLASS_NUM {len(specialist_names) if has_specialist else 0}",
         f"#define SPECIALIST_FEATURE_DIM {specialist_feature_dim}",
@@ -3437,6 +3571,8 @@ def export_esp32_header(
         f"#define HIDDEN3 {HIDDEN3}",
         f"#define PHASE_SEGMENTS {PHASE_SEGMENTS}",
         f"#define TEMPORAL_LOGIT_HISTORY {TEMPORAL_LOGIT_HISTORY}",
+        f"#define ENSEMBLE_BASE_LOGIT_WEIGHT {c_float(ENSEMBLE_BASE_LOGIT_WEIGHT)}",
+        f"#define ENSEMBLE_MASKED_LOGIT_WEIGHT {c_float(ENSEMBLE_MASKED_LOGIT_WEIGHT)}",
         "",
         f"static const float REST_MOTION_THRESHOLD = {c_float(rest_threshold)};",
         f"static const float ACTIVE_POINT_THRESHOLD = {c_float(active_point_threshold)};",
@@ -3541,6 +3677,106 @@ static inline int bp_temporal_smoother_update(
         if (smoothed_logits[class_index] > smoothed_logits[best_index]) best_index = class_index;
     }
     /* 返回平滑后的全局动作类别索引。 */
+    return best_index;
+}
+
+/*
+ * 固定双 M0 模型融合：combined = 0.85*base + 0.15*masked。
+ * 三个数组形状均为 [CLASS_NUM]，元素为 softmax 前无量纲 logits；允许输出与任一输入共用缓冲区。
+ * 权重只由验证集选择，部署端不得再次使用测试集调权；时间复杂度 O(CLASS_NUM)，无额外状态 RAM。
+ */
+static inline int bp_combine_ensemble_logits(
+    const float base_logits[CLASS_NUM],
+    const float masked_logits[CLASS_NUM],
+    float combined_logits[CLASS_NUM]
+) {
+    /* 任一必要指针为空时返回 -1，避免访问非法内存。 */
+    if (base_logits == 0 || masked_logits == 0 || combined_logits == 0) return -1;
+    /* 逐类执行固定凸组合，类别顺序必须与 Python 导出的 CLASS_NAMES 完全一致。 */
+    for (int class_index = 0; class_index < CLASS_NUM; class_index++) {
+        /* 先读取两个输入，保证 combined_logits 与输入数组共用地址时仍能得到当前类别原值。 */
+        const float base_value = base_logits[class_index];
+        /* masked_value 来自抑制标准化阶段 184:232 特征的第二个 M0。 */
+        const float masked_value = masked_logits[class_index];
+        /* 固定 0.85/0.15 融合保持 logit 总尺度，输出仍为无量纲分数。 */
+        combined_logits[class_index] =
+            ENSEMBLE_BASE_LOGIT_WEIGHT * base_value
+            + ENSEMBLE_MASKED_LOGIT_WEIGHT * masked_value;
+    }
+    /* 返回零表示全部类别已完成融合。 */
+    return 0;
+}
+
+/*
+ * 单个动作活动段的因果累计证据状态。
+ * running_sum 形状为 [CLASS_NUM]，count 是从活动段开始到当前的窗口数。
+ * 11 类时 RAM 为 11*4+4=48 字节；每窗口时间复杂度 O(CLASS_NUM)。
+ * 静止、动作切换、设备断连或用户切换时必须调用 bp_bout_accumulator_reset。
+ */
+typedef struct {
+    /* running_sum 保存活动段内当前及全部历史窗口的逐类融合 logit 和。 */
+    float running_sum[CLASS_NUM];
+    /* count 使用 32 位无符号整数，正常健身动作段远小于其上限。 */
+    uint32_t count;
+} BpBoutAccumulator;
+
+/* 清空上一动作段证据，使下一窗口从独立活动段开始判断。 */
+static inline void bp_bout_accumulator_reset(BpBoutAccumulator* state) {
+    /* 空指针表示调用方没有提供状态，直接返回避免崩溃。 */
+    if (state == 0) return;
+    /* 逐类清零累计和，防止上一动作标签影响下一动作。 */
+    for (int class_index = 0; class_index < CLASS_NUM; class_index++) {
+        /* 当前类别的历史融合 logit 和恢复为零。 */
+        state->running_sum[class_index] = 0.0f;
+    }
+    /* 窗口计数归零，下一次更新的均值等于当前窗口 logits。 */
+    state->count = 0U;
+}
+
+/*
+ * 加入当前融合 logits，输出从动作段开始到当前窗口的因果均值和类别。
+ * combined_logits、averaged_logits 形状均为 [CLASS_NUM]；两者允许共用缓冲区。
+ * 返回最大平均 logit 的类别索引 0..CLASS_NUM-1；空指针或非有限输入返回 -1 且不更新状态。
+ */
+static inline int bp_bout_accumulator_update(
+    BpBoutAccumulator* state,
+    const float combined_logits[CLASS_NUM],
+    float averaged_logits[CLASS_NUM]
+) {
+    /* 任一必要指针为空时返回 -1，状态保持不变。 */
+    if (state == 0 || combined_logits == 0 || averaged_logits == 0) return -1;
+    /* 在修改状态前检查全部类别，避免 NaN 或无穷值永久污染当前动作段。 */
+    for (int class_index = 0; class_index < CLASS_NUM; class_index++) {
+        /* isfinite 同时拒绝 NaN、正无穷和负无穷。 */
+        if (!isfinite(combined_logits[class_index])) return -1;
+    }
+    /* 极端超长会话达到 uint32 上限时把和与计数同时减半，防止计数回绕。 */
+    if (state->count == UINT32_MAX) {
+        /* 所有类别累计和使用同一比例缩放，不改变类别排序。 */
+        for (int class_index = 0; class_index < CLASS_NUM; class_index++) {
+            /* 乘 0.5 降低长期累计量级和浮点溢出风险。 */
+            state->running_sum[class_index] *= 0.5f;
+        }
+        /* 向下取整后的正计数仍保留长期历史，且为新窗口腾出一个计数。 */
+        state->count /= 2U;
+    }
+    /* 先增加窗口数，使首个窗口的分母为一。 */
+    state->count += 1U;
+    /* 逐类累加当前证据并计算从动作段起点到当前的均值。 */
+    for (int class_index = 0; class_index < CLASS_NUM; class_index++) {
+        /* 当前无量纲融合 logit 加入该类别历史和。 */
+        state->running_sum[class_index] += combined_logits[class_index];
+        /* 除以活动段窗口数，输出无量纲平均 logit。 */
+        averaged_logits[class_index] = state->running_sum[class_index] / (float)state->count;
+    }
+    /* best_index 从第零类开始，与 NumPy argmax 的平局规则一致。 */
+    int best_index = 0;
+    /* 依次比较其余类别，严格大于时才替换最优类别。 */
+    for (int class_index = 1; class_index < CLASS_NUM; class_index++) {
+        /* 当前平均 logit 更大时记录其全局类别索引。 */
+        if (averaged_logits[class_index] > averaged_logits[best_index]) best_index = class_index;
+    }
+    /* 返回当前动作段累计证据对应的全局动作类别。 */
     return best_index;
 }
 
@@ -5689,6 +5925,10 @@ static inline int bp_predict_from_features(const float feature_raw[FEATURE_DIM],
     float h3[HIDDEN3];
     float out[CLASS_NUM];
     for (int i = 0; i < FEATURE_DIM; i++) x[i] = (feature_raw[i] - FEATURE_MEAN[i]) / FEATURE_STD[i];
+#if SUPPRESS_NORMALIZED_PHASE
+    /* 将 48 个归一化阶段标准分固定为 0，等价于输入训练集均值并与 Python 掩码一致。 */
+    for (int i = NORMALIZED_PHASE_MODEL_START; i < NORMALIZED_PHASE_MODEL_END; i++) x[i] = 0.0f;
+#endif
     for (int o = 0; o < HIDDEN1; o++) {
         float sum = B1[o];
         for (int i = 0; i < FEATURE_DIM; i++) sum += W1[o][i] * x[i];
@@ -5757,6 +5997,7 @@ def serializable_experiment(result: Dict[str, object]) -> Dict[str, object]:
         "active_point_threshold",
         "ema_decay",
         "label_smoothing",
+        "suppress_normalized_phase",
         "val_acc",
         "val_f1",
         "val_weak_recall",
@@ -5874,6 +6115,10 @@ def save_outputs(
         "label_smoothing": np.asarray(
             [float(best_result.get("label_smoothing", 0.0))], dtype=np.float32
         ),
+        # 保存主 BP 的 48 维输入抑制开关，ESP32 和后续加载必须读取同一合同。
+        "suppress_normalized_phase": np.asarray(
+            [bool(best_result.get("suppress_normalized_phase", False))], dtype=np.bool_
+        ),
     }
     if isinstance(specialist_model, BPNet):
         scaler_config.update(
@@ -5902,6 +6147,9 @@ def save_outputs(
         "relaxed_recall_class_names": sorted(RELAXED_RECALL_CLASS_NAMES),
         "class_names": list(class_names),
         "feature_names": list(feature_names),
+        "suppress_normalized_phase": bool(
+            best_result.get("suppress_normalized_phase", False)
+        ),
         "best_window_seconds": best_result["window_seconds"],
         "best_window_len": best_result["window_len"],
         "step_len": best_result["step_len"],
@@ -5980,6 +6228,10 @@ def save_validation_outputs(
         label_smoothing=np.asarray(
             [float(best_result.get("label_smoothing", 0.0))], dtype=np.float32
         ),
+        # 保存候选掩码，防止后续把权重按未屏蔽输入加载。
+        suppress_normalized_phase=np.asarray(
+            [bool(best_result.get("suppress_normalized_phase", False))], dtype=np.bool_
+        ),
         # 保存验证候选模型类型，避免后续把 M1 state_dict 误加载到 M0。
         model_type=np.asarray(
             [
@@ -5999,6 +6251,7 @@ def save_validation_outputs(
         "active_point_threshold",
         "ema_decay",
         "label_smoothing",
+        "suppress_normalized_phase",
         "multi_branch",
         "deep_narrow",
         "val_acc",
@@ -6022,6 +6275,9 @@ def save_validation_outputs(
         "sample_rate": SAMPLE_RATE,
         "class_names": list(class_names),
         "feature_names": list(feature_names),
+        "suppress_normalized_phase": bool(
+            best_result.get("suppress_normalized_phase", False)
+        ),
         # 分类器类型明确区分 24 维 M1、32 维 M0 和平铺 BP。
         "classifier_type": (
             "deep_narrow_multi_branch"
@@ -6108,6 +6364,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pk-prior-corrected-ce", action="store_true")
     # 启用五个仅训练期使用的运动属性辅助分类头。
     parser.add_argument("--auxiliary-heads", action="store_true")
+    # 将 48 个归一化四阶段特征在标准化后设为训练均值零分，用于 Round36 证据候选。
+    parser.add_argument("--suppress-normalized-phase", action="store_true")
     parser.add_argument(
         "--validation-only",
         action="store_true",
@@ -6195,6 +6453,7 @@ def main() -> None:
         f"pk_batches={args.pk_batches} "
         f"pk_prior_corrected_ce={args.pk_prior_corrected_ce} "
         f"auxiliary_heads={args.auxiliary_heads} "
+        f"suppress_normalized_phase={args.suppress_normalized_phase} "
         f"dropout={args.dropout:.3f} "
         f"validation_only={args.validation_only}"
     )
@@ -6220,6 +6479,7 @@ def main() -> None:
             pk_prior_corrected_ce=args.pk_prior_corrected_ce,
             supcon_weight=args.supcon_weight,
             dropout=args.dropout,
+            suppress_normalized_phase=args.suppress_normalized_phase,
         )
         all_results.append(result)
 

@@ -68,6 +68,85 @@ class TrainExportCoreTests(unittest.TestCase):
             atol=1e-7,
         )
 
+    def test_fixed_ensemble_logits_use_reviewed_validation_weights(self):
+        # base 表示未抑制特征的 Round29 M0 三类无量纲 logits。
+        base = np.asarray([10.0, 2.0, -4.0], dtype=np.float32)
+        # masked 表示把标准化阶段特征 184:232 固定为零的 Round37 M0 logits。
+        masked = np.asarray([0.0, 12.0, 6.0], dtype=np.float32)
+
+        # 使用验证集固定的 0.85/0.15 权重执行凸组合，测试集不得重新调权。
+        combined = te.combine_ensemble_logits(base, masked)
+
+        # 逐类期望值为 0.85*base+0.15*masked，输出保持 float32。
+        np.testing.assert_allclose(combined, [8.5, 3.5, -2.5], atol=1e-7)
+        # 固定权重常量之和必须严格接近一，避免部署端改变 logit 总尺度。
+        self.assertAlmostEqual(
+            te.ENSEMBLE_BASE_LOGIT_WEIGHT + te.ENSEMBLE_MASKED_LOGIT_WEIGHT,
+            1.0,
+        )
+        # Python 输出数据类型必须与 ESP32 float 数组一致。
+        self.assertEqual(combined.dtype, np.float32)
+
+    def test_fixed_ensemble_logits_reject_contract_violations(self):
+        # 不同类别维会造成标签错位，必须在融合前拒绝。
+        with self.assertRaises(ValueError):
+            te.combine_ensemble_logits(np.zeros(3), np.zeros(2))
+        # 标量没有类别维，不能作为分类 logits。
+        with self.assertRaises(ValueError):
+            te.combine_ensemble_logits(np.asarray(1.0), np.asarray(1.0))
+        # 权重超出 [0,1] 后不再是两个模型的凸组合。
+        with self.assertRaises(ValueError):
+            te.combine_ensemble_logits(np.zeros(3), np.zeros(3), masked_weight=1.1)
+        # 非有限模型输出会污染后续动作段累计器，必须提前拒绝。
+        with self.assertRaises(ValueError):
+            te.combine_ensemble_logits(
+                np.asarray([0.0, np.nan, 1.0]),
+                np.zeros(3),
+            )
+
+    def test_causal_bout_accumulator_uses_all_past_windows_and_resets(self):
+        # 三类动作段累计器从静止到动作触发时新建或重置。
+        accumulator = te.CausalBoutLogitAccumulator(class_count=3)
+        # 首窗口只支持第零类，输出应等于当前窗口。
+        first = accumulator.update(np.asarray([3.0, 0.0, 0.0], dtype=np.float32))
+        # 第二窗口支持第一类，输出应为前两窗口均值。
+        second = accumulator.update(np.asarray([0.0, 3.0, 0.0], dtype=np.float32))
+        # 第三窗口支持第三类且幅值更高，用于确认累计器没有固定 15 窗口淘汰。
+        third = accumulator.update(np.asarray([0.0, 0.0, 6.0], dtype=np.float32))
+
+        # 首窗口均值保持 [3,0,0]。
+        np.testing.assert_allclose(first, [3.0, 0.0, 0.0], atol=1e-7)
+        # 两窗口均值为 [1.5,1.5,0]。
+        np.testing.assert_allclose(second, [1.5, 1.5, 0.0], atol=1e-7)
+        # 三窗口均值为 [1,1,2]，第三类成为当前动作段类别。
+        np.testing.assert_allclose(third, [1.0, 1.0, 2.0], atol=1e-7)
+        # 静止或动作切换时显式重置，清除上一动作的全部证据。
+        accumulator.reset()
+        # 重置后的首窗口不受前三个窗口影响。
+        np.testing.assert_allclose(
+            accumulator.update(np.asarray([0.0, 5.0, 0.0], dtype=np.float32)),
+            [0.0, 5.0, 0.0],
+            atol=1e-7,
+        )
+
+    def test_causal_bout_accumulator_rejects_invalid_input_without_state_change(self):
+        # 两类累计器先接收一个有效窗口，建立可检查的历史状态。
+        accumulator = te.CausalBoutLogitAccumulator(class_count=2)
+        # 有效首窗口累计和为 [2,4]，计数为一。
+        accumulator.update(np.asarray([2.0, 4.0], dtype=np.float32))
+
+        # 类别数不一致必须拒绝，避免数组越界或标签错位。
+        with self.assertRaises(ValueError):
+            accumulator.update(np.asarray([1.0, 2.0, 3.0], dtype=np.float32))
+        # NaN 必须拒绝，避免当前动作段后续均值永久失效。
+        with self.assertRaises(ValueError):
+            accumulator.update(np.asarray([np.nan, 1.0], dtype=np.float32))
+
+        # 两次非法更新均不得改变有效窗口计数。
+        self.assertEqual(accumulator.count, 1)
+        # 累计和仍为首个有效窗口，证明异常处理没有部分写入状态。
+        np.testing.assert_allclose(accumulator.running_sum, [2.0, 4.0], atol=1e-7)
+
     def test_motion_segment_bounds_remove_inactive_edges_with_context(self):
         # 构造 200 点连续流，前 50 点和后 75 点为静止，中间 75 点为动作。
         data = np.zeros((200, 6), dtype=np.float32)
@@ -432,6 +511,42 @@ class TrainExportCoreTests(unittest.TestCase):
         )
         self.assertNotIn("acc_vertical_argmax_abs_position", feature_names)
         self.assertTrue(np.all(np.isfinite(features)))
+
+    def test_model_feature_mask_only_zeros_normalized_phase_group(self):
+        # values 构造两个样本、297 个非零标准分，便于精确检查被修改范围。
+        values = np.arange(2 * 297, dtype=np.float32).reshape(2, 297) + 1.0
+        # original 保存调用前副本，用于确认函数不原地修改输入。
+        original = values.copy()
+
+        # masked 启用 Round36 证据支持的 48 维归一化阶段抑制。
+        masked = te.apply_model_feature_mask(values, suppress_normalized_phase=True)
+        # baseline 关闭开关，数值必须与原输入完全一致。
+        baseline = te.apply_model_feature_mask(values, suppress_normalized_phase=False)
+
+        # 输入数组必须保持不变，避免训练和验证共享数组发生状态泄漏。
+        np.testing.assert_array_equal(values, original)
+        # 关闭开关时保持全部 297 项标准分。
+        np.testing.assert_array_equal(baseline, original)
+        # 索引 184:232 的 48 项必须全部变为训练均值对应的零标准分。
+        np.testing.assert_array_equal(masked[:, 184:232], np.zeros((2, 48), dtype=np.float32))
+        # 归一化阶段组之前的 184 项不得改变。
+        np.testing.assert_array_equal(masked[:, :184], original[:, :184])
+        # 冲击分布和弱类机制组成的后 65 项不得改变。
+        np.testing.assert_array_equal(masked[:, 232:], original[:, 232:])
+        # 名称合同确认半开区间内全部属于 normalized_phase 组。
+        self.assertTrue(
+            all(
+                "_normalized_phase" in name
+                for name in te.build_feature_names()[184:232]
+            )
+        )
+        # 旧维度工件必须被拒绝，防止掩码落在错误特征位置。
+        with self.assertRaises(ValueError):
+            # 296 维模拟旧模型输入，不能按当前 297 维合同处理。
+            te.apply_model_feature_mask(
+                np.zeros((1, 296), dtype=np.float32),
+                suppress_normalized_phase=True,
+            )
 
     def test_promoted_wrist_values_match_no_training_analyzer(self):
         # 延迟导入无训练分析器，明确把它作为候选公式的独立参考实现。
@@ -859,6 +974,8 @@ class TrainExportCoreTests(unittest.TestCase):
             "window_len": 62,
             "rest_threshold": 0.08,
             "active_point_threshold": 0.02,
+            # 启用候选掩码，验证生成 C 与 Python 使用相同 184:232 半开区间。
+            "suppress_normalized_phase": True,
         }
         with tempfile.TemporaryDirectory() as temp_dir:
             header_path = Path(temp_dir) / "esp32_bp_model.h"
@@ -873,6 +990,11 @@ class TrainExportCoreTests(unittest.TestCase):
             header = header_path.read_text(encoding="utf-8")
         # 生成头文件必须声明清洗后第一自相关峰加入后的 297 维，确保 C/Python 数组边界一致。
         self.assertIn("#define FEATURE_DIM 297", header)
+        # C 主模型必须声明并启用归一化阶段输入抑制。
+        self.assertIn("#define SUPPRESS_NORMALIZED_PHASE 1", header)
+        self.assertIn("#define NORMALIZED_PHASE_MODEL_START 184", header)
+        self.assertIn("#define NORMALIZED_PHASE_MODEL_END 232", header)
+        self.assertIn("i < NORMALIZED_PHASE_MODEL_END; i++) x[i] = 0.0f", header)
         self.assertIn("REST_MOTION_THRESHOLD", header)
         self.assertIn("ACTIVE_POINT_THRESHOLD", header)
         self.assertIn("append_phase_features", header)
@@ -895,6 +1017,14 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertIn("BpTemporalSmoother", header)
         self.assertIn("bp_temporal_smoother_reset", header)
         self.assertIn("bp_temporal_smoother_update", header)
+        # 生成 C 必须固定使用验证集确定的 0.85/0.15 双模型融合权重。
+        self.assertIn("ENSEMBLE_BASE_LOGIT_WEIGHT 0.85f", header)
+        self.assertIn("ENSEMBLE_MASKED_LOGIT_WEIGHT 0.15f", header)
+        self.assertIn("bp_combine_ensemble_logits", header)
+        # 动作段累计状态必须提供显式重置和因果更新接口。
+        self.assertIn("BpBoutAccumulator", header)
+        self.assertIn("bp_bout_accumulator_reset", header)
+        self.assertIn("bp_bout_accumulator_update", header)
         self.assertIn("bp_predict_from_window", header)
 
     def test_model_header_is_published_to_esp32_only_after_target_is_reached(self):
@@ -1240,6 +1370,7 @@ class TrainExportCoreTests(unittest.TestCase):
             "step_len",
             "rest_threshold",
             "active_point_threshold",
+            "suppress_normalized_phase",
             "val_acc",
             "val_f1",
             "val_weak_recall",
@@ -1263,10 +1394,12 @@ class TrainExportCoreTests(unittest.TestCase):
         }
         result = {key: 0 for key in keys}
         result["active_point_threshold"] = 0.02
+        result["suppress_normalized_phase"] = True
 
         serialized = te.serializable_experiment(result)
 
         self.assertEqual(serialized["active_point_threshold"], 0.02)
+        self.assertTrue(serialized["suppress_normalized_phase"])
 
 
 if __name__ == "__main__":

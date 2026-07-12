@@ -5,6 +5,7 @@
 主要文件：
 
 - `train_export.py`：完整训练与导出入口；
+- `evaluate_fixed_ensemble.py`：固定双 M0 融合、动作段累计和最终测试/外部留出复现入口，不提供测试集调参开关；
 - `test_train_export.py`：核心行为和导出合同测试；
 - `prepare_finals_dataset.py`：按清单校验并准备决赛新增会话；
 - `finals_jumping_squat_manifest.json`：新增会话哈希、行数和训练/盲测角色；
@@ -12,7 +13,7 @@
 - `test_prepare_finals_dataset.py`、`test_feature_separability.py`：数据边界与分析器测试；
 - `requirements.txt`：Python 依赖版本。
 
-当前提取器输出 294 项手工特征：288 项既有统计/频谱/峰形值，加 6 项经过训练/验证无训练分离度检查的事件对齐与水平各向异性值。Round21 的 288 维平铺 BP 仍是固定验证集最佳结果。`--enable-family-specialist` 为跳跃四类形状专家消融开关，当前结果较差，默认不启用。`--primary-artifact-dir` 可加载已有平铺主 BP，只训练专家网络。
+当前提取器输出 297 项手工特征，通道顺序固定为 `gx、gy、gz、ax、ay、az`。Round29 在窗口提特征前修复单轴孤立尖峰并裁剪文件首尾静止段；新增 `wrist_acf_first_peak` 后形成当前合同。Round36 的依赖审计只让第二 M0 把标准化索引 `184:232` 的 48 项归一化阶段特征固定为零，原始数据和其余特征不删除。`--enable-family-specialist` 仅保留为历史消融开关，默认不启用。
 
 `--validation-only` 用于测试隔离的消融训练：保留逐 epoch 日志和验证指标，但不构建测试窗口、不输出测试指标、不触发 ESP32 头文件导出。验证结果保存在 `validation_report.json`。
 
@@ -34,7 +35,9 @@ Round24 新增三个联合弱类优化开关：
 
 当前最接近固定验证门槛的组合是 4 秒窗口加 `0.05` 标签平滑：最佳 epoch 54 的验证准确率、宏平均 F1、最小类别召回分别为 `92.31%/91.81%/79.81%`。由于最小召回仍低于 `79.92%` 基线，该轮未读取测试集或 `scy3`，也未导出正式 C 头文件。
 
-当前发布门槛为五个批准弱类召回率至少 `85%`，其余六类至少 `90%`。验证隔离候选未逐类达标时，不运行正式测试、不读取外部会话，也不生成 `esp32/include/esp32_bp_model.h`。
+当前最终固定配置使用 Round29 未掩码 M0 和 Round37 掩码 M0，logits 权重为 `0.85/0.15`。活动段内累计当前及全部历史 logits，基础测试 `jumping_squat/squat/tuck_jump` 召回为 `89.12%/99.80%/100%`，总准确率 `99.29%`；外部 `scy3` 三个跳跃类均为 `100%`。固定复现命令见根目录 README。
+
+生成 C 已提供 `bp_combine_ensemble_logits`、`BpBoutAccumulator`、`bp_bout_accumulator_reset` 和 `bp_bout_accumulator_update`。静止、动作切换、断连或用户切换时必须重置。当前 `export_esp32_header` 仍只自动导出单个平铺 `BPNet`，尚未自动打包两个六分支 M0 权重；不要把旧单模型头文件当作最终双模型。
 
 Round21 的 288 维可视验证结果为准确率 `91.88%`、宏平均 F1 `91.56%`、最低类别召回 `81.47%`。仍未达标的类别为 `jumping_lunge`、`jumping_squat`、`tuck_jump` 和 `lunge`，因此后续先执行误分类窗口子集特征分析，不直接继续训练。
 

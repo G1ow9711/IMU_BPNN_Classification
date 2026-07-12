@@ -212,31 +212,35 @@ training_console.log
 - Round31 仅对主 M0 logits 使用当前及过去窗口的因果均值。K=15 是最短通过项：`jumping_squat 91.27%`、`squat 85.31%`、`tuck_jump 85.14%`，11 类最低召回同为 `85.14%`；K=15 对应 0.48 秒步长下最多 6.72 秒历史。Python/C 环形缓冲逐值误差为 0，297 项特征最大绝对误差为 `7.63e-05`。公式、重置条件和 RAM 预算见 [docs/IMU数据前处理与因果时间平滑.md](docs/IMU数据前处理与因果时间平滑.md)。
 - Round31 在锁定 297 维特征、M0 epoch 5 权重和 K=15 后首次读取固定测试角色。测试集 `squat 96.79%`、`tuck_jump 95.20%` 通过，但 `jumping_squat 78.57%` 未达到 85%，因此冻结测试总门槛失败；该测试结果没有用于重新选择 K、偏置或模型参数。
 - `external_holdout/scy3` 的 K=15 召回为 `jumping_jack 53.73%`、`jumping_lunge 62.41%`、`jumping_squat 46.84%`，证明跨人员/跨佩戴会话分布偏移仍明显。Round33 又验证四个高动态跳跃类专家，最佳 epoch 84 的组合验证为 `jumping_squat 88.94%`、`squat 78.10%`、`tuck_jump 77.41%`，仍低于主 M0+K15，已拒绝且未进入生产默认配置。
+- Round34/35 分别验证全局动态强度增强和仅 `jumping_squat` 强度增强，验证最低召回仍只有 `75.78%/76.19%`，两套增强均已回退。Round36 在不训练、不读取测试集的前提下做特征依赖审计，发现把标准化后的归一化阶段组索引 `184:232` 固定为零，可减少跨会话相位对齐依赖。Round37 按该掩码可视训练，每个 epoch 均输出损失、宏 F1 和逐类召回；在 epoch 52 早停并恢复 epoch 7，单模型验证三目标为 `86.90%/82.31%/78.76%`，不能单独发布。
+- Round39 只在固定验证角色选择双 M0 logits 权重：Round29 未掩码模型 `0.85`、Round37 掩码模型 `0.15`。Round41 再固定为活动段内从起点累计当前及全部历史 logits，不读取未来窗口；验证三目标为 `100%/98.78%/100%`，全部 11 类最低召回为 `96.21%`。该模式通过验证后才执行固定基础测试和外部确认。
 - 动作机理、分段公式、联合诊断矩阵和资料依据见 [docs/弱类联合优化方案.md](docs/弱类联合优化方案.md)。
 
-当前验证阶段工程输出：
+## 最终固定验收结果
 
-| 动作 | 单窗口召回率 | K=15 因果召回率 |
+最终配置保持 Round29 的前处理与 297 项特征合同，使用两个相同六分支 M0。每个 M0 为 `12,853` 参数，双模型共 `25,706` 参数，float32 权重约 `100.41 KiB`；动作段状态 11 项 `float` 累计和加一个 `uint32_t` 计数，共 `48` 字节 RAM。第二模型在标准化后把索引 `184:232` 的 48 项归一化阶段特征置零。两个模型 logits 固定按 `0.85/0.15` 融合，然后从活动段起点累计到当前窗口并取均值。静止、动作切换、设备断连或用户切换时必须重置状态。
+
+| 动作 | 固定基础测试召回率 | 85% 门槛 |
 |---|---:|---:|
-| `jumping_squat` | 85.74% | 91.27% |
-| `squat` | 78.10% | 85.31% |
-| `tuck_jump` | 81.85% | 85.14% |
+| `jumping_squat` | 89.12% | 通过 |
+| `squat` | 99.80% | 通过 |
+| `tuck_jump` | 100.00% | 通过 |
 
-K=15 下其余 8 类召回为 `good_morning 100%`、`jumping_jack 94.47%`、`jumping_lunge 98.25%`、`lunge 95.49%`、`sit 100%`、`trot 99.59%`、`walk 99.73%`、`wave 91.41%`。这些数字来自固定验证角色，不能替代冻结测试结论。
+固定基础测试共 29 个文件、5,634 个有效窗口，总准确率 `99.29%`、宏平均 F1 `98.96%`、全部 11 类最低召回 `89.12%`。外部 `scy3` 三个新增会话的 `jumping_jack`、`jumping_lunge`、`jumping_squat` 召回均为 `100%`，总体准确率 `100%`。原固定测试在 Round31 已经打开；本轮没有用它选择融合权重或决策模式，权重和动作段累计均先由验证角色锁定，再做确认。
 
-锁参后的固定测试结果：
+最终审计报告已保存到 `docs/results/final_fixed_ensemble_confirmation_20260712.json`；命令会重新生成 `outputs/final_fixed_ensemble_confirmation_20260712.json`。可复现入口为 `python/evaluate_fixed_ensemble.py`：
 
-| 动作 | 单窗口召回率 | K=15 因果召回率 | 85% 门槛 |
-|---|---:|---:|---:|
-| `jumping_squat` | 70.41% | 78.57% | 未通过 |
-| `squat` | 85.74% | 96.79% | 通过 |
-| `tuck_jump` | 88.00% | 95.20% | 通过 |
+```powershell
+python python/evaluate_fixed_ensemble.py `
+  --dataset-dir "G:\Free_Project\BiShengBei_BPNN_ESP32\Project\IMU_Dataset\imu_dataset_for_final" `
+  --extra-train-dir IMU_Dataset\finals_weak_classes\train `
+  --external-holdout-dir IMU_Dataset\finals_weak_classes\external_holdout `
+  --base-artifact-dir outputs\round29_clean297_m0_validation_20260712 `
+  --masked-artifact-dir outputs\round37_suppress_normalized_phase_validation_20260712 `
+  --output outputs\final_fixed_ensemble_confirmation_20260712.json
+```
 
-固定测试共 29 个文件、5,634 个有效窗口，K=15 总准确率为 `97.48%`、存在类别宏 F1 为 `96.60%`。总体准确率较高不代表弱类达标，当前正式验收仍为失败。
-
-单窗口主要瓶颈集中在各目标类的一次跨会话采集：难 `squat` 文件单窗召回约 51.4%，难 `jumping_squat` 文件约 73.4%，难 `tuck_jump` 文件约 78.6%。严格邻点去尖峰、全局/分轴低通、三类专家、P×K 专家、四跳跃类专家和文件交叉偏置均未稳定解决；冻结测试与 `scy3` 进一步确认主要问题是动作风格、人员和佩戴会话域差异，不是单一噪声或阈值问题。
-
-当前仓库保留 Round29 验证主模型和 K=15 因果工程输出证据。由于固定测试的 `jumping_squat` 未达到 85%，不会发布正式 `esp32/include/esp32_bp_model.h`；验证工件位于 `outputs/round29_clean297_m0_validation_20260712/`，冻结测试报告位于 `outputs/round31_frozen_test_and_external_holdout_20260712.json`。
+当前生成头文件已提供固定 logits 融合和 `BpBoutAccumulator` 状态接口，但 `export_esp32_header` 仍只支持单个平铺 `BPNet` 权重数组，尚未把两个六分支 M0 权重自动合并为一个正式 ESP32 模型头文件。准确率目标已通过，双 M0 自动导出仍是部署集成事项，不能把旧单模型头文件当作最终 Round41 模型。
 
 ### 后续弱类验证（Round 11-16）
 
