@@ -207,11 +207,13 @@ def _autocorrelation_peaks(values: np.ndarray) -> Tuple[float, float]:
 
 def wrist_scalar_features(window: np.ndarray) -> np.ndarray:
     """提取 16 项仅由手腕六轴窗口定义的候选特征，输入形状为 [N,6]。"""
-    # 转为 float64 并验证通道数，通道顺序为 gx、gy、gz、ax、ay、az。
-    data = np.asarray(window, dtype=np.float64)
+    # raw_data 先验证六轴形状，通道顺序固定为 gx、gy、gz、ax、ay、az。
+    raw_data = np.asarray(window, dtype=np.float32)
     # 非法或空输入返回固定长度零向量，保持批量堆叠稳定。
-    if data.ndim != 2 or data.shape[1] != 6 or len(data) == 0:
+    if raw_data.ndim != 2 or raw_data.shape[1] != 6 or len(raw_data) == 0:
         return np.zeros(len(WRIST_SCALAR_FEATURE_NAMES), dtype=np.float32)
+    # 调用生产端单轴尖峰修复，再转为 float64 降低累计和、相关系数及频谱运算误差。
+    data = training.preprocess_imu_window(raw_data).astype(np.float64)
     # 陀螺三轴单位为 deg/s，形状为 [N,3]。
     gyro = data[:, 0:3]
     # 加速度三轴单位为 g，形状为 [N,3]。
@@ -408,11 +410,13 @@ def _resample_series(values: np.ndarray, output_length: int = 32) -> np.ndarray:
 
 def extract_repetition_sequences(window: np.ndarray) -> List[np.ndarray]:
     """从手腕窗口活动峰之间提取若干 32×4 的归一化重复序列。"""
-    # 校验输入为非空六轴窗口。
-    data = np.asarray(window, dtype=np.float64)
+    # raw_data 保存待校验的六轴窗口，通道顺序为 gx、gy、gz、ax、ay、az。
+    raw_data = np.asarray(window, dtype=np.float32)
     # 非法输入没有可用重复。
-    if data.ndim != 2 or data.shape[1] != 6 or len(data) < 10:
+    if raw_data.ndim != 2 or raw_data.shape[1] != 6 or len(raw_data) < 10:
         return []
+    # 重复模板与生产特征共用单轴尖峰修复，避免候选峰由采集毛刺触发。
+    data = training.preprocess_imu_window(raw_data).astype(np.float64)
     # 角速度模长描述手腕旋转活动。
     gyro_magnitude = np.linalg.norm(data[:, 0:3], axis=1)
     # 动态加速度减去窗口均值向量，只描述手腕局部变化。
@@ -845,6 +849,41 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def select_reported_development_records(
+    records: Sequence[training.ImuRecord],
+    validation_report: Dict[str, object],
+) -> List[training.ImuRecord]:
+    """只返回报告明确列入 train_files 或 val_files 的开发角色记录。"""
+    # 第一个实验项保存固定文件角色；同一报告中的全部候选实验共用该划分。
+    experiment = validation_report["all_experiments"][0]
+    # allowed_paths 合并训练和验证绝对路径，明确排除未列出的固定测试角色。
+    allowed_paths = {
+        str(Path(path).resolve()).lower()
+        for field in ("train_files", "val_files")
+        for path in experiment[field]
+    }
+    # records_by_path 只建立路径到记录元数据的映射，不读取任何 IMU 文件内容。
+    records_by_path = {
+        str(record.path.resolve()).lower(): record for record in records
+    }
+    # missing_paths 表示报告指定文件在当前数据源中不存在，继续会改变审计样本构成。
+    missing_paths = sorted(allowed_paths - set(records_by_path))
+    # 缺失任一开发文件时拒绝输出，避免报告仍声称沿用固定角色。
+    if missing_paths:
+        # 异常只显示缺失数量和首个路径，兼顾可诊断性与日志长度。
+        raise ValueError(
+            f"Development role report references {len(missing_paths)} missing files; "
+            f"first={missing_paths[0]}"
+        )
+    # selected 按允许路径取记录，测试角色即使位于同一基础目录也不会进入后续读取循环。
+    selected = [records_by_path[path] for path in allowed_paths]
+    # 按类别和路径排序，确保进度、折分和 JSON 输出在重复运行时一致。
+    return sorted(
+        selected,
+        key=lambda record: (record.label, str(record.path).lower()),
+    )
+
+
 def main() -> None:
     """执行只读训练角色分析并输出三折文件级证据。"""
     # 读取命令行参数。
@@ -860,8 +899,11 @@ def main() -> None:
     base_records, class_names, label_to_idx = training.scan_dataset(args.dataset_dir)
     # 仅扫描显式 extra_train 目录；外部留出目录不会被递归发现。
     extra_records = training.scan_labeled_dataset(args.extra_train_dir, label_to_idx) if args.extra_train_dir is not None else []
-    # 合并训练开发角色记录，按类别和路径排序保证确定性。
-    records = sorted(base_records + extra_records, key=lambda record: (record.label, str(record.path).lower()))
+    # 只选择报告明确列入训练或验证的开发角色；同目录固定测试文件不会被读取。
+    records = select_reported_development_records(
+        base_records + extra_records,
+        validation_report,
+    )
     # 从报告读取最佳窗口秒数，当前 Round21/25 均为 2.5 秒。
     window_seconds = float(validation_report["best_window_seconds"])
     # 秒数乘 25 Hz 并四舍五入得到窗口采样点数。
@@ -883,6 +925,12 @@ def main() -> None:
             print(f"wrist_features file={record_index + 1}/{len(records)} samples={len(samples)}", flush=True)
         # 使用生产读取器完成原始量程换算，返回 [时间点,6]。
         data = training.load_imu_file(record.path)
+        # 非静坐记录先删除首尾长静止段；静坐由生产函数原样保留。
+        data = training.trim_record_to_motion_segment(
+            data,
+            record.label,
+            active_threshold,
+        )
         # 文件短于窗口时无法分析，直接跳过。
         if len(data) < window_length:
             continue

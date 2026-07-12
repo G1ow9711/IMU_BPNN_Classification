@@ -14,11 +14,94 @@ from python import train_export as te
 
 
 class TrainExportCoreTests(unittest.TestCase):
+    def test_preprocess_repairs_single_axis_spike_but_preserves_multi_axis_impact(self):
+        # 构造七点静止手腕窗口，通道顺序为 gx、gy、gz、ax、ay、az。
+        single_axis = np.zeros((7, 6), dtype=np.float32)
+        # az 保持 1g，模拟正常重力基线。
+        single_axis[:, 5] = 1.0
+        # 中心 gx 突增 600 deg/s 且两邻点稳定，超过 300 deg/s 清洗门槛。
+        single_axis[3, 0] = 600.0
+
+        # 执行窗口级工程前处理。
+        repaired = te.preprocess_imu_window(single_axis)
+
+        # 单轴孤立点应被两邻点均值替换为零。
+        self.assertAlmostEqual(float(repaired[3, 0]), 0.0, places=6)
+        # 其余重力通道必须保持 1g。
+        np.testing.assert_allclose(repaired[:, 5], np.ones(7, dtype=np.float32))
+
+        # 复制窗口并构造陀螺与加速度同步的多轴冲击。
+        multi_axis = single_axis.copy()
+        # ax 同时增加 3g，使中心点有两个通道超过各自门槛。
+        multi_axis[3, 3] = 3.0
+
+        # 多轴同步变化更可能是真实落地/摆臂冲击，必须保留。
+        preserved = te.preprocess_imu_window(multi_axis)
+
+        # gx 冲击不得被单轴规则删除。
+        self.assertAlmostEqual(float(preserved[3, 0]), 600.0, places=6)
+        # ax 冲击同样保留。
+        self.assertAlmostEqual(float(preserved[3, 3]), 3.0, places=6)
+
+    def test_causal_logit_smoother_uses_only_recent_history_and_resets(self):
+        # 使用三类、三窗口历史构造小型环形缓冲，便于精确验证淘汰顺序。
+        smoother = te.CausalLogitSmoother(class_count=3, history_length=3)
+        # 第一个窗口没有历史，输出必须等于当前 logits。
+        first = smoother.update(np.asarray([3.0, 0.0, 0.0], dtype=np.float32))
+        # 第二个窗口输出前两窗算术均值。
+        second = smoother.update(np.asarray([0.0, 3.0, 0.0], dtype=np.float32))
+        # 第三和第四窗口用于验证满缓冲后淘汰最旧第一窗。
+        smoother.update(np.asarray([0.0, 0.0, 3.0], dtype=np.float32))
+        fourth = smoother.update(np.asarray([0.0, 0.0, 6.0], dtype=np.float32))
+        # 首窗输出保持原值。
+        np.testing.assert_allclose(first, [3.0, 0.0, 0.0], atol=1e-7)
+        # 两窗均值为 [1.5,1.5,0]。
+        np.testing.assert_allclose(second, [1.5, 1.5, 0.0], atol=1e-7)
+        # 第四次只保留窗口 2、3、4，均值为 [0,1,3]。
+        np.testing.assert_allclose(fourth, [0.0, 1.0, 3.0], atol=1e-7)
+        # 重置清除历史，使下一窗口不受前会话影响。
+        smoother.reset()
+        # 重置后首窗再次原样输出。
+        np.testing.assert_allclose(
+            smoother.update(np.asarray([1.0, 2.0, 4.0], dtype=np.float32)),
+            [1.0, 2.0, 4.0],
+            atol=1e-7,
+        )
+
+    def test_motion_segment_bounds_remove_inactive_edges_with_context(self):
+        # 构造 200 点连续流，前 50 点和后 75 点为静止，中间 75 点为动作。
+        data = np.zeros((200, 6), dtype=np.float32)
+        # 静止和动作阶段均保留 1g 重力。
+        data[:, 5] = 1.0
+        # 中间 gx=400 deg/s，使逐点活动分数显著超过 0.13。
+        data[50:125, 0] = 400.0
+
+        # 使用 1 秒、20% 活动触发和 0.5 秒上下文计算动作半开区间。
+        start, end = te.motion_segment_bounds(data, active_point_threshold=0.13)
+
+        # 0.5 秒在 25 Hz 下为 12 点，动作起点 50 前保留至索引 38。
+        self.assertEqual(start, 38)
+        # 动作末点 124 后保留 12 点，半开终点为 137。
+        self.assertEqual(end, 137)
+
+        # 完全静止流必须保留全段，供 sit 类和静态状态处理。
+        static_start, static_end = te.motion_segment_bounds(
+            np.column_stack(
+                [
+                    np.zeros((200, 5), dtype=np.float32),
+                    np.ones(200, dtype=np.float32),
+                ]
+            ),
+            active_point_threshold=0.13,
+        )
+        # 无动作触发时不裁剪。
+        self.assertEqual((static_start, static_end), (0, 200))
+
     def test_deep_narrow_bpnet_has_reviewed_shape_and_parameter_count(self):
-        # 构造 302 维 M1；六分支输入顺序与 M0 完全一致。
-        model = te.DeepNarrowMultiBranchBPNet(input_dim=302, class_count=11, dropout=0.0)
+        # 构造 297 维 M1；六分支输入顺序与 M0 完全一致。
+        model = te.DeepNarrowMultiBranchBPNet(input_dim=297, class_count=11, dropout=0.0)
         # 三个样本用于验证批维不会因新增融合层改变。
-        samples = torch.randn(3, 302)
+        samples = torch.randn(3, 297)
 
         # M1 最终共享嵌入按审核方案收缩为 24 维。
         embeddings = model.forward_features(samples)
@@ -28,20 +111,20 @@ class TrainExportCoreTests(unittest.TestCase):
         parameter_count = sum(parameter.numel() for parameter in model.parameters())
 
         # 六组输入不变，只有弱类分支输出和融合深度变化。
-        self.assertEqual(model.group_input_dims, (112, 48, 24, 48, 32, 38))
+        self.assertEqual(model.group_input_dims, (112, 48, 24, 48, 32, 33))
         self.assertEqual(model.group_output_dims, (24, 12, 8, 12, 8, 24))
         # 共享表示必须为 [批大小,24]。
         self.assertEqual(tuple(embeddings.shape), (3, 24))
         # 分类输出必须为 [批大小,11]。
         self.assertEqual(tuple(logits.shape), (3, 11))
-        # 302 维输入和 11 类输出下，审核公式得到 16739 个参数。
-        self.assertEqual(parameter_count, 16739)
+        # 297 维输入和 11 类输出下，审核公式得到 16619 个参数。
+        self.assertEqual(parameter_count, 16619)
 
     def test_multi_branch_bpnet_keeps_feature_groups_and_32_value_embedding(self):
-        # 构造 302 维候选模型；六组输入必须按生产特征顺序独立编码后融合。
-        model = te.MultiBranchBPNet(input_dim=302, class_count=11, dropout=0.0)
-        # 四个样本覆盖前向批维，输入形状为 [4,302]。
-        samples = torch.randn(4, 302)
+        # 构造 297 维候选模型；六组输入必须按生产特征顺序独立编码后融合。
+        model = te.MultiBranchBPNet(input_dim=297, class_count=11, dropout=0.0)
+        # 四个样本覆盖前向批维，输入形状为 [4,297]。
+        samples = torch.randn(4, 297)
 
         # 训练嵌入供监督对比损失和辅助分类头使用。
         embeddings = model.forward_features(samples)
@@ -52,8 +135,8 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertEqual(tuple(embeddings.shape), (4, 32))
         # 主分类输出必须保持 [批大小,类别数]。
         self.assertEqual(tuple(logits.shape), (4, 11))
-        # 六个分支分别对应 112/48/24/48/32/38 维特征组。
-        self.assertEqual(model.group_input_dims, (112, 48, 24, 48, 32, 38))
+        # 六个分支分别对应 112/48/24/48/32/33 维特征组。
+        self.assertEqual(model.group_input_dims, (112, 48, 24, 48, 32, 33))
 
     def test_multi_branch_auxiliary_loss_is_finite_for_declared_tasks(self):
         # 使用完整 11 类顺序构造多分支模型和每类一个样本。
@@ -61,7 +144,7 @@ class TrainExportCoreTests(unittest.TestCase):
             "good_morning", "jumping_jack", "jumping_lunge", "jumping_squat",
             "lunge", "sit", "squat", "trot", "tuck_jump", "walk", "wave",
         ]
-        model = te.MultiBranchBPNet(302, len(class_names), dropout=0.0)
+        model = te.MultiBranchBPNet(297, len(class_names), dropout=0.0)
         # 嵌入形状为 [11,32]，标签覆盖所有辅助任务正负样本。
         embeddings = torch.randn(len(class_names), 32)
         labels = torch.arange(len(class_names), dtype=torch.long)
@@ -291,7 +374,7 @@ class TrainExportCoreTests(unittest.TestCase):
             atol=1e-6,
         )
 
-    def test_extract_features_returns_302_ordered_values_for_six_axis_window(self):
+    def test_extract_features_returns_297_ordered_values_for_six_axis_window(self):
         # 构造 62 个采样点、六轴顺序为 gx/gy/gz/ax/ay/az 的确定性测试窗口。
         window = np.arange(62 * 6, dtype=np.float32).reshape(62, 6)
 
@@ -300,17 +383,17 @@ class TrainExportCoreTests(unittest.TestCase):
 
         # 获取与 ESP32 头文件共享的特征名称顺序，名称索引必须与数值索引一致。
         feature_names = te.build_feature_names()
-        # 294 维基线追加 8 项三折文件级手腕候选，总维度必须为 302。
-        self.assertEqual(features.shape, (302,))
+        # 已验证 296 维合同追加清洗后第一自相关峰，总维度必须为 297。
+        self.assertEqual(features.shape, (297,))
         # 名称数量必须等于模型输入维度，防止标准化参数与 C 数组错位。
-        self.assertEqual(len(feature_names), 302)
+        self.assertEqual(len(feature_names), 297)
         self.assertEqual(feature_names[112], "acc_vertical_phase0_mean")
         self.assertEqual(feature_names[160], "acc_vertical_high_activity_ratio")
         self.assertEqual(feature_names[184], "acc_vertical_normalized_phase0_mean")
         self.assertEqual(feature_names[232], "acc_vertical_q10")
         self.assertEqual(
-            # 检查最后 38 项弱类特征固定顺序，防止标准化参数和 ESP32 模型错位。
-            feature_names[-38:],
+            # 检查最后 33 项弱类特征固定顺序，防止标准化参数和 ESP32 模型错位。
+            feature_names[-33:],
             [
                 "acc_delta_mag_spectral_mid_band_ratio",
                 "acc_vertical_spectral_high_band_ratio",
@@ -344,12 +427,7 @@ class TrainExportCoreTests(unittest.TestCase):
                 "aligned_flight_vertical_gyro_integral_abs_deg",
                 "wrist_reversal_rate_hz",
                 "wrist_acf_second_first_ratio",
-                "wrist_out_in_shape_correlation",
-                "wrist_post_event_jerk_half_width_s",
-                "wrist_post_pre_log_energy_ratio",
-                "wrist_recovery_time_ratio",
-                "wrist_cycle_interval_cv",
-                "wrist_harmonic_ratio",
+                "wrist_acf_first_peak",
             ],
         )
         self.assertNotIn("acc_vertical_argmax_abs_position", feature_names)
@@ -372,13 +450,13 @@ class TrainExportCoreTests(unittest.TestCase):
 
         # 分析器返回 16 项候选，代表本轮训练前的原始公式定义。
         analyzer_values = wrist_analysis.wrist_scalar_features(window)
-        # 生产提取器返回 302 项，末八项是晋级手腕值。
+        # 生产提取器返回 297 项，末项是清洗后晋级的第一自相关峰。
         production_values = te.extract_features(window)
-        # 六项补充值在分析器中的固定索引为 3、9、10、11、14、15。
-        expected = analyzer_values[[3, 9, 10, 11, 14, 15]]
+        # 第一自相关峰在独立分析器中的固定索引为 12。
+        expected = analyzer_values[12]
 
-        # 生产末六项必须在 float32 精度内逐值等于分析器定义。
-        np.testing.assert_allclose(production_values[-6:], expected, rtol=1e-6, atol=1e-6)
+        # 生产末项必须在 float32 精度内逐值等于分析器定义。
+        np.testing.assert_allclose(production_values[-1], expected, rtol=1e-6, atol=1e-6)
 
     def test_normalized_phase_features_ignore_offset_and_positive_scale(self):
         signal = np.linspace(-2.0, 3.0, 64, dtype=np.float32) ** 3
@@ -763,11 +841,15 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertIn("val_worst_f1=", log)
         self.assertIn("val_weak_recall=", log)
         self.assertIn("val_min_recall=", log)
+        # 每个 epoch 必须显示最弱类别名称和数值，便于可见训练窗口即时诊断。
+        self.assertIn("weakest_class=", log)
+        # 每个 epoch 必须按固定顺序显示全部逐类召回，而不只给宏平均指标。
+        self.assertIn("class_recalls={jumping_squat:", log)
         self.assertIsInstance(model, te.BPNet)
         self.assertEqual(metadata["ema_decay"], 0.9)
         self.assertEqual(metadata["label_smoothing"], 0.05)
 
-    def test_exported_header_contains_302_feature_pipeline_and_activity_thresholds(self):
+    def test_exported_header_contains_297_feature_pipeline_and_activity_thresholds(self):
         feature_names = te.build_feature_names()
         model = te.BPNet(input_dim=len(feature_names), class_count=3, dropout=0.0)
         result = {
@@ -789,8 +871,8 @@ class TrainExportCoreTests(unittest.TestCase):
             )
 
             header = header_path.read_text(encoding="utf-8")
-        # 生成头文件必须声明新增八项手腕值后的 302 维，确保 C/Python 数组边界一致。
-        self.assertIn("#define FEATURE_DIM 302", header)
+        # 生成头文件必须声明清洗后第一自相关峰加入后的 297 维，确保 C/Python 数组边界一致。
+        self.assertIn("#define FEATURE_DIM 297", header)
         self.assertIn("REST_MOTION_THRESHOLD", header)
         self.assertIn("ACTIVE_POINT_THRESHOLD", header)
         self.assertIn("append_phase_features", header)
@@ -801,7 +883,18 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertIn("gravity_norm", header)
         self.assertIn("wrist_reversal_rate_hz", header)
         self.assertIn("wrist_acf_second_first_ratio", header)
-        self.assertIn("append_additional_wrist_features", header)
+        self.assertIn("wrist_acf_first_peak", header)
+        # C 端必须在特征提取前执行与 Python 同式的单轴毛刺修复。
+        self.assertIn("preprocess_imu_window", header)
+        # 陀螺门槛单位为 deg/s，固定为 300。
+        self.assertIn("PREPROCESS_GYRO_SPIKE_THRESHOLD_DPS", header)
+        # 加速度门槛单位为 g，固定为 1.5。
+        self.assertIn("PREPROCESS_ACC_SPIKE_THRESHOLD_G", header)
+        # 生成头文件必须包含 15 窗口因果 logit 环形缓冲和重置接口。
+        self.assertIn("TEMPORAL_LOGIT_HISTORY 15", header)
+        self.assertIn("BpTemporalSmoother", header)
+        self.assertIn("bp_temporal_smoother_reset", header)
+        self.assertIn("bp_temporal_smoother_update", header)
         self.assertIn("bp_predict_from_window", header)
 
     def test_model_header_is_published_to_esp32_only_after_target_is_reached(self):
@@ -1039,6 +1132,36 @@ class TrainExportCoreTests(unittest.TestCase):
         np.testing.assert_array_equal(mean, np.full(len(feature_names), 2.0))
         np.testing.assert_array_equal(std, np.full(len(feature_names), 3.0))
 
+    def test_load_primary_artifacts_restores_multi_branch_m0(self):
+        # 使用当前 297 项合同构造已训练六分支 M0 参数。
+        feature_names = te.build_feature_names()
+        # 三类足以验证分类头维度和参数键恢复。
+        model = te.MultiBranchBPNet(len(feature_names), 3, dropout=0.0)
+        # 临时目录模拟 Round29 验证候选工件。
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # artifact_dir 同时保存模型和标准化配置。
+            artifact_dir = Path(temp_dir)
+            # 只保存 state_dict，格式与 validation-only 输出一致。
+            torch.save(model.state_dict(), artifact_dir / "best_model.pt")
+            # 均值、标准差和窗口长度用于加载时合同校验。
+            np.savez(
+                artifact_dir / "scaler_and_config.npz",
+                mean=np.zeros(len(feature_names), dtype=np.float32),
+                std=np.ones(len(feature_names), dtype=np.float32),
+                window_len=np.asarray([62]),
+            )
+            # 显式声明 multi_branch=True，禁止误建为平铺 BP。
+            restored, _, _ = te.load_primary_artifacts(
+                artifact_dir,
+                input_dim=len(feature_names),
+                class_count=3,
+                expected_window_len=62,
+                device=torch.device("cpu"),
+                multi_branch=True,
+            )
+        # 恢复结果必须保持六分支 M0 类型。
+        self.assertIsInstance(restored, te.MultiBranchBPNet)
+
     def test_family_specialist_only_replaces_predictions_inside_family(self):
         class_names = ["good_morning", "jumping_jack", "jumping_squat", "squat"]
         family_names = ["jumping_jack", "jumping_squat", "squat"]
@@ -1064,6 +1187,10 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertTrue(any("normalized_phase" in name for name in selected))
         self.assertTrue(any(name.endswith("spectral_entropy") for name in selected))
         self.assertTrue(any(name.endswith("_skew") for name in selected))
+        # 三类专家必须显式获得清洗后晋级的第一自相关峰。
+        self.assertIn("wrist_acf_first_peak", selected)
+        # 原有主轴换向率保留，用于区分深蹲、跳蹲和收腹跳的手腕往返节律。
+        self.assertIn("wrist_reversal_rate_hz", selected)
         self.assertFalse(any(name.endswith("_q90") for name in selected))
         self.assertFalse(any(name.endswith("_max") for name in selected))
 

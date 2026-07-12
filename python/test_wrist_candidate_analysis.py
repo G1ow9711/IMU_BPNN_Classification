@@ -92,6 +92,33 @@ class WristCandidateAnalysisTests(unittest.TestCase):
             # 每折验证集合必须同时包含两个类别。
             self.assertEqual({record.label for record in validation_records}, {"jumping_squat", "tuck_jump"})
 
+    def test_development_record_selection_excludes_fixed_test_role(self) -> None:
+        # 构造训练、验证和固定测试三个文件元数据；本测试不读取文件内容。
+        train_record = training.ImuRecord(Path("roles/train.txt"), "squat", 0)
+        # 验证文件允许进入无训练候选审计。
+        validation_record = training.ImuRecord(Path("roles/validation.txt"), "squat", 0)
+        # 测试文件位于同一数据目录，但不能因目录扫描自动进入候选分析。
+        test_record = training.ImuRecord(Path("roles/test.txt"), "squat", 0)
+        # 报告只把前两个路径声明为开发角色，故意不列出固定测试路径。
+        report = {
+            "all_experiments": [
+                {
+                    "train_files": [str(train_record.path.resolve())],
+                    "val_files": [str(validation_record.path.resolve())],
+                }
+            ]
+        }
+        # 使用生产候选分析器的角色选择函数过滤完整目录扫描结果。
+        selected = analysis.select_reported_development_records(
+            [train_record, validation_record, test_record],
+            report,
+        )
+        # 输出必须只含训练和验证角色，测试路径不得出现。
+        self.assertEqual(
+            {record.path for record in selected},
+            {train_record.path, validation_record.path},
+        )
+
     def test_promotion_requires_direction_effect_novelty_and_coverage(self) -> None:
         # 构造一个满足两折同向、效应量、AUC、相关性和覆盖率门槛的候选记录。
         passing = {

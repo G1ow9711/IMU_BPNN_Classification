@@ -33,6 +33,16 @@ SAMPLE_RATE = 25
 STEP_SECONDS = 0.5
 WINDOW_SECONDS_LIST = (1.5, 2.0, 2.5)
 WINDOW_SECONDS_CHOICES = WINDOW_SECONDS_LIST + (4.0,)
+# 单轴陀螺仪孤立尖峰阈值，单位 deg/s；300 deg/s 只清除明显采集毛刺，保留正常快速摆腕。
+PREPROCESS_GYRO_SPIKE_THRESHOLD_DPS = 300.0
+# 单轴加速度计孤立尖峰阈值，单位 g；1.5 g 不会删除落地时多个轴共同出现的真实冲击。
+PREPROCESS_ACC_SPIKE_THRESHOLD_G = 1.5
+# 活动段检测使用 1 秒因果块，块内至少 20% 采样点活动才确认动作已经开始或尚未结束。
+MOTION_TRIGGER_RATIO = 0.20
+# 离线记录裁剪在首末活动点外各保留 0.5 秒，避免切掉动作准备和动作恢复阶段。
+MOTION_CONTEXT_SECONDS = 0.50
+# 部署端因果 logit 平滑保存当前及过去 14 个重叠窗口，最大历史范围约 6.72 秒。
+TEMPORAL_LOGIT_HISTORY = 15
 TRAIN_RATIO = 0.70
 VAL_RATIO = 0.15
 TEST_RATIO = 0.15
@@ -40,9 +50,8 @@ SIT_CLASS_NAME = "sit"
 HIGH_DYNAMIC_CLASSES = {"jumping_jack", "jumping_lunge", "jumping_squat", "tuck_jump"}
 WEAK_CLASS_NAMES = ["jumping_squat", "squat", "tuck_jump", "jumping_lunge"]
 FAMILY_SPECIALIST_CLASS_NAMES = [
-    "jumping_jack",
-    "jumping_lunge",
     "jumping_squat",
+    "squat",
     "tuck_jump",
 ]
 HARD_CONFUSION_PAIRS = {
@@ -176,18 +185,8 @@ WEAK_CLASS_FEATURE_NAMES = [
     "wrist_reversal_rate_hz",
     # 手腕角速度模长归一化自相关第二时间峰与第一时间峰之比，无量纲。
     "wrist_acf_second_first_ratio",
-    # 手腕角速度模长前半段与时间反转后半段的相关系数，无量纲。
-    "wrist_out_in_shape_correlation",
-    # 手腕主要 jerk 事件后半高连续宽度，单位为秒。
-    "wrist_post_event_jerk_half_width_s",
-    # 主要 jerk 事件后/前动态加速度能量自然对数比，无量纲。
-    "wrist_post_pre_log_energy_ratio",
-    # 主要 jerk 事件后恢复到稳健动态基线的相对时间，无量纲。
-    "wrist_recovery_time_ratio",
-    # 手腕角速度活动峰间隔的总体变异系数，无量纲。
-    "wrist_cycle_interval_cv",
-    # 手腕角速度模长二次谐波功率与基频功率之比，无量纲。
-    "wrist_harmonic_ratio",
+    # 清洗后角速度模长在 0.3～3.0 秒延迟范围的第一正自相关峰，无量纲。
+    "wrist_acf_first_peak",
 ]
 
 HIDDEN1 = 96
@@ -200,6 +199,76 @@ class ImuRecord:
     path: Path
     label: str
     label_idx: int
+
+
+class CausalLogitSmoother:
+    """用固定 15 槽环形缓冲区计算当前及历史窗口 logits 的因果均值。"""
+
+    def __init__(
+        self,
+        class_count: int,
+        history_length: int = TEMPORAL_LOGIT_HISTORY,
+    ) -> None:
+        # class_count 必须为正，代表模型输出动作类别数。
+        if class_count <= 0:
+            # 非正类别数无法建立 logit 向量，立即拒绝。
+            raise ValueError("class_count must be positive")
+        # history_length 必须为正；部署默认 15，对应最近约 6.72 秒历史范围。
+        if history_length <= 0:
+            # 零或负历史长度无法计算均值。
+            raise ValueError("history_length must be positive")
+        # class_count 保存每次 update 要求的 logits 元素数。
+        self.class_count = int(class_count)
+        # history_length 保存环形槽数量，Python 测试可传较小值验证边界。
+        self.history_length = int(history_length)
+        # history 形状 [历史窗口数,类别数]，存放尚未被淘汰的 float32 logits。
+        self.history = np.zeros(
+            (self.history_length, self.class_count),
+            dtype=np.float32,
+        )
+        # running_sum 形状 [类别数]，避免每次重新遍历全部历史槽。
+        self.running_sum = np.zeros(self.class_count, dtype=np.float64)
+        # count 是当前有效历史窗口数，范围 0..history_length。
+        self.count = 0
+        # next_index 指向下一次写入或覆盖的环形槽，范围 0..history_length-1。
+        self.next_index = 0
+
+    def reset(self) -> None:
+        """清空会话历史；设备重连、用户切换或明确动作段结束时调用。"""
+        # 清零历史数组，防止重置后旧会话 logits 被误读。
+        self.history.fill(0.0)
+        # 清零逐类累计和。
+        self.running_sum.fill(0.0)
+        # 有效槽数归零，下一次 update 只返回当前窗口分数。
+        self.count = 0
+        # 写指针回到第一个槽，保持 Python/C 确定性一致。
+        self.next_index = 0
+
+    def update(self, logits: np.ndarray) -> np.ndarray:
+        """加入当前 [类别数] logits 并返回只使用当前及过去窗口的均值。"""
+        # values 转为 float32 一维数组，形状必须严格等于 [class_count]。
+        values = np.asarray(logits, dtype=np.float32).reshape(-1)
+        # 类别数不一致会使 Python/C 环形数组错位，立即拒绝。
+        if values.shape != (self.class_count,):
+            # 异常同时报告实际和期望形状。
+            raise ValueError(
+                f"Expected logits shape ({self.class_count},), got {values.shape}"
+            )
+        # 缓冲区已满时，先从累计和中移除将被覆盖的最旧槽。
+        if self.count == self.history_length:
+            # 转为 float64 累减，降低长期更新的累计舍入误差。
+            self.running_sum -= self.history[self.next_index].astype(np.float64)
+        else:
+            # 未满时有效窗口数增加一，最大不超过 history_length。
+            self.count += 1
+        # 把当前 logits 写入 next_index 指向的槽。
+        self.history[self.next_index] = values
+        # 累计当前窗口逐类分数。
+        self.running_sum += values.astype(np.float64)
+        # 写指针循环前进，末槽之后回到零槽。
+        self.next_index = (self.next_index + 1) % self.history_length
+        # 逐类累计和除以有效窗口数，返回 float32 无量纲平均 logits。
+        return (self.running_sum / float(self.count)).astype(np.float32)
 
 
 class BPNet(nn.Module):
@@ -233,9 +302,9 @@ class BPNet(nn.Module):
 class MultiBranchBPNet(nn.Module):
     """按统计、相位、相关、时序、冲击和弱类特征分组编码的轻量 BP 网络。"""
 
-    # 六组维度严格对应 build_feature_names() 的生产顺序，总和必须为 302。
-    group_input_dims = (112, 48, 24, 48, 32, 38)
-    # 各分支压缩到较小嵌入，限制参数量并避免 38 个弱类特征被 112 个统计量淹没。
+    # 六组维度严格对应 build_feature_names() 的生产顺序，总和必须为 297。
+    group_input_dims = (112, 48, 24, 48, 32, 33)
+    # 各分支压缩到较小嵌入，限制参数量并避免 33 个弱类特征被 112 个统计量淹没。
     group_output_dims = (24, 12, 8, 12, 8, 16)
 
     def __init__(self, input_dim: int, class_count: int, dropout: float = DROPOUT):
@@ -277,7 +346,7 @@ class MultiBranchBPNet(nn.Module):
         )
 
     def forward_features(self, x: torch.Tensor) -> torch.Tensor:
-        # 输入张量形状为 [批大小,302]，302 个值均为训练集统计量标准化后的无量纲特征。
+        # 输入张量形状为 [批大小,297]，297 个值均为训练集统计量标准化后的无量纲特征。
         branch_outputs: List[torch.Tensor] = []
         # offset 指向当前分支在生产特征向量中的起始列。
         offset = 0
@@ -368,17 +437,17 @@ class MultiBranchBPNet(nn.Module):
 class DeepNarrowMultiBranchBPNet(nn.Module):
     """按审核方案增加融合深度、保持逐层收缩的轻量 M1 BP。"""
 
-    # 六组输入严格复用 302 维生产顺序，不改变任何特征边界。
-    group_input_dims = (112, 48, 24, 48, 32, 38)
+    # 六组输入严格复用 297 维生产顺序，不改变任何特征边界。
+    group_input_dims = (112, 48, 24, 48, 32, 33)
     # 仅把弱类分支输出增到 24，其余五个分支与 M0 相同，拼接后为 88 维。
     group_output_dims = (24, 12, 8, 12, 8, 24)
 
     def __init__(self, input_dim: int, class_count: int, dropout: float = DROPOUT):
         # 初始化 PyTorch 模块注册表，使全部分支和融合层参与优化及保存。
         super().__init__()
-        # 输入必须等于六组总和 302，防止切片错位。
+        # 输入必须等于六组总和 297，防止切片错位。
         if input_dim != sum(self.group_input_dims):
-            # 错误消息同时报告期望和实际维度，便于发现旧 294/296 维缓存。
+            # 错误消息同时报告期望和实际维度，便于发现旧 296/302 维缓存。
             raise ValueError(
                 f"Deep-narrow model requires {sum(self.group_input_dims)} features, got {input_dim}"
             )
@@ -421,7 +490,7 @@ class DeepNarrowMultiBranchBPNet(nn.Module):
         self.classifier = nn.Linear(24, class_count)
 
     def forward_features(self, x: torch.Tensor) -> torch.Tensor:
-        """把 [批大小,302] 输入编码为 [批大小,24] M1 嵌入。"""
+        """把 [批大小,297] 输入编码为 [批大小,24] M1 嵌入。"""
         # branch_outputs 按固定物理组顺序保存六个分支输出。
         branch_outputs: List[torch.Tensor] = []
         # offset 指向当前分支在 302 维输入中的起始列。
@@ -631,6 +700,127 @@ def load_imu_file(path: Path) -> np.ndarray:
     return convert_raw_imu_units(raw)
 
 
+def preprocess_imu_window(window: np.ndarray) -> np.ndarray:
+    """修复六轴手腕 IMU 中的单轴孤立尖峰，输入和输出形状均为 [N,6]。"""
+    # data 固定使用 float32，六列依次为 gx、gy、gz、ax、ay、az；前三列单位 deg/s，后三列单位 g。
+    data = np.asarray(window, dtype=np.float32)
+    # 非二维或通道数不为 6 的输入无法与 ESP32 固定六轴数组对应，立即拒绝以防通道错位。
+    if data.ndim != 2 or data.shape[1] != 6:
+        # 异常信息包含实际形状，便于定位数据文件列数或调用方切片错误。
+        raise ValueError(f"Expected IMU shape (n, 6), got {data.shape}")
+    # cleaned 是独立副本，调用方仍可保留原始采样用于质量追踪和问题复现。
+    cleaned = data.copy()
+    # 少于三个点时不存在同时具备左右邻点的中心点，直接返回原样副本。
+    if len(data) < 3:
+        # 返回值始终为 float32 的 [N,6] 数组，与正常清洗路径保持相同接口。
+        return cleaned
+    # thresholds 按六轴顺序保存判定阈值，前三项单位 deg/s，后三项单位 g。
+    thresholds = np.asarray(
+        [
+            PREPROCESS_GYRO_SPIKE_THRESHOLD_DPS,
+            PREPROCESS_GYRO_SPIKE_THRESHOLD_DPS,
+            PREPROCESS_GYRO_SPIKE_THRESHOLD_DPS,
+            PREPROCESS_ACC_SPIKE_THRESHOLD_G,
+            PREPROCESS_ACC_SPIKE_THRESHOLD_G,
+            PREPROCESS_ACC_SPIKE_THRESHOLD_G,
+        ],
+        dtype=np.float32,
+    )
+    # 遍历除首末点外的每个采样时刻；首末点缺少双侧证据，因此不做推断修复。
+    for index in range(1, len(data) - 1):
+        # neighbor_mean 是原始前后邻点均值；始终读取 data，避免前一次修复级联改变后续判定。
+        neighbor_mean = (data[index - 1] + data[index + 1]) * np.float32(0.5)
+        # center_residual 表示当前点相对邻点均值的六轴绝对偏差，单位分别为 deg/s 和 g。
+        center_residual = np.abs(data[index] - neighbor_mean)
+        # neighbor_gap 衡量前后邻点自身是否一致，防止在真实快速变化或冲击边沿进行插值。
+        neighbor_gap = np.abs(data[index - 1] - data[index + 1])
+        # candidate_mask 仅接受中心偏差超阈值且两侧差异小于半阈值的轴。
+        candidate_mask = (center_residual > thresholds) & (
+            neighbor_gap < thresholds * np.float32(0.5)
+        )
+        # candidate_axes 保存当前时刻满足孤立尖峰条件的通道编号，范围为 0..5。
+        candidate_axes = np.flatnonzero(candidate_mask)
+        # 只修复恰好一个轴异常的采样点；多轴同时突变按真实身体冲击或转动保留。
+        if len(candidate_axes) == 1:
+            # axis 是唯一异常通道，通道单位由其位于陀螺仪区或加速度区决定。
+            axis = int(candidate_axes[0])
+            # 用原始前后邻点均值替换该轴中心值，输出仍保持原采样率和时间长度。
+            cleaned[index, axis] = neighbor_mean[axis]
+    # 返回清洗后的六轴窗口；时间复杂度 O(6N)，额外空间 O(6N)。
+    return cleaned
+
+
+def motion_segment_bounds(
+    data: np.ndarray,
+    active_point_threshold: float,
+) -> Tuple[int, int]:
+    """返回离线记录中包含动作及上下文的半开区间 [start,end)。"""
+    # cleaned 仅用于活动检测，保证孤立采集尖峰不会错误扩大保留范围。
+    cleaned = preprocess_imu_window(data)
+    # 空记录没有可保留采样点，返回合法空半开区间。
+    if len(cleaned) == 0:
+        # start=end=0 表示输入为空，不会触发负索引或越界切片。
+        return 0, 0
+    # scores 是逐点活动强度，形状 [N]；加速度变化单位 g，角速度项按 200 deg/s 归一化。
+    scores = instantaneous_motion(cleaned)
+    # active 标记每个采样点是否超过由静坐训练记录估计的活动阈值。
+    active = scores > float(active_point_threshold)
+    # block_points 对应 1 秒采样点数；25 Hz 下固定为 25 点。
+    block_points = max(1, int(SAMPLE_RATE))
+    # 记录短于 1 秒时用完整长度作为唯一检测块，避免卷积 valid 模式返回空数组。
+    block_points = min(block_points, len(cleaned))
+    # active_counts 统计每个滑动 1 秒块中的活动点数，输出长度为 N-block_points+1。
+    active_counts = np.convolve(
+        active.astype(np.int32),
+        np.ones(block_points, dtype=np.int32),
+        mode="valid",
+    )
+    # trigger_offsets 保存活动点比例不低于 20% 的块起点，用连续证据抑制单点误触发。
+    trigger_offsets = np.flatnonzero(
+        active_counts >= MOTION_TRIGGER_RATIO * float(block_points)
+    )
+    # 没有活动块时保留完整记录；静坐类别和极弱动作不会被错误裁成空数据。
+    if len(trigger_offsets) == 0:
+        # 返回整个 [0,N) 半开区间，调用方可以无条件按返回值切片。
+        return 0, len(cleaned)
+    # first_block_start 是首个确认活动块的起点索引。
+    first_block_start = int(trigger_offsets[0])
+    # first_block 在原记录中的范围不超过 block_points，并至少含一个活动点。
+    first_block = active[first_block_start : first_block_start + block_points]
+    # first_active 定位首块内第一个真实活动点，避免把整块前沿都误当作动作。
+    first_active = first_block_start + int(np.flatnonzero(first_block)[0])
+    # last_block_start 是最后一个确认活动块的起点索引。
+    last_block_start = int(trigger_offsets[-1])
+    # last_block 用于定位末块内最后一个真实活动点。
+    last_block = active[last_block_start : last_block_start + block_points]
+    # last_active 是闭区间活动点索引，后续转换为半开区间终点。
+    last_active = last_block_start + int(np.flatnonzero(last_block)[-1])
+    # context_points 将 0.5 秒换算为采样点；Python 与测试约定 25 Hz 下四舍五入为 12 点。
+    context_points = int(round(MOTION_CONTEXT_SECONDS * SAMPLE_RATE))
+    # start 在首活动点前保留上下文，并夹紧到记录起点 0。
+    start = max(0, first_active - context_points)
+    # end 在末活动点后保留上下文，+1 将闭区间活动点转换为半开区间。
+    end = min(len(cleaned), last_active + 1 + context_points)
+    # 返回半开区间，保证 data[start:end] 正好包含动作及指定上下文。
+    return start, end
+
+
+def trim_record_to_motion_segment(
+    data: np.ndarray,
+    label: str,
+    active_point_threshold: float,
+) -> np.ndarray:
+    """裁剪离线非静坐记录的首尾长静止段，返回原始数据视图。"""
+    # 静坐本身就是目标动作，不能使用活动检测裁剪，否则会破坏该类分布。
+    if label == SIT_CLASS_NAME:
+        # 返回完整静坐记录，单位、形状和原数组均不改变。
+        return data
+    # 根据清洗后的活动证据计算半开区间，但最终切片仍取原始数据以避免重复预处理。
+    start, end = motion_segment_bounds(data, active_point_threshold)
+    # 返回原始六轴记录的动作区间；后续每个窗口在特征入口统一执行一次尖峰修复。
+    return data[start:end]
+
+
 def window_lengths(window_seconds: float) -> Tuple[int, int]:
     window_len = int(round(window_seconds * SAMPLE_RATE))
     step_len = int(round(STEP_SECONDS * SAMPLE_RATE))
@@ -669,7 +859,10 @@ def keep_window_for_label(
     rest_threshold: float,
     active_point_threshold: float,
 ) -> bool:
-    score = motion_score(window)
+    # 先清除单轴孤立毛刺，再计算运动强度，防止一个坏点把静止窗口误判成有效动作。
+    cleaned = preprocess_imu_window(window)
+    # score 是清洗窗口的整体活动分数，供静坐和动态动作使用同一门槛体系。
+    score = motion_score(cleaned)
     if label == SIT_CLASS_NAME:
         return score <= rest_threshold * 1.6
     if score < rest_threshold:
@@ -677,7 +870,7 @@ def keep_window_for_label(
     if label in HIGH_DYNAMIC_CLASSES:
         return (
             score >= rest_threshold * 1.25
-            and active_ratio(window, active_point_threshold) >= 0.20
+            and active_ratio(cleaned, active_point_threshold) >= MOTION_TRIGGER_RATIO
         )
     return True
 
@@ -716,7 +909,11 @@ def estimate_rest_threshold(
         if record.label != SIT_CLASS_NAME:
             continue
         data = load_imu_file(record.path)
-        scores.extend(motion_score(window) for window in iter_windows(data, window_len, step_len))
+        # 静坐阈值也基于清洗窗口估计，保证训练筛选与 ESP32 实时特征入口使用相同信号定义。
+        scores.extend(
+            motion_score(preprocess_imu_window(window))
+            for window in iter_windows(data, window_len, step_len)
+        )
     if not scores:
         return 0.03
     threshold = float(np.percentile(np.asarray(scores, dtype=np.float32), percentile))
@@ -735,7 +932,10 @@ def estimate_active_point_threshold(
             continue
         data = load_imu_file(record.path)
         for window in iter_windows(data, window_len, step_len):
-            scores.extend(instantaneous_motion(window).tolist())
+            # 逐点活动阈值排除单轴尖峰贡献，防止静坐基线被传感器毛刺抬高。
+            scores.extend(
+                instantaneous_motion(preprocess_imu_window(window)).tolist()
+            )
     if not scores:
         return 0.02
     threshold = float(np.percentile(np.asarray(scores, dtype=np.float32), percentile))
@@ -1474,6 +1674,56 @@ def _wrist_acf_second_first_ratio(gyro_magnitude: np.ndarray) -> float:
     )
 
 
+def _wrist_acf_first_peak(gyro_magnitude: np.ndarray) -> float:
+    """返回手腕角速度模长在 0.3～3.0 秒延迟范围的第一正自相关峰。"""
+    # values 是一维角速度模长，单位 deg/s；只依赖手腕三轴陀螺仪。
+    values = np.asarray(gyro_magnitude, dtype=np.float64).reshape(-1)
+    # 少于 10 点时无法覆盖 0.3 秒最小延迟，返回无周期证据的零值。
+    if len(values) < 10:
+        # 零值保持特征有限且与 C 端边界处理一致。
+        return 0.0
+    # centered 去除窗口均值，使相关只描述重复波形而不是角速度直流偏置。
+    centered = values - float(np.mean(values))
+    # energy 是零延迟中心化能量，单位 (deg/s)^2。
+    energy = float(np.dot(centered, centered))
+    # 近静止窗口能量过小，归一化无物理意义并可能除零。
+    if energy <= 1e-12:
+        # 返回零表示没有可靠周期峰。
+        return 0.0
+    # minimum_lag=8 点对应约 0.32 秒，排除传感器短时抖动和相邻点平滑伪峰。
+    minimum_lag = max(2, int(round(0.30 * SAMPLE_RATE)))
+    # maximum_lag 取 3 秒与半窗中较小值，保证每个延迟仍有足够重叠点。
+    maximum_lag = min(int(round(3.0 * SAMPLE_RATE)), len(values) // 2)
+    # 最大延迟不大于最小延迟时没有可分析区间。
+    if maximum_lag <= minimum_lag:
+        # 返回零保持短窗口行为确定。
+        return 0.0
+    # correlations 依时间延迟升序保存归一化自相关，形状为 [最大延迟-最小延迟+1]。
+    correlations = np.asarray(
+        [
+            float(np.dot(centered[:-lag], centered[lag:]) / energy)
+            for lag in range(minimum_lag, maximum_lag + 1)
+        ],
+        dtype=np.float64,
+    )
+    # 少于三个相关点时不能定义内部峰，退化为区间最大正相关。
+    if len(correlations) < 3:
+        # 与候选分析器一致，将负最大值夹紧为零。
+        return max(float(np.max(correlations)), 0.0)
+    # peak_offsets 找到严格高于左点、不低于右点且为正的内部局部峰。
+    peak_offsets = np.flatnonzero(
+        (correlations[1:-1] > correlations[:-2])
+        & (correlations[1:-1] >= correlations[2:])
+        & (correlations[1:-1] > 0.0)
+    ) + 1
+    # 没有内部峰时使用范围内最大正相关，避免周期落在搜索边界时丢失证据。
+    if len(peak_offsets) == 0:
+        # 最大正相关理论范围不超过 1，浮点误差由训练标准化吸收。
+        return max(float(np.max(correlations)), 0.0)
+    # 第一峰按时间最早定义，表示最短可靠重复周期的相关强度。
+    return max(float(correlations[int(peak_offsets[0])]), 0.0)
+
+
 def _additional_wrist_features(
     window: np.ndarray,
     gyro_magnitude: np.ndarray,
@@ -1707,8 +1957,8 @@ def weak_class_features(series: Dict[str, np.ndarray]) -> List[float]:
     wrist_reversal_rate = _wrist_reversal_rate_hz(reconstructed_window)
     # 计算三折晋级的手腕角速度自相关第二/第一时间峰比。
     wrist_acf_ratio = _wrist_acf_second_first_ratio(series["gyro_mag"])
-    # 计算其余 6 项三折晋级手腕形态、冲击恢复和周期特征。
-    additional_wrist = _additional_wrist_features(reconstructed_window, series["gyro_mag"])
+    # 计算清洗后三折晋级的第一正自相关峰，描述重复动作周期一致性。
+    wrist_acf_first_peak = _wrist_acf_first_peak(series["gyro_mag"])
     # 先组装 24 项 Round21 特征，固定顺序与前一版标准化合同一致。
     features = [
         acc_delta_mid,
@@ -1740,9 +1990,9 @@ def weak_class_features(series: Dict[str, np.ndarray]) -> List[float]:
     ]
     # 将 6 项事件对齐值追加到原 24 项末尾。
     features.extend(aligned_features)
-    # 先追加换向率和自相关峰比，再追加 6 项补充量，总计 38 项弱类特征和 302 维完整输入。
-    features.extend([wrist_reversal_rate, wrist_acf_ratio, *additional_wrist])
-    # 返回固定顺序列表；生成 C 必须在同一位置追加完全相同的 38 个弱类值。
+    # 追加换向率、第二/第一峰比和第一峰强度，总计 33 项弱类特征和 297 维完整输入。
+    features.extend([wrist_reversal_rate, wrist_acf_ratio, wrist_acf_first_peak])
+    # 返回固定顺序列表；生成 C 必须在同一位置追加完全相同的 33 个弱类值。
     return features
 
 
@@ -1761,9 +2011,8 @@ def build_feature_series(window: np.ndarray) -> Dict[str, np.ndarray]:
 
 
 def extract_features(window: np.ndarray) -> np.ndarray:
-    data = np.asarray(window, dtype=np.float32)
-    if data.ndim != 2 or data.shape[1] != 6:
-        raise ValueError(f"Expected window shape (n, 6), got {data.shape}")
+    # 所有特征统一从清洗后的 [N,6] 手腕 IMU 窗口提取，确保统计量和冲击特征不受孤立毛刺支配。
+    data = preprocess_imu_window(window)
 
     series = build_feature_series(data)
     features: List[float] = []
@@ -1805,6 +2054,8 @@ def build_feature_names() -> List[str]:
 
 
 def build_jump_shape_feature_indices(feature_names: Sequence[str]) -> List[int]:
+    # weak_feature_set 保存 33 项经动作机理或文件级证据设计的弱类特征名称。
+    weak_feature_set = set(WEAK_CLASS_FEATURE_NAMES)
     invariant_suffixes = (
         "_zcr",
         "_high_activity_ratio",
@@ -1819,7 +2070,10 @@ def build_jump_shape_feature_indices(feature_names: Sequence[str]) -> List[int]:
     return [
         index
         for index, name in enumerate(feature_names)
-        if "_normalized_phase" in name or name.endswith(invariant_suffixes)
+        # 专家同时读取尺度不变通用形态和全部弱类机制特征，但排除原始幅值分位数。
+        if "_normalized_phase" in name
+        or name.endswith(invariant_suffixes)
+        or name in weak_feature_set
     ]
 
 
@@ -1951,6 +2205,8 @@ def build_samples(
         "rest_filtered": 0,
         "kept_windows": 0,
         "files_without_valid_window": 0,
+        # motion_edge_trimmed_points 记录非静坐文件首尾被删除的采样点数，单位为点。
+        "motion_edge_trimmed_points": 0,
     }
 
     for file_id, record in enumerate(records):
@@ -1960,7 +2216,18 @@ def build_samples(
                 f"kept={skipped['kept_windows']}",
                 flush=True,
             )
+        # data 是单位已转换的原始六轴记录，形状 [记录点数,6]，通道顺序 gx、gy、gz、ax、ay、az。
         data = load_imu_file(record.path)
+        # original_length 用于审计离线首尾静止段裁剪量，不影响窗口标签或文件编号。
+        original_length = len(data)
+        # 非静坐训练记录只保留动作及 0.5 秒上下文；静坐记录由函数内部原样保留。
+        data = trim_record_to_motion_segment(
+            data,
+            record.label,
+            active_point_threshold,
+        )
+        # 累计被删除点数，便于训练报告量化清洗强度并发现异常过度裁剪。
+        skipped["motion_edge_trimmed_points"] += original_length - len(data)
         if len(data) < window_len:
             skipped["too_short"] += 1
             continue
@@ -1991,7 +2258,11 @@ def build_samples(
                 continue
             fallback_windows = list(iter_windows(data, window_len, step_len))
             if fallback_windows:
-                scored = [(motion_score(window), window) for window in fallback_windows]
+                # 回退选择仍使用清洗后的运动分数，避免孤立尖峰成为“最佳”动作窗口。
+                scored = [
+                    (motion_score(preprocess_imu_window(window)), window)
+                    for window in fallback_windows
+                ]
                 if record.label == SIT_CLASS_NAME:
                     _, best_window = min(scored, key=lambda item: item[0])
                 else:
@@ -2471,7 +2742,8 @@ def train_model(
         val_weak_f1, val_worst_f1 = weak_and_worst_f1(
             val_y, val_pred, class_names
         )
-        val_weak_recall, val_min_recall, _ = weak_and_min_recall(
+        # val_class_recalls 按 class_names 顺序保存每类召回率，形状为 [类别数]。
+        val_weak_recall, val_min_recall, val_class_recalls = weak_and_min_recall(
             val_y, val_pred, class_names
         )
         avg_loss = loss_sum / max(seen, 1)
@@ -2510,6 +2782,13 @@ def train_model(
         else:
             patience_left -= 1
         label = f"{progress_label} " if progress_label else ""
+        # weakest_index 定位本 epoch 验证集中召回率最低的类别。
+        weakest_index = int(np.argmin(val_class_recalls))
+        # class_recall_text 使用固定类别顺序输出全部召回率，便于可见窗口逐轮追踪弱类。
+        class_recall_text = ",".join(
+            f"{name}:{float(recall):.4f}"
+            for name, recall in zip(class_names, val_class_recalls)
+        )
         print(
             f"{label}epoch={epoch:03d} loss={avg_loss:.4f} "
             f"ce={avg_ce:.4f} supcon={avg_supcon:.4f} margin={avg_margin:.4f} "
@@ -2519,6 +2798,8 @@ def train_model(
             f"val_acc={val_acc:.4f} val_f1={val_f1:.4f} "
             f"val_weak_f1={val_weak_f1:.4f} val_worst_f1={val_worst_f1:.4f} "
             f"val_weak_recall={val_weak_recall:.4f} val_min_recall={val_min_recall:.4f} "
+            f"weakest_class={class_names[weakest_index]}:{float(val_class_recalls[weakest_index]):.4f} "
+            f"class_recalls={{{class_recall_text}}} "
             f"best_epoch={best_epoch} patience_left={patience_left}",
             flush=True,
         )
@@ -2552,6 +2833,7 @@ def train_family_specialist(
     class_names: Sequence[str],
     device: torch.device,
     progress_label: str,
+    pk_batches: bool = False,
 ) -> Dict[str, object]:
     family_names = [
         name for name in FAMILY_SPECIALIST_CLASS_NAMES if name in class_names
@@ -2608,6 +2890,10 @@ def train_family_specialist(
         family_names,
         device,
         progress_label=f"{progress_label} specialist=family",
+        # 三类专家只验证层级重判效果，不叠加此前已证明不稳定的监督对比损失。
+        supcon_weight=0.0,
+        # 可选 P×K 批次使三类等量且同类样本优先跨文件，针对会话泛化失败。
+        pk_batches=pk_batches,
     )
     return {
         "model": specialist_model,
@@ -2625,7 +2911,8 @@ def load_primary_artifacts(
     class_count: int,
     expected_window_len: int,
     device: torch.device,
-) -> Tuple[BPNet, np.ndarray, np.ndarray]:
+    multi_branch: bool = False,
+) -> Tuple[nn.Module, np.ndarray, np.ndarray]:
     artifact_dir = Path(artifact_dir)
     config_path = artifact_dir / "scaler_and_config.npz"
     model_path = artifact_dir / "best_model.pt"
@@ -2643,7 +2930,12 @@ def load_primary_artifacts(
     state = torch.load(model_path, map_location=device, weights_only=True)
     if isinstance(state, dict) and "primary" in state:
         state = state["primary"]
-    model = BPNet(input_dim, class_count).to(device)
+    # 按命令行声明恢复平铺 BP 或六分支 M0；结构必须与保存参数键完全匹配。
+    model: nn.Module = (
+        MultiBranchBPNet(input_dim, class_count).to(device)
+        if multi_branch
+        else BPNet(input_dim, class_count).to(device)
+    )
     model.load_state_dict(state)
     model.eval()
     return model, mean, std
@@ -2669,11 +2961,6 @@ def train_one_experiment(
     supcon_weight: float = SUPCON_WEIGHT,
     dropout: float = DROPOUT,
 ) -> Dict[str, object]:
-    if validation_only and enable_family_specialist:
-        raise ValueError("Family specialist is not supported in validation-only mode")
-    # 已保存主模型当前仅支持旧平铺 BP，禁止与多分支候选混用造成结构不匹配。
-    if primary_artifact_dir is not None and multi_branch:
-        raise ValueError("A primary artifact cannot be loaded into the multi-branch model")
     window_len, step_len = window_lengths(window_seconds)
     train_records, val_records, test_records = split_records_for_experiment(
         records,
@@ -2758,6 +3045,7 @@ def train_one_experiment(
             class_count=len(class_names),
             expected_window_len=window_len,
             device=device,
+            multi_branch=multi_branch,
         )
         train_x = ((train_x_raw - mean) / std).astype(np.float32)
         val_x = ((val_x_raw - mean) / std).astype(np.float32)
@@ -2789,6 +3077,7 @@ def train_one_experiment(
             class_names,
             device,
             progress_label=f"window={window_seconds:.1f}s",
+            pk_batches=pk_batches,
         )
         specialist_model = specialist["model"]
         assert isinstance(specialist_model, BPNet)
@@ -2807,18 +3096,28 @@ def train_one_experiment(
             / specialist_std
         ).astype(np.float32)
         specialist_val_pred = predict(specialist_model, specialist_val_x, device)
-        specialist_test_pred = predict(specialist_model, specialist_test_x, device)
+        # 验证模式没有测试样本，避免对空张量调用 predict 的 concatenate 路径。
+        specialist_test_pred = (
+            np.empty(0, dtype=np.int64)
+            if validation_only
+            else predict(specialist_model, specialist_test_x, device)
+        )
         val_pred = route_family_predictions(
             flat_val_pred,
             specialist_val_pred,
             class_names,
             specialist_names,
         )
-        test_pred = route_family_predictions(
-            flat_test_pred,
-            specialist_test_pred,
-            class_names,
-            specialist_names,
+        # 验证模式保持测试预测为空；完整模式才执行测试集专家路由。
+        test_pred = (
+            np.empty(0, dtype=np.int64)
+            if validation_only
+            else route_family_predictions(
+                flat_test_pred,
+                specialist_test_pred,
+                class_names,
+                specialist_names,
+            )
         )
         training_meta["family_specialist"] = specialist["training"]
     else:
@@ -3137,10 +3436,13 @@ def export_esp32_header(
         f"#define HIDDEN2 {HIDDEN2}",
         f"#define HIDDEN3 {HIDDEN3}",
         f"#define PHASE_SEGMENTS {PHASE_SEGMENTS}",
+        f"#define TEMPORAL_LOGIT_HISTORY {TEMPORAL_LOGIT_HISTORY}",
         "",
         f"static const float REST_MOTION_THRESHOLD = {c_float(rest_threshold)};",
         f"static const float ACTIVE_POINT_THRESHOLD = {c_float(active_point_threshold)};",
         "static const float HIGH_DYNAMIC_MIN_RATIO = 0.2f;",
+        f"static const float PREPROCESS_GYRO_SPIKE_THRESHOLD_DPS = {c_float(PREPROCESS_GYRO_SPIKE_THRESHOLD_DPS)};",
+        f"static const float PREPROCESS_ACC_SPIKE_THRESHOLD_G = {c_float(PREPROCESS_ACC_SPIKE_THRESHOLD_G)};",
         "",
         "static const char* CLASS_NAMES[CLASS_NUM] = { "
         + ", ".join(c_string(name) for name in class_names)
@@ -3157,6 +3459,151 @@ def export_esp32_header(
         c_array_1d("B4", b4),
         *specialist_lines,
         r"""
+/*
+ * 因果类别分数平滑状态。
+ * history 形状为 [15,CLASS_NUM]，只保存当前及过去窗口 logits，不读取未来数据。
+ * running_sum 形状为 [CLASS_NUM]，使每次更新复杂度为 O(CLASS_NUM)。
+ * ESP32 RAM 占用约为 (15*CLASS_NUM+CLASS_NUM)*4+8 字节；11 类时约 712 字节。
+ */
+typedef struct {
+    /* history 是环形 logit 缓冲区，元素为 softmax 前无量纲类别分数。 */
+    float history[TEMPORAL_LOGIT_HISTORY][CLASS_NUM];
+    /* running_sum 保存全部有效槽的逐类和。 */
+    float running_sum[CLASS_NUM];
+    /* count 是有效历史窗口数，范围 0..TEMPORAL_LOGIT_HISTORY。 */
+    int count;
+    /* next_index 指向下一次写入或覆盖的槽。 */
+    int next_index;
+} BpTemporalSmoother;
+
+/* 清空设备重连、用户切换或动作会话结束前的全部历史。 */
+static inline void bp_temporal_smoother_reset(BpTemporalSmoother* state) {
+    /* 空指针表示调用方没有提供状态，直接返回避免崩溃。 */
+    if (state == 0) return;
+    /* 逐槽逐类清零，防止重置后读到旧会话数据。 */
+    for (int slot = 0; slot < TEMPORAL_LOGIT_HISTORY; slot++) {
+        /* 遍历固定 CLASS_NUM 个类别。 */
+        for (int class_index = 0; class_index < CLASS_NUM; class_index++) {
+            /* 当前历史元素恢复为零。 */
+            state->history[slot][class_index] = 0.0f;
+        }
+    }
+    /* 清零逐类累计和。 */
+    for (int class_index = 0; class_index < CLASS_NUM; class_index++) {
+        /* 每个类别累计和恢复为零。 */
+        state->running_sum[class_index] = 0.0f;
+    }
+    /* 有效槽数归零。 */
+    state->count = 0;
+    /* 下一写槽回到索引零。 */
+    state->next_index = 0;
+}
+
+/*
+ * 加入当前窗口 logits 并输出当前及过去最多 14 个窗口的因果均值和类别。
+ * raw_logits、smoothed_logits 均为 [CLASS_NUM]；两者允许指向不同数组，不允许为空。
+ * 返回值是平滑后最大 logit 的全局类别索引，范围 0..CLASS_NUM-1；非法状态返回 -1。
+ */
+static inline int bp_temporal_smoother_update(
+    BpTemporalSmoother* state,
+    const float raw_logits[CLASS_NUM],
+    float smoothed_logits[CLASS_NUM]
+) {
+    /* 任一必要指针为空时返回 -1，避免访问非法内存。 */
+    if (state == 0 || raw_logits == 0 || smoothed_logits == 0) return -1;
+    /* 缓冲区已满时，先移除 next_index 指向的最旧槽。 */
+    if (state->count == TEMPORAL_LOGIT_HISTORY) {
+        /* 逐类从累计和中减去被覆盖值。 */
+        for (int class_index = 0; class_index < CLASS_NUM; class_index++) {
+            /* running_sum 保持恰好包含最近 14 个旧窗口。 */
+            state->running_sum[class_index] -= state->history[state->next_index][class_index];
+        }
+    } else {
+        /* 未满时有效槽数增加一。 */
+        state->count++;
+    }
+    /* 写入当前窗口并更新逐类累计和。 */
+    for (int class_index = 0; class_index < CLASS_NUM; class_index++) {
+        /* 当前无量纲 logit 写入下一环形槽。 */
+        state->history[state->next_index][class_index] = raw_logits[class_index];
+        /* 当前分数加入累计和。 */
+        state->running_sum[class_index] += raw_logits[class_index];
+        /* 除以有效窗口数得到因果均值。 */
+        smoothed_logits[class_index] = state->running_sum[class_index] / (float)state->count;
+    }
+    /* 写指针循环前进。 */
+    state->next_index = (state->next_index + 1) % TEMPORAL_LOGIT_HISTORY;
+    /* best_index 初始为第零类。 */
+    int best_index = 0;
+    /* 比较其余类别；严格大于保证平局时选择更早类别，与 argmax 一致。 */
+    for (int class_index = 1; class_index < CLASS_NUM; class_index++) {
+        /* 当前均值更大时更新类别。 */
+        if (smoothed_logits[class_index] > smoothed_logits[best_index]) best_index = class_index;
+    }
+    /* 返回平滑后的全局动作类别索引。 */
+    return best_index;
+}
+
+/*
+ * 修复手腕六轴 IMU 窗口中的单轴孤立尖峰。
+ * 输入 raw_window 和输出 cleaned_window 形状均为 [WINDOW_LEN,6]，通道顺序固定为 gx、gy、gz、ax、ay、az。
+ * 前三轴单位为 deg/s，阈值为 PREPROCESS_GYRO_SPIKE_THRESHOLD_DPS；后三轴单位为 g，阈值为 PREPROCESS_ACC_SPIKE_THRESHOLD_G。
+ * 仅当中心点相对前后邻点均值超阈值、前后邻点差小于半阈值且恰好一个轴异常时进行线性插值。
+ * 多轴共同冲击、快速动作边沿和首末采样点全部保留；时间复杂度 O(6N)，额外 RAM 为 6N 个 float。
+ */
+static inline void preprocess_imu_window(
+    const float raw_window[WINDOW_LEN][AXIS_NUM],
+    float cleaned_window[WINDOW_LEN][AXIS_NUM]
+) {
+    /* 逐点逐轴复制原始窗口，确保调用方缓冲区不被修改且输出总是完整初始化。 */
+    for (int sample = 0; sample < WINDOW_LEN; sample++) {
+        /* 六个通道依次复制 gx、gy、gz、ax、ay、az。 */
+        for (int axis = 0; axis < AXIS_NUM; axis++) {
+            /* 当前值的物理单位由 axis 决定：0..2 为 deg/s，3..5 为 g。 */
+            cleaned_window[sample][axis] = raw_window[sample][axis];
+        }
+    }
+    /* 首末点缺少双侧邻点，因此只遍历索引 1 到 WINDOW_LEN-2。 */
+    for (int sample = 1; sample < WINDOW_LEN - 1; sample++) {
+        /* candidate_count 统计当前时刻满足孤立尖峰条件的轴数；只有等于 1 才允许修复。 */
+        int candidate_count = 0;
+        /* candidate_axis 保存唯一候选轴，-1 表示尚未发现候选。 */
+        int candidate_axis = -1;
+        /* candidate_mean 保存唯一候选轴的前后邻点均值，单位随候选轴变化。 */
+        float candidate_mean = 0.0f;
+        /* 遍历六轴并分别使用角速度或加速度阈值。 */
+        for (int axis = 0; axis < AXIS_NUM; axis++) {
+            /* threshold 前三轴取 300 deg/s，后三轴取 1.5 g。 */
+            float threshold = axis < 3
+                ? PREPROCESS_GYRO_SPIKE_THRESHOLD_DPS
+                : PREPROCESS_ACC_SPIKE_THRESHOLD_G;
+            /* neighbor_mean 是原始前后邻点均值；不读取已修复输出，避免级联插值。 */
+            float neighbor_mean =
+                (raw_window[sample - 1][axis] + raw_window[sample + 1][axis]) * 0.5f;
+            /* center_residual 衡量中心点相对邻点趋势的绝对偏差。 */
+            float center_residual = fabsf(raw_window[sample][axis] - neighbor_mean);
+            /* neighbor_gap 衡量前后邻点是否处于同一稳定趋势。 */
+            float neighbor_gap = fabsf(
+                raw_window[sample - 1][axis] - raw_window[sample + 1][axis]
+            );
+            /* 同时满足大中心偏差和小邻点差时，该轴才是孤立毛刺候选。 */
+            if (center_residual > threshold && neighbor_gap < threshold * 0.5f) {
+                /* 累加候选轴数，用于拒绝真实多轴冲击。 */
+                candidate_count++;
+                /* 保存当前候选轴；若最终候选数大于 1，该值不会被使用。 */
+                candidate_axis = axis;
+                /* 保存线性插值结果，避免修复阶段重复计算。 */
+                candidate_mean = neighbor_mean;
+            }
+        }
+        /* 恰好一个轴异常时才替换，保留多轴落地冲击和真实快速转动。 */
+        if (candidate_count == 1) {
+            /* 写入唯一候选通道，其余五轴保持原值。 */
+            cleaned_window[sample][candidate_axis] = candidate_mean;
+        }
+    }
+}
+
 static inline void append_series_features(const float* x, int n, float* feature, int* idx) {
     float sum = 0.0f;
     float sum2 = 0.0f;
@@ -4415,6 +4862,81 @@ static inline float wrist_reversal_rate_hz(const float window[WINDOW_LEN][AXIS_N
  * 搜索延迟为 0.30～3.00 秒且不超过半窗；输出无量纲并限制在 [0,5]。
  * 时间复杂度 O(N^2)，额外 RAM 不超过 WINDOW_LEN 个 float。
  */
+/*
+ * 返回角速度模长在 0.3～3.0 秒延迟范围内的第一正自相关峰。
+ * 输入 gyro_magnitude 长度为 n，单位 deg/s；输出无量纲，典型范围 [0,1]。
+ * 时间复杂度 O(N^2)，额外 RAM 不超过 WINDOW_LEN 个 float。
+ */
+static inline float wrist_acf_first_peak(const float* gyro_magnitude, int n) {
+    /* 少于 10 点时无法覆盖 0.3 秒最小延迟。 */
+    if (n < 10) return 0.0f;
+    /* mean 是角速度模长窗口均值，单位 deg/s。 */
+    float mean = 0.0f;
+    /* 累加全部 n 个点用于计算均值。 */
+    for (int i = 0; i < n; i++) mean += gyro_magnitude[i];
+    /* 除以点数得到窗口均值。 */
+    mean /= (float)n;
+    /* energy 是中心化序列的零延迟能量，单位 (deg/s)^2。 */
+    float energy = 0.0f;
+    /* 逐点累计中心化平方和。 */
+    for (int i = 0; i < n; i++) {
+        /* centered 去除角速度模长直流偏置。 */
+        float centered = gyro_magnitude[i] - mean;
+        /* 累加当前点能量。 */
+        energy += centered * centered;
+    }
+    /* 近静止窗口不能稳定归一化，返回零周期证据。 */
+    if (energy <= 1e-12f) return 0.0f;
+    /* minimum_lag 在 25 Hz 下为 round(7.5)=8 点。 */
+    int minimum_lag = (int)(0.30f * (float)SAMPLE_RATE_HZ + 0.5f);
+    /* 至少保留两个点延迟，保证后续局部峰左右邻点存在。 */
+    if (minimum_lag < 2) minimum_lag = 2;
+    /* maximum_lag 初始取半窗，保证每个延迟有足够重叠样本。 */
+    int maximum_lag = n / 2;
+    /* 三秒上限换算为采样点。 */
+    int three_seconds = 3 * SAMPLE_RATE_HZ;
+    /* 半窗超过三秒时截断到部署合同上限。 */
+    if (maximum_lag > three_seconds) maximum_lag = three_seconds;
+    /* 空延迟范围返回零。 */
+    if (maximum_lag <= minimum_lag) return 0.0f;
+    /* correlation 按延迟升序保存归一化自相关。 */
+    float correlation[WINDOW_LEN];
+    /* correlation_count 是实际延迟点数。 */
+    int correlation_count = 0;
+    /* 从最小延迟遍历到最大延迟并计算重叠点积。 */
+    for (int lag = minimum_lag; lag <= maximum_lag; lag++) {
+        /* dot 累加当前延迟的中心化交叉乘积。 */
+        float dot = 0.0f;
+        /* 重叠长度为 n-lag，索引不会越过输入末尾。 */
+        for (int i = 0; i < n - lag; i++) {
+            /* 两个延迟对应点均减去同一窗口均值。 */
+            dot += (gyro_magnitude[i] - mean) * (gyro_magnitude[i + lag] - mean);
+        }
+        /* 统一除以零延迟能量，保持与 Python 候选公式一致。 */
+        correlation[correlation_count++] = dot / energy;
+    }
+    /* 少于三个相关点时无法定义内部峰，返回区间最大正值。 */
+    if (correlation_count < 3) {
+        /* best 从第一个相关值开始，避免读取未初始化内存。 */
+        float best = correlation[0];
+        /* 扫描剩余相关值寻找最大值。 */
+        for (int i = 1; i < correlation_count; i++) if (correlation[i] > best) best = correlation[i];
+        /* 负最大值表示没有正周期证据，夹紧为零。 */
+        return best > 0.0f ? best : 0.0f;
+    }
+    /* 按时间顺序寻找第一个正内部局部峰。 */
+    for (int i = 1; i < correlation_count - 1; i++) {
+        /* 当前点严格高于左点、不低于右点且为正时立即返回。 */
+        if (correlation[i] > correlation[i - 1] && correlation[i] >= correlation[i + 1] && correlation[i] > 0.0f) return correlation[i];
+    }
+    /* 没有内部峰时退化为搜索范围内最大正相关，覆盖边界周期。 */
+    float best = correlation[0];
+    /* 遍历全部相关值寻找最大项。 */
+    for (int i = 1; i < correlation_count; i++) if (correlation[i] > best) best = correlation[i];
+    /* 返回非负第一峰强度。 */
+    return best > 0.0f ? best : 0.0f;
+}
+
 static inline float wrist_acf_second_first_ratio(const float* gyro_magnitude, int n) {
     /* 少于 10 点时没有合法 0.3 秒延迟范围。 */
     if (n < 10) return 0.0f;
@@ -4803,10 +5325,20 @@ static inline void append_additional_wrist_features(
     feature[(*index)++] = harmonic_ratio;
 }
 
-static inline void extract_features_from_window(const float window[WINDOW_LEN][AXIS_NUM], float feature[FEATURE_DIM]) {
+static inline void extract_features_from_window(const float raw_window[WINDOW_LEN][AXIS_NUM], float feature[FEATURE_DIM]) {
+    /* cleaned_window 保存尖峰修复后的 [WINDOW_LEN,6] 六轴数据，约占 WINDOW_LEN*24 字节 RAM。 */
+    float cleaned_window[WINDOW_LEN][AXIS_NUM];
+    /* 按 Python 相同阈值和单轴判据清洗输入，保证部署端与训练端特征数值一致。 */
+    preprocess_imu_window(raw_window, cleaned_window);
+    /* window 指向清洗后数组；后续全部特征函数无需修改参数形式。 */
+    const float (*window)[AXIS_NUM] = cleaned_window;
+    /* idx 记录下一个待写入特征位置，最终必须等于 FEATURE_DIM。 */
     int idx = 0;
+    /* temp 复用为当前一维序列缓冲区，长度上限为 WINDOW_LEN。 */
     float temp[WINDOW_LEN];
+    /* phase_sources 保存四条相位特征源序列，形状为 [4,WINDOW_LEN]。 */
     float phase_sources[4][WINDOW_LEN];
+    /* phase_lengths 标记前三条长度为 WINDOW_LEN，差分加速度长度为 WINDOW_LEN-1。 */
     int phase_lengths[4] = { WINDOW_LEN, WINDOW_LEN, WINDOW_LEN, WINDOW_LEN - 1 };
 
     /* gx, gy, gz, ax, ay, az */
@@ -5088,8 +5620,10 @@ static inline void extract_features_from_window(const float window[WINDOW_LEN][A
     feature[idx++] = wrist_acf_second_first_ratio(
         phase_sources[2], phase_lengths[2]
     );
-    /* 追加回摆形状、冲击响应、恢复时间和周期结构六项手腕特征。 */
-    append_additional_wrist_features(window, phase_sources[2], feature, &idx);
+    /* 追加清洗后晋级的角速度模长第一正自相关峰，形成 297 维最终候选。 */
+    feature[idx++] = wrist_acf_first_peak(
+        phase_sources[2], phase_lengths[2]
+    );
 }
 
 static inline float relu_float(float x) {
