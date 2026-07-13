@@ -1,6 +1,7 @@
-from __future__ import annotations
-
 """复现固定双 M0 融合与动作段因果累计，不在测试集搜索任何参数。"""
+
+# 延迟解析类型注解，允许函数签名引用后续定义并减少运行时类型对象开销。
+from __future__ import annotations
 
 # argparse 解析数据、工件和输出路径，避免脚本绑定单台电脑的绝对目录。
 import argparse

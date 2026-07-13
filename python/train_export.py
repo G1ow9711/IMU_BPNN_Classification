@@ -1,37 +1,69 @@
+"""手腕六轴 IMU 的前处理、297维特征、BP训练、评估与ESP32模型导出主程序。"""
+
+# argparse 解析数据路径、训练模式、模型消融和导出控制命令行参数。
 import argparse
+# copy 深拷贝最佳模型、EMA模型和 state_dict，避免后续训练原地覆盖检查点。
 import copy
+# json 保存训练报告、文件角色、逐类指标和可复现实验配置。
 import json
+# math 提供三角函数、平方根、对数和有限窗口频谱公式。
 import math
+# os 读取环境变量和设置线程等运行环境信息。
 import os
+# random 固定 Python 随机种子，保证文件采样与增强可复现。
 import random
+# shutil 把达到门槛的生成头文件同步到 ESP32 正式 include 目录。
 import shutil
+# dataclass 定义不可变的 IMU 文件记录，绑定路径、类别名和类别索引。
 from dataclasses import dataclass
+# Path 统一处理数据集、训练输出、模型工件和 ESP32 头文件路径。
 from pathlib import Path
+# 类型工具明确数组集合、可选参数、固定顺序和函数返回合同。
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
+# matplotlib 生成无界面训练曲线和混淆矩阵图片。
 import matplotlib
 
+# 使用 Agg 后端，保证 PyCharm、服务器和无显示器环境都能保存图片。
 matplotlib.use("Agg")
+# pyplot 绘制训练历史和评估图表，不负责交互式窗口显示。
 import matplotlib.pyplot as plt
+# NumPy 承担六轴数组、窗口、特征、标准化和统计信号处理。
 import numpy as np
+# PyTorch 构建 BP 网络、训练张量、优化器和冻结工件加载。
 import torch
+# sklearn 指标函数计算准确率、宏F1、逐类报告和固定类别混淆矩阵。
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score
+# train_test_split 按文件和类别分层划分训练、验证、测试角色。
 from sklearn.model_selection import train_test_split
+# nn 提供 Linear、ReLU、Dropout、ModuleList 和模型基类。
 from torch import nn
+# F 提供交叉熵、归一化和 ReLU 等无状态张量函数。
 from torch.nn import functional as F
+# 数据工具构造普通批次、文件均衡采样和 P×K 自定义采样器。
 from torch.utils.data import DataLoader, Sampler, TensorDataset, WeightedRandomSampler
 
 
+# 固定全流程随机种子，使文件划分、增强、采样和模型初始化可复现。
 SEED = 20260709
+# 项目根目录用于解析仓库内 ESP32、docs 和默认输出位置。
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+# 首选数据集目录是仓库下 IMU_Dataset/imu_dataset_for_final。
 DEFAULT_DATASET_DIR = Path("IMU_Dataset") / "imu_dataset_for_final"
+# 兼容旧目录结构：数据集也可直接位于当前目录下 imu_dataset_for_final。
 FALLBACK_DATASET_DIR = Path("imu_dataset_for_final")
+# 默认训练工件写入项目本地 outputs，避免污染源码目录。
 OUTPUT_DIR = Path("outputs")
+# 达标模型头文件的正式发布目标，供 ESP32 编译直接包含。
 ESP32_MODEL_HEADER = PROJECT_ROOT / "esp32" / "include" / "esp32_bp_model.h"
 
+# IMU 采样率固定 25 Hz；所有时间、频率和窗口公式都依赖该值。
 SAMPLE_RATE = 25
+# 相邻推理窗口目标步长为 0.5 秒，换算后当前实际为 12 点约 0.48 秒。
 STEP_SECONDS = 0.5
+# 默认验证 1.5、2.0、2.5 秒窗口，最终模型使用 2.5 秒。
 WINDOW_SECONDS_LIST = (1.5, 2.0, 2.5)
+# 命令行额外允许 4.0 秒上下文实验，但不改变默认列表。
 WINDOW_SECONDS_CHOICES = WINDOW_SECONDS_LIST + (4.0,)
 # 单轴陀螺仪孤立尖峰阈值，单位 deg/s；300 deg/s 只清除明显采集毛刺，保留正常快速摆腕。
 PREPROCESS_GYRO_SPIKE_THRESHOLD_DPS = 300.0
@@ -47,17 +79,25 @@ TEMPORAL_LOGIT_HISTORY = 15
 ENSEMBLE_BASE_LOGIT_WEIGHT = 0.85
 # Round39 固定验证选择的 Round37 掩码 M0 logit 权重；两者之和必须为 1。
 ENSEMBLE_MASKED_LOGIT_WEIGHT = 0.15
+# 基础数据按文件分层后，70% 文件用于训练模型和标准化参数。
 TRAIN_RATIO = 0.70
+# 基础数据按文件分层后，15% 文件固定为验证角色，用于选模型和决策参数。
 VAL_RATIO = 0.15
+# 基础数据按文件分层后，剩余 15% 文件仅在参数锁定后做测试确认。
 TEST_RATIO = 0.15
+# 静止类别名称固定为 sit，用于估计噪声阈值和保留静态窗口。
 SIT_CLASS_NAME = "sit"
+# 四个高动态类别必须同时满足更严格运动分数和活动点比例。
 HIGH_DYNAMIC_CLASSES = {"jumping_jack", "jumping_lunge", "jumping_squat", "tuck_jump"}
+# 弱类顺序用于检查点平均召回和日志，不改变全局11类输出顺序。
 WEAK_CLASS_NAMES = ["jumping_squat", "squat", "tuck_jump", "jumping_lunge"]
+# 三目标专家历史消融只覆盖跳跃深蹲、普通深蹲和收腹跳。
 FAMILY_SPECIALIST_CLASS_NAMES = [
     "jumping_squat",
     "squat",
     "tuck_jump",
 ]
+# HARD_CONFUSION_PAIRS 定义定向 logit 间隔约束；键是真类，值是需要压低的易混类列表。
 HARD_CONFUSION_PAIRS = {
     # 普通弓步与深蹲仅约束彼此的错误 logit，避免间隔损失干扰其余已稳定类别。
     "lunge": ["squat"],
@@ -70,8 +110,11 @@ HARD_CONFUSION_PAIRS = {
     # 收腹跳反向约束跳跃深蹲，保留飞行姿态差异。
     "tuck_jump": ["jumping_squat"],
 }
+# 普通类别发布门槛为测试召回不低于 90%。
 TARGET_MIN_CLASS_RECALL = 0.90
+# 经批准弱类发布门槛为测试召回不低于 85%。
 WEAK_TARGET_MIN_CLASS_RECALL = 0.85
+# 五个弱类使用较低 85% 门槛，其余类别仍使用 90%。
 RELAXED_RECALL_CLASS_NAMES = {
     "jumping_jack",
     "jumping_lunge",
@@ -80,31 +123,49 @@ RELAXED_RECALL_CLASS_NAMES = {
     "tuck_jump",
 }
 
+# 默认最多训练 350 个 epoch，命令行可在可见训练时覆盖。
 MAX_EPOCHS = 350
+# 普通 DataLoader 每批最多 64 个标准化特征向量。
 BATCH_SIZE = 64
+# AdamW 初始学习率固定为 1e-3。
 LEARNING_RATE = 1e-3
+# AdamW 权重衰减 1e-4，抑制小数据下全连接权重过大。
 WEIGHT_DECAY = 1e-4
+# 验证检查点连续 45 个 epoch 不改善时早停。
 PATIENCE = 45
+# 融合层默认丢弃 10% 训练激活；评估和部署时自动关闭。
 DROPOUT = 0.10
+# 每个原始训练窗口额外生成两份旋转、时间形变和噪声增强样本。
 AUGMENT_TIMES = 2
+# 六轴同步随机旋转最大绝对欧拉角为 35 度，用于模拟佩戴方向差异。
 MAX_ROTATION_DEGREES = 35.0
+# 未达逐类门槛时默认禁止把实验头文件发布到 ESP32 正式目录。
 EXPORT_WHEN_BELOW_TARGET = False
+# 跨文件监督对比损失默认权重为 0.05。
 SUPCON_WEIGHT = 0.05
+# 易混类别局部 logit 间隔损失默认权重为 0.25。
 HARD_PAIR_WEIGHT = 0.25
 # 五个训练期辅助任务的总损失权重；部署时不导出辅助分类头。
 AUXILIARY_WEIGHT = 0.10
 
+# 六个原始通道名称固定对应数组列 0..5，前三轴 deg/s、后三轴 g。
 CHANNEL_NAMES = ["gx", "gy", "gz", "ax", "ay", "az"]
+# 两个模长序列分别汇总三轴角速度和三轴加速度。
 MAG_NAMES = ["gyro_mag", "acc_mag"]
+# 两个相邻差分模长序列突出角速度换向和加速度冲击。
 DELTA_MAG_NAMES = ["gyro_delta_mag", "acc_delta_mag"]
+# 四个重力对齐序列分解垂直/水平加速度与角速度。
 GRAVITY_NAMES = [
     "acc_vertical",
     "acc_horizontal_mag",
     "gyro_vertical",
     "gyro_horizontal_mag",
 ]
+# 14条全局序列各提取8项基础统计，总计112维。
 GLOBAL_SERIES_NAMES = CHANNEL_NAMES + MAG_NAMES + DELTA_MAG_NAMES + GRAVITY_NAMES
+# 四条动作机理核心序列用于阶段、时序和冲击分布特征。
 PHASE_SOURCE_NAMES = ["acc_vertical", "acc_horizontal_mag", "gyro_mag", "acc_delta_mag"]
+# 每条全局序列依次提取均值、标准差、范围、RMS和变化统计。
 ONE_SERIES_FEATURES = [
     "mean",
     "std",
@@ -115,8 +176,11 @@ ONE_SERIES_FEATURES = [
     "zcr",
     "std_diff",
 ]
+# 每个核心序列按时间等分成4个阶段。
 PHASE_SEGMENTS = 4
+# 每个阶段输出均值、标准差和最大绝对值三项。
 PHASE_FEATURES = ["mean", "std", "max_abs"]
+# 每个核心序列输出活动比例、峰数、主频、谱熵和自相关两项。
 TEMPORAL_FEATURES = [
     "high_activity_ratio",
     "peak_count_normalized",
@@ -125,6 +189,7 @@ TEMPORAL_FEATURES = [
     "autocorr_peak",
     "autocorr_peak_lag_seconds",
 ]
+# 每个核心序列输出五个分位数、偏度、超额峰度和最大跳变。
 IMPACT_DISTRIBUTION_FEATURES = [
     "q10",
     "q25",
@@ -139,17 +204,29 @@ IMPACT_DISTRIBUTION_FEATURES = [
 NORMALIZED_PHASE_MODEL_START = 184
 # 归一化四阶段组包含 4 个信号×4 阶段×3 统计量，共 48 维，半开区间终点为 232。
 NORMALIZED_PHASE_MODEL_END = 232
+# 33项弱类机制特征的名称和顺序必须与 weak_class_features 及生成C完全一致。
 WEAK_CLASS_FEATURE_NAMES = [
+    # 加速度变化模长中频占比，描述重复冲击的中等节奏能量。
     "acc_delta_mag_spectral_mid_band_ratio",
+    # 垂直加速度高频占比，描述收腹跳等快速垂直变化。
     "acc_vertical_spectral_high_band_ratio",
+    # 陀螺模长谱质心，单位 Hz，描述手腕转动速度重心。
     "gyro_mag_spectral_centroid_hz",
+    # 水平加速度谱质心，单位 Hz，描述横向运动节奏重心。
     "acc_horizontal_mag_spectral_centroid_hz",
+    # 垂直加速度自相关首次过零时间，单位秒。
     "acc_vertical_autocorr_first_zero_seconds",
+    # 陀螺模长与垂直加速度零延迟相关，描述转动和冲击同步性。
     "event_gyro_vertical_correlation",
+    # 水平加速度自相关次峰，描述重复水平摆动。
     "acc_horizontal_mag_autocorr_secondary_peak",
+    # 陀螺模长高频占比，区分快速收腹与稳定跳蹲转动。
     "gyro_mag_spectral_high_band_ratio",
+    # 垂直加速度主谱峰功率占比，描述垂直周期集中程度。
     "acc_vertical_spectral_peak_power_ratio",
+    # 加速度变化模长高频占比，描述落地和快速冲击。
     "acc_delta_mag_spectral_high_band_ratio",
+    # 水平加速度中频占比，补充分离挥手、深蹲和跳跃。
     "acc_horizontal_mag_spectral_mid_band_ratio",
     # 陀螺模长主谱峰功率占比，用于区分周期稳定的跳蹲与摆动更分散的弓步/收腹跳。
     "gyro_mag_spectral_peak_power_ratio",
@@ -197,15 +274,23 @@ WEAK_CLASS_FEATURE_NAMES = [
     "wrist_acf_first_peak",
 ]
 
+# 兼容旧平铺 BP 的第一隐藏层宽度为96。
 HIDDEN1 = 96
+# 兼容旧平铺 BP 的第二隐藏层宽度为64。
 HIDDEN2 = 64
+# 兼容旧平铺 BP 的第三隐藏层及部署嵌入宽度为32。
 HIDDEN3 = 32
 
 
 @dataclass(frozen=True)
 class ImuRecord:
+    """绑定一个原始IMU文件路径、动作类别名和固定全局类别索引。"""
+
+    # path 指向一个可读取的文本记录，文件内六列顺序固定 gx、gy、gz、ax、ay、az。
     path: Path
+    # label 保存目录动作名称，例如 jumping_squat。
     label: str
+    # label_idx 保存 label 在排序后11类名称表中的整数位置。
     label_idx: int
 
 
@@ -217,6 +302,7 @@ class CausalLogitSmoother:
         class_count: int,
         history_length: int = TEMPORAL_LOGIT_HISTORY,
     ) -> None:
+        """分配类别固定的历史缓冲区，并验证类别数及历史长度。"""
         # class_count 必须为正，代表模型输出动作类别数。
         if class_count <= 0:
             # 非正类别数无法建立 logit 向量，立即拒绝。
@@ -315,6 +401,7 @@ class CausalBoutLogitAccumulator:
     """从活动段开始累计当前及全部过去 logits，并在动作段结束时显式重置。"""
 
     def __init__(self, class_count: int) -> None:
+        """分配一个活动段的 float64 logit 累计和及窗口计数。"""
         # class_count 必须为正，代表两个 M0 共享的输出类别数。
         if class_count <= 0:
             # 非正类别数无法建立累计向量。
@@ -356,8 +443,14 @@ class CausalBoutLogitAccumulator:
 
 
 class BPNet(nn.Module):
+    """兼容旧ESP32导出器的297→96→64→32→类别数平铺全连接网络。"""
+
     def __init__(self, input_dim: int, class_count: int, dropout: float = DROPOUT):
+        """按输入特征数、类别数和训练期丢弃率构造平铺BP。"""
+
+        # 注册所有线性层、ReLU和Dropout为可训练 PyTorch 子模块。
         super().__init__()
+        # net 按固定顺序保存四个线性层，索引8是最终分类头。
         self.net = nn.Sequential(
             nn.Linear(input_dim, HIDDEN1),
             nn.ReLU(),
@@ -371,15 +464,24 @@ class BPNet(nn.Module):
         )
 
     def forward_features(self, x: torch.Tensor) -> torch.Tensor:
+        """把[批大小,输入维度]特征编码为[批大小,32]部署嵌入。"""
+
+        # 依次执行最终分类头之前的8个层对象，保持与旧导出层索引一致。
         for layer in list(self.net.children())[:8]:
+            # 当前层更新批量激活，批大小保持不变。
             x = layer(x)
+        # 返回分类头之前的32维嵌入，供主分类和训练损失共用。
         return x
 
     def classify_features(self, embeddings: torch.Tensor) -> torch.Tensor:
+        """把 ``[批大小,32]`` 嵌入映射为 ``[批大小,类别数]`` logits。"""
         # 将形状为 [批大小,32] 的嵌入送入原 BP 输出层，得到 [批大小,类别数] logits。
         return self.net[8](embeddings)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """输入[批大小,输入维度]并返回[批大小,类别数]未归一化logits。"""
+
+        # 先编码32维嵌入，再调用固定输出层完成主分类。
         return self.classify_features(self.forward_features(x))
 
 
@@ -392,10 +494,12 @@ class MultiBranchBPNet(nn.Module):
     group_output_dims = (24, 12, 8, 12, 8, 16)
 
     def __init__(self, input_dim: int, class_count: int, dropout: float = DROPOUT):
+        """构建六特征组分支、32 维融合层、主分类头和五个训练辅助头。"""
         # 初始化 PyTorch 模块注册表，使分支和辅助头参与优化及 checkpoint 保存。
         super().__init__()
         # 输入维度必须等于六组特征维度之和，否则切片会错位并破坏 Python/C 一致性。
         if input_dim != sum(self.group_input_dims):
+            # 旧工件或特征顺序维度不一致时立即拒绝，避免静默错位。
             raise ValueError(
                 f"Multi-branch model requires {sum(self.group_input_dims)} features, got {input_dim}"
             )
@@ -430,6 +534,7 @@ class MultiBranchBPNet(nn.Module):
         )
 
     def forward_features(self, x: torch.Tensor) -> torch.Tensor:
+        """把 ``[批大小,297]`` 标准化特征编码为 ``[批大小,32]`` 融合嵌入。"""
         # 输入张量形状为 [批大小,297]，297 个值均为训练集统计量标准化后的无量纲特征。
         branch_outputs: List[torch.Tensor] = []
         # offset 指向当前分支在生产特征向量中的起始列。
@@ -446,10 +551,12 @@ class MultiBranchBPNet(nn.Module):
         return self.fusion(torch.cat(branch_outputs, dim=1))
 
     def classify_features(self, embeddings: torch.Tensor) -> torch.Tensor:
+        """把 ``[批大小,32]`` 融合嵌入线性映射为主类别 logits。"""
         # 主分类头输出 [批大小,类别数] 未归一化 logits，供交叉熵和间隔损失使用。
         return self.classifier(embeddings)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """执行 M0 六分支编码、融合和主分类完整前向。"""
         # 完整主路径只包含六分支、融合层和主分类头，辅助头不会改变推理结果。
         return self.classify_features(self.forward_features(x))
 
@@ -470,6 +577,7 @@ class MultiBranchBPNet(nn.Module):
             valid_names: Sequence[str],
             positive_names: Sequence[str],
         ) -> None:
+            """计算一个属性头的有效正负样本交叉熵，并追加到外层损失列表。"""
             # 有效类别集合限定该辅助任务参与反向传播的样本范围。
             valid_indices = [name_to_idx[name] for name in valid_names if name in name_to_idx]
             # 正类索引表示目标运动属性存在，例如强腾空或交替落地。
@@ -480,18 +588,23 @@ class MultiBranchBPNet(nn.Module):
             mask = torch.zeros_like(labels, dtype=torch.bool)
             # 遍历有效类别索引，将对应训练样本加入该辅助任务。
             for class_index in valid_indices:
+                # 把标签等于当前有效类的位置合并进 [批大小] 布尔掩码。
                 mask |= labels == class_index
             # 若本批没有适用样本，跳过该头，避免对空张量计算交叉熵。
             if not torch.any(mask):
+                # 无适用样本时当前辅助任务不向 losses 追加值。
                 return
             # 二分类目标中 1 表示属性存在，0 表示属性不存在。
             targets = torch.zeros(int(mask.sum().item()), dtype=torch.long, device=labels.device)
             # 遍历被选样本并按主类别是否属于正类集合生成目标。
             selected_labels = labels[mask]
+            # 遍历属性正类索引；每轮把对应任务样本目标从 0 改为 1。
             for class_index in positive_indices:
+                # selected_labels 等于当前正类的位置写入二分类正标签 1。
                 targets[selected_labels == class_index] = 1
             # 只有同时含正负样本时才训练该头，防止单类批次造成无效偏置更新。
             if torch.unique(targets).numel() < 2:
+                # 单一目标类别无法形成有效二分类边界，本批跳过该任务。
                 return
             # 辅助头输入 [任务样本数,32]，输出 [任务样本数,2] logits。
             task_logits = self.auxiliary_heads[head_name](embeddings[mask])
@@ -527,6 +640,7 @@ class DeepNarrowMultiBranchBPNet(nn.Module):
     group_output_dims = (24, 12, 8, 12, 8, 24)
 
     def __init__(self, input_dim: int, class_count: int, dropout: float = DROPOUT):
+        """构建 M1 六分支及 88→64→48→32→24 深窄融合分类网络。"""
         # 初始化 PyTorch 模块注册表，使全部分支和融合层参与优化及保存。
         super().__init__()
         # 输入必须等于六组总和 297，防止切片错位。
@@ -535,7 +649,7 @@ class DeepNarrowMultiBranchBPNet(nn.Module):
             raise ValueError(
                 f"Deep-narrow model requires {sum(self.group_input_dims)} features, got {input_dim}"
             )
-        # 每个分支独立执行 Linear-ReLU，避免 112 维统计组淹没 32 维弱类组。
+        # 每个分支独立执行 Linear-ReLU，避免 112 维统计组淹没 33 维弱类组。
         self.branches = nn.ModuleList(
             [
                 # 当前分支把固定输入组映射到审核指定输出宽度。
@@ -577,7 +691,7 @@ class DeepNarrowMultiBranchBPNet(nn.Module):
         """把 [批大小,297] 输入编码为 [批大小,24] M1 嵌入。"""
         # branch_outputs 按固定物理组顺序保存六个分支输出。
         branch_outputs: List[torch.Tensor] = []
-        # offset 指向当前分支在 302 维输入中的起始列。
+        # offset 指向当前分支在 297 维输入中的起始列。
         offset = 0
         # 顺序遍历六分支及其固定输入维度。
         for branch, input_dim in zip(self.branches, self.group_input_dims):
@@ -607,27 +721,51 @@ def cross_file_supervised_contrastive_loss(
     file_ids: torch.Tensor,
     temperature: float = 0.15,
 ) -> torch.Tensor:
+    """计算跨文件监督对比损失，使同类不同采集文件的嵌入靠近、异类嵌入分离。
+
+    输入 ``embeddings`` 形状为 ``[批大小,嵌入维度]``，``labels`` 与 ``file_ids``
+    均为 ``[批大小]``。余弦相似度先除以温度系数，再对每个锚点计算
+    ``-mean(sim(anchor, positive) - logsumexp(sim(anchor, valid)))``。同一文件的同类窗口
+    不作为正样本，避免模型只记住单次采集的佩戴姿态或传感器偏置。时间复杂度和额外空间
+    均为 O(B^2)，其中 B 为批大小；该损失只在训练端使用，不增加 ESP32 推理开销。
+    """
+    # 少于两个嵌入时无法构造锚点-样本对，返回与计算图相连的标量零损失。
     if len(embeddings) < 2:
+        # embeddings.sum()*0 保留设备和 dtype，并允许调用方统一执行反向传播。
         return embeddings.sum() * 0.0
+    # 对嵌入最后一维做 L2 归一化，使点积等于范围 [-1,1] 的余弦相似度。
     normalized = F.normalize(embeddings, dim=1)
+    # logits 形状为 [B,B]；温度越小，相似度差异在 softmax 中越突出。
     logits = normalized @ normalized.T / temperature
+    # losses 保存具备至少一个跨文件同类正样本的锚点损失标量。
     losses: List[torch.Tensor] = []
+    # 遍历批内 B 个嵌入；每轮固定一个锚点并搜索其有效正样本和分母样本。
     for anchor in range(len(embeddings)):
+        # different_sample 形状为 [B]，排除锚点自身，避免相似度 1 形成无意义正样本。
         different_sample = torch.arange(len(embeddings), device=embeddings.device) != anchor
+        # positive 仅选择“同动作类别且来自不同原始文件”的跨采集正样本。
         positive = (
             different_sample
             & (labels == labels[anchor])
             & (file_ids != file_ids[anchor])
         )
+        # valid 排除锚点自身及同文件同类窗口，保留跨文件同类和所有异类作为归一化集合。
         valid = different_sample & (
             (labels != labels[anchor]) | (file_ids != file_ids[anchor])
         )
+        # 当前锚点没有跨文件同类样本时无法形成监督对比目标，跳过本轮。
         if not torch.any(positive):
+            # 继续处理下一个锚点，不向 losses 写入偏置性零值。
             continue
+        # logsumexp 稳定计算有效集合相似度的对数和，避免直接 exp 后上溢。
         denominator = torch.logsumexp(logits[anchor][valid], dim=0)
+        # 对当前锚点的全部跨文件正样本取平均负对数概率，并追加一个标量损失。
         losses.append(-(logits[anchor][positive] - denominator).mean())
+    # 整个批次没有有效锚点时，返回可反传零值而不是对空列表执行 stack。
     if not losses:
+        # 返回值与 embeddings 位于相同设备，保证 CPU/CUDA 路径一致。
         return embeddings.sum() * 0.0
+    # 对所有有效锚点等权平均，返回供总损失加权的标量张量。
     return torch.stack(losses).mean()
 
 
@@ -637,33 +775,66 @@ def hard_pair_margin_loss(
     class_names: Sequence[str],
     margin: float = 0.5,
 ) -> torch.Tensor:
+    """约束弱类真值 logit 至少比指定易混类别高 ``margin``。
+
+    ``logits`` 形状为 ``[批大小,类别数]``，``labels`` 形状为 ``[批大小]``。
+    每个困难类别对使用 ``max(0, margin-y_true+y_confusing)``；仅训练期间参与优化，
+    不改变最终 BP 网络层数、参数量或 ESP32 前向公式。时间复杂度为 O(BP)，P 为配置的
+    困难类别对数量，额外空间至多 O(BP)。
+    """
+    # name_to_idx 把报告中的类别名映射到 logits 第二维索引，避免依赖外部固定顺序。
     name_to_idx = {name: index for index, name in enumerate(class_names)}
+    # losses 收集每个存在样本的“真类-易混类”间隔损失标量。
     losses: List[torch.Tensor] = []
+    # 遍历预先分析得到的弱类及其易混类别列表，数量由 HARD_CONFUSION_PAIRS 固定。
     for true_name, confusing_names in HARD_CONFUSION_PAIRS.items():
+        # 当前数据集不含该弱类时跳过，允许单元测试使用类别子集。
         if true_name not in name_to_idx:
+            # 不访问不存在的 logits 列，继续检查下一弱类。
             continue
+        # true_idx 是当前弱类在 logits 第二维中的列号。
         true_idx = name_to_idx[true_name]
+        # sample_mask 形状为 [B]，只选择真值等于当前弱类的训练样本。
         sample_mask = labels == true_idx
+        # 当前批次没有该弱类样本时无法计算此弱类间隔，跳过本轮。
         if not torch.any(sample_mask):
+            # P×K 采样通常会覆盖所有类，但此保护兼容普通小批次。
             continue
+        # true_logits 形状为 [当前弱类样本数]，保存正确类别未经 softmax 的分数。
         true_logits = logits[sample_mask, true_idx]
+        # 遍历该弱类的全部易混类别；每轮新增一个二类间隔约束。
         for confusing_name in confusing_names:
+            # 数据集类别子集不含易混类时跳过，避免名称映射异常。
             if confusing_name not in name_to_idx:
+                # 继续处理当前弱类的下一个已配置易混类别。
                 continue
+            # confusing_idx 是易混类别在 logits 中的列号。
             confusing_idx = name_to_idx[confusing_name]
+            # confusing_logits 与 true_logits 形状相同，来自同一批弱类样本。
             confusing_logits = logits[sample_mask, confusing_idx]
+            # ReLU 实现 hinge：真类领先达到 margin 后损失为 0，否则线性惩罚差额。
             losses.append(F.relu(margin - true_logits + confusing_logits).mean())
+    # 没有任何适用困难类别对时返回可反传零值，避免 stack 空列表。
     if not losses:
+        # logits.sum()*0 保持当前设备、浮点类型和计算图连接。
         return logits.sum() * 0.0
+    # 对全部有效困难对等权平均，返回总训练损失中的标量项。
     return torch.stack(losses).mean()
 
 
 def set_seed(seed: int) -> None:
+    """固定 Python、NumPy、PyTorch 和 CUDA 随机源，降低重复训练波动。"""
+    # 固定 Python random，用于记录抽样、数据增强参数和普通列表随机操作。
     random.seed(seed)
+    # 固定 NumPy 随机生成器，用于窗口增强和数据划分中的数组随机操作。
     np.random.seed(seed)
+    # 固定当前进程的 PyTorch CPU 随机生成器，用于权重初始化和 dropout。
     torch.manual_seed(seed)
+    # 固定所有可见 CUDA 设备的随机生成器；无 CUDA 时该调用安全且不分配显存。
     torch.cuda.manual_seed_all(seed)
+    # 强制 cuDNN 选择确定性算子，优先复现实验结果而非最高吞吐量。
     torch.backends.cudnn.deterministic = True
+    # 禁止 cuDNN 根据首批输入自动切换算法，避免相同种子产生实现差异。
     torch.backends.cudnn.benchmark = False
 
 
@@ -672,30 +843,55 @@ def update_ema_state(
     current_state: Dict[str, torch.Tensor],
     decay: float,
 ) -> Dict[str, torch.Tensor]:
+    """按 ``ema=decay*old+(1-decay)*current`` 更新模型参数指数滑动平均。
+
+    输入和返回字典键均与 ``state_dict`` 一致；浮点权重做指数平均，整数计数器直接复制。
+    每次调用时间和额外空间复杂度均为 O(P)，P 为模型参数及缓冲区元素总数。
+    """
+    # decay 必须位于 [0,1)，否则新参数权重非正或旧状态无法衰减。
     if not 0.0 <= decay < 1.0:
+        # 明确拒绝非法衰减率，避免静默导出错误权重。
         raise ValueError("EMA decay must be in [0, 1)")
+    # 首次更新或显式关闭 EMA 时，直接复制当前状态作为独立快照。
     if previous_state is None or decay == 0.0:
+        # detach 阻断训练计算图，clone 防止后续优化器原地修改快照。
         return {name: value.detach().clone() for name, value in current_state.items()}
+    # updated 保存本轮完整 EMA 状态，键和值形状均与 current_state 一致。
     updated: Dict[str, torch.Tensor] = {}
+    # 遍历模型 state_dict 的每个参数或缓冲区；每轮写入同名 EMA 值。
     for name, current_value in current_state.items():
+        # 只有浮点权重和浮点缓冲区适合线性插值。
         if torch.is_floating_point(current_value):
+            # 旧状态乘 decay，新状态乘 1-decay；clone 生成与训练参数无共享存储的张量。
             updated[name] = (
                 previous_state[name] * decay
                 + current_value.detach() * (1.0 - decay)
             ).clone()
+        # 整数、布尔等非浮点缓冲区不能做加权平均，直接采用当前值。
         else:
+            # detach+clone 保证返回快照与当前模型状态互不共享存储。
             updated[name] = current_value.detach().clone()
+    # 返回可直接传给 load_state_dict 的完整 EMA 参数及缓冲区字典。
     return updated
 
 
 def resolve_dataset_dir(dataset_dir: Optional[Path]) -> Path:
+    """按命令行路径、项目默认路径、兼容路径顺序解析主数据集目录。"""
+    # candidates 按优先级保存待检查路径；首个存在的目录即为本次训练输入。
     candidates = []
+    # 调用方显式指定路径时把它置于最高优先级，不被默认路径覆盖。
     if dataset_dir is not None:
+        # 保存用户给定 Path；此处不创建目录，防止拼写错误被掩盖。
         candidates.append(dataset_dir)
+    # 依次追加项目内数据集和历史兼容数据集路径，支持无参数运行。
     candidates.extend([DEFAULT_DATASET_DIR, FALLBACK_DATASET_DIR])
+    # 按优先级遍历候选；找到首个存在且确为目录的路径后立即结束。
     for candidate in candidates:
+        # 同时检查存在性和目录类型，普通文件不能作为动作类别根目录。
         if candidate.exists() and candidate.is_dir():
+            # 返回可供 scan_dataset 枚举类别子目录的有效 Path。
             return candidate
+    # 所有候选均无效时列出检查过的路径，便于修正命令行参数或目录部署。
     raise FileNotFoundError(
         "Dataset directory not found. Tried: "
         + ", ".join(str(candidate) for candidate in candidates)
@@ -703,20 +899,33 @@ def resolve_dataset_dir(dataset_dir: Optional[Path]) -> Path:
 
 
 def scan_dataset(dataset_dir: Path) -> Tuple[List[ImuRecord], List[str], Dict[str, int]]:
+    """扫描主数据集的“类别目录/*.txt”，返回记录、类别顺序和名称索引。"""
+    # class_dirs 只保留至少含一个 txt 的直接子目录，并按路径排序以冻结类别顺序。
     class_dirs = sorted(
         [path for path in dataset_dir.iterdir() if path.is_dir() and list(path.glob("*.txt"))]
     )
+    # 没有合法类别目录说明路径或数据集布局错误，不能继续生成标签。
     if not class_dirs:
+        # 报错包含根路径，帮助定位选择了错误目录层级的问题。
         raise ValueError(f"No action folders with txt files found under {dataset_dir}")
 
+    # class_names 按排序后的目录名生成，顺序决定模型输出和 ESP32 类别索引。
     class_names = [path.name for path in class_dirs]
+    # label_to_idx 将类别名映射到从 0 开始的稳定输出索引。
     label_to_idx = {name: idx for idx, name in enumerate(class_names)}
+    # records 保存每个原始采集文件及其文本标签、整数标签，不在扫描阶段加载数值。
     records: List[ImuRecord] = []
+    # 外层按稳定类别顺序遍历全部动作目录，每轮累积该类文件记录。
     for class_dir in class_dirs:
+        # 内层按文件名排序遍历当前类别全部 txt，保证相同数据得到相同文件编号顺序。
         for txt_path in sorted(class_dir.glob("*.txt")):
+            # 追加一条只含路径和标签元数据的 ImuRecord，实际六轴数据延迟读取。
             records.append(ImuRecord(txt_path, class_dir.name, label_to_idx[class_dir.name]))
+    # 防御性检查记录列表；理论上 class_dirs 非空时至少存在一条记录。
     if not records:
+        # 明确报告没有 txt 文件，避免后续划分阶段出现难懂的空数组错误。
         raise ValueError(f"No dataset txt files found under {dataset_dir}")
+    # 返回文件级记录、模型类别顺序、类别名到输出索引映射。
     return records, class_names, label_to_idx
 
 
@@ -724,22 +933,38 @@ def scan_labeled_dataset(
     dataset_dir: Path,
     label_to_idx: Dict[str, int],
 ) -> List[ImuRecord]:
+    """按主数据集类别映射扫描附加训练集或外部留出集，不允许出现新类别。"""
+    # 统一转换为 Path，兼容测试或调用方传入字符串路径。
     dataset_dir = Path(dataset_dir)
+    # 附加路径必须已经存在且为目录，防止将空列表误认为有效附加集。
     if not dataset_dir.is_dir():
+        # 报错保留用户给定路径，便于检查命令行参数。
         raise FileNotFoundError(f"Additional dataset directory not found: {dataset_dir}")
+    # records 保存附加目录下所有已知类别文件的元数据。
     records: List[ImuRecord] = []
+    # 按目录名排序遍历附加集的直接子目录，使文件编号和报告可复现。
     for class_dir in sorted(path for path in dataset_dir.iterdir() if path.is_dir()):
+        # txt_paths 是当前动作类别下按文件名排序的全部采集文件。
         txt_paths = sorted(class_dir.glob("*.txt"))
+        # 空目录不代表一个有效类别，直接跳过且不改变主类别顺序。
         if not txt_paths:
+            # 继续检查下一个子目录，不为当前空目录创建记录。
             continue
+        # label 使用目录名，必须与主数据集动作名称完全一致。
         label = class_dir.name
+        # 主数据集未知类别没有对应模型输出节点，因此拒绝继续。
         if label not in label_to_idx:
+            # 报错指出未知目录名，避免训练标签与 ESP32 类别表错位。
             raise ValueError(f"Unknown action directory in additional dataset: {label}")
+        # 批量追加当前类别所有文件；每条记录复用主数据集的整数标签。
         records.extend(
             ImuRecord(path, label, label_to_idx[label]) for path in txt_paths
         )
+    # 有效附加目录必须至少提供一条已知类别记录。
     if not records:
+        # 空附加集通常意味着路径层级错误，立即报错而不是静默忽略。
         raise ValueError(f"No labeled txt files found under {dataset_dir}")
+    # 返回可与主数据集记录列表拼接的文件级元数据。
     return records
 
 
@@ -749,38 +974,61 @@ def load_additional_records(
     label_to_idx: Dict[str, int],
     validation_only: bool,
 ) -> Tuple[List[ImuRecord], List[ImuRecord]]:
+    """加载可选附加训练记录和外部留出记录，保持二者用途隔离。"""
+    # 指定 extra_train_dir 时扫描为训练记录；未指定则返回空列表。
     extra_records = (
         scan_labeled_dataset(extra_train_dir, label_to_idx)
         if extra_train_dir is not None
         else []
     )
+    # 外部留出集仅在正式训练模式加载；validation_only 搜参阶段禁止窥视外部测试数据。
     holdout_records = (
         scan_labeled_dataset(external_holdout_dir, label_to_idx)
         if external_holdout_dir is not None and not validation_only
         else []
     )
+    # 返回两个独立列表：前者允许进入训练，后者只允许最终评估。
     return extra_records, holdout_records
 
 
 def convert_raw_imu_units(raw: np.ndarray) -> np.ndarray:
+    """把 MPU6050 原始计数转换为 ``[N,6]`` 工程单位六轴数据。
+
+    输入前六列固定为 ``gx、gy、gz、ax、ay、az``。陀螺仪按 ±2000 deg/s 量程的
+    16.4 LSB/(deg/s) 转为 deg/s；加速度计按 ±8 g 量程的 4096 LSB/g 转为 g。
+    返回 float32 数组，时间和额外空间复杂度均为 O(6N)。Python 与 ESP32 必须使用
+    相同通道顺序和比例常量，否则 297 维特征及标准化参数全部失配。
+    """
+    # data 复制/转换为 float32，既匹配后续特征精度，也接近 ESP32 单精度行为。
     data = np.asarray(raw, dtype=np.float32)
+    # np.loadtxt 读取仅一行时返回 [列数]，统一提升为 [1,列数] 二维形状。
     if data.ndim == 1:
+        # 第一维固定为采样点数 1，第二维保留原文件列数。
         data = data.reshape(1, -1)
+    # 至少需要六列才能形成 gx、gy、gz、ax、ay、az 完整手腕 IMU 样本。
     if data.shape[1] < 6:
+        # 报错包含实际列数，防止通道缺失后仍以错误列位继续训练。
         raise ValueError(f"Expected at least 6 columns, got {data.shape[1]}")
+    # converted 仅复制前六列，形状 [N,6]，额外时间戳或状态列不进入模型。
     converted = data[:, :6].astype(np.float32, copy=True)
+    # 前三列原始陀螺计数除以 16.4，转换为 gx、gy、gz，单位 deg/s。
     converted[:, 0:3] = converted[:, 0:3] / 16.4
+    # 后三列原始加速度计数除以 4096，转换为 ax、ay、az，单位 g。
     converted[:, 3:6] = converted[:, 3:6] / 4096.0
+    # 返回按固定六轴顺序排列的 float32 工程单位数组 [N,6]。
     return converted
 
 
 def load_imu_file(path: Path) -> np.ndarray:
+    """读取一个逗号分隔 IMU 文本，并返回 ``[N,6]`` 工程单位数组。"""
+    # raw 只读取前六列原始计数；形状通常为 [采样点数,6]，dtype 为 float32。
     raw = np.loadtxt(
         path,
         delimiter=",",
         dtype=np.float32,
         usecols=tuple(range(6)),
     )
+    # 调用统一单位转换，返回 gx、gy、gz(deg/s)、ax、ay、az(g) 的 [N,6] 数组。
     return convert_raw_imu_units(raw)
 
 
@@ -906,34 +1154,56 @@ def trim_record_to_motion_segment(
 
 
 def window_lengths(window_seconds: float) -> Tuple[int, int]:
+    """把窗口秒数和固定步长秒数换算为采样点数。"""
+    # window_len 是单个特征窗口采样点数；25 Hz 下 4 秒对应 100 点。
     window_len = int(round(window_seconds * SAMPLE_RATE))
+    # step_len 是相邻窗口起点间隔；由 STEP_SECONDS 与采样率共同决定。
     step_len = int(round(STEP_SECONDS * SAMPLE_RATE))
+    # 返回“窗口点数、至少为 1 的步长点数”，防止极小步长四舍五入为 0。
     return window_len, max(1, step_len)
 
 
 def iter_windows(data: np.ndarray, window_len: int, step_len: int) -> Iterable[np.ndarray]:
+    """按固定点数和步长生成 ``[window_len,6]`` 六轴滑动窗口视图。"""
+    # 记录短于一个完整窗口时不补零、不产生样本，避免边界填充值污染特征。
     if len(data) < window_len:
+        # 生成器直接结束；调用方遍历结果为空。
         return
+    # 从 0 到最后一个完整窗口起点按 step_len 遍历，每轮产出一个等长窗口。
     for start in range(0, len(data) - window_len + 1, step_len):
+        # yield 返回 [window_len,6] 视图，通道仍为 gx、gy、gz、ax、ay、az。
         yield data[start : start + window_len]
 
 
 def motion_score(window: np.ndarray) -> float:
+    """计算窗口整体活动分数 ``std(|a|)+std(|gyr|)/200``。"""
+    # gyro_mag 形状 [N]，是 gx、gy、gz 的欧氏模，单位 deg/s。
     gyro_mag = np.linalg.norm(window[:, 0:3], axis=1)
+    # acc_mag 形状 [N]，是 ax、ay、az 的欧氏模，单位 g。
     acc_mag = np.linalg.norm(window[:, 3:6], axis=1)
+    # 加速度模标准差与归一化角速度模标准差相加，返回无量纲近似活动强度。
     return float(np.std(acc_mag) + np.std(gyro_mag) / 200.0)
 
 
 def instantaneous_motion(window: np.ndarray) -> np.ndarray:
+    """计算逐点活动强度 ``|a[t]-a[t-1]|+|gyr[t]|/200``，输出形状 ``[N]``。"""
+    # data 统一为 float32 的 [N,6]，列顺序为 gx、gy、gz、ax、ay、az。
     data = np.asarray(window, dtype=np.float32)
+    # gyro_mag 形状 [N]、单位 deg/s，表示每点三轴合成角速度。
     gyro_mag = np.linalg.norm(data[:, 0:3], axis=1)
+    # acc_delta 形状 [N-1]、单位 g，表示相邻采样间三轴加速度向量变化。
     acc_delta = np.linalg.norm(np.diff(data[:, 3:6], axis=0), axis=1)
+    # 首点没有前一采样，前置 0 后恢复 [N]，并统一为 float32。
     acc_delta = np.concatenate([np.zeros(1, dtype=np.float32), acc_delta.astype(np.float32)])
+    # 角速度除以 200 后与加速度变化相加，返回 float32 无量纲活动序列 [N]。
     return (acc_delta + gyro_mag / 200.0).astype(np.float32)
 
 
 def active_ratio(window: np.ndarray, active_point_threshold: float) -> float:
+    """返回窗口中逐点活动强度超过阈值的采样比例，范围为 ``[0,1]``。"""
+    # scores 形状 [N]，每项由相邻加速度变化和当前角速度共同构成。
     scores = instantaneous_motion(window)
+    # 布尔均值等于活动点比例；用于拒绝只含单次冲击的伪动态窗口。
     return float(np.mean(scores > active_point_threshold))
 
 
@@ -943,39 +1213,67 @@ def keep_window_for_label(
     rest_threshold: float,
     active_point_threshold: float,
 ) -> bool:
+    """按类别运动强度规则决定一个 ``[N,6]`` 窗口是否进入样本集。"""
     # 先清除单轴孤立毛刺，再计算运动强度，防止一个坏点把静止窗口误判成有效动作。
     cleaned = preprocess_imu_window(window)
     # score 是清洗窗口的整体活动分数，供静坐和动态动作使用同一门槛体系。
     score = motion_score(cleaned)
+    # 静坐允许小幅手腕自然抖动，但拒绝明显运动窗口以降低标签噪声。
     if label == SIT_CLASS_NAME:
+        # 1.6 倍静坐阈值提供自然波动余量，返回 True 表示保留该窗口。
         return score <= rest_threshold * 1.6
+    # 非静坐动作低于静坐基线阈值时视为首尾静止段或无效采集。
     if score < rest_threshold:
+        # 返回 False，阻止静止窗口被当作目标动作训练。
         return False
+    # 四种高动态跳跃类还需同时具备更高整体强度和足够持续的活动点比例。
     if label in HIGH_DYNAMIC_CLASSES:
+        # 两个条件抑制单点冲击：分数至少 1.25 倍基线，活动点比例至少 20%。
         return (
             score >= rest_threshold * 1.25
             and active_ratio(cleaned, active_point_threshold) >= MOTION_TRIGGER_RATIO
         )
+    # 其他非静坐动作只要超过静坐阈值即可保留，避免弱动作被过度过滤。
     return True
 
 
 def file_balanced_sample_weights(labels: np.ndarray, file_ids: np.ndarray) -> np.ndarray:
+    """生成类别等权、类内文件等权、文件内窗口等权的采样权重。
+
+    每个窗口权重为 ``1/(当前类文件数*当前类当前文件窗口数)``。因此每个类别总权重为 1，
+    且同类各原始文件总权重相同，长文件切出更多窗口也不会主导训练。
+    """
+    # y 是形状 [样本数] 的 int64 类别索引数组。
     y = np.asarray(labels, dtype=np.int64)
+    # groups 是形状 [样本数] 的 int64 原始文件编号数组。
     groups = np.asarray(file_ids, dtype=np.int64)
+    # 标签和文件编号必须逐样本一一对应，否则权重会分配给错误窗口。
     if y.shape != groups.shape:
+        # 报错同时给出两个形状，便于定位样本构建阶段的数据错位。
         raise ValueError(f"labels and file_ids must share shape, got {y.shape} and {groups.shape}")
+    # 空样本集没有可分配权重，返回同为一维的空 float64 数组。
     if len(y) == 0:
+        # float64 满足 PyTorch WeightedRandomSampler 对权重精度的默认要求。
         return np.empty(0, dtype=np.float64)
 
+    # pair_counts 统计每个“类别索引、文件编号”组合切出的窗口数。
     pair_counts: Dict[Tuple[int, int], int] = {}
+    # class_files 保存每个类别包含的唯一文件编号集合。
     class_files: Dict[int, set[int]] = {}
+    # 同步遍历每个样本标签和文件编号；每轮更新组合计数及类别文件集合。
     for label, file_id in zip(y.tolist(), groups.tolist()):
+        # pair 唯一标识当前样本所属类别及原始采集文件。
         pair = (label, file_id)
+        # 当前组合窗口数加一；首次出现时从 0 开始。
         pair_counts[pair] = pair_counts.get(pair, 0) + 1
+        # 把当前文件编号加入该类别集合，set 自动去除重复窗口。
         class_files.setdefault(label, set()).add(file_id)
+    # 按原样本顺序生成 float64 权重数组，形状为 [样本数]。
     return np.asarray(
         [
+            # 类内先平均到文件，再平均到该文件的窗口，使每类总权重均为 1。
             1.0 / (len(class_files[label]) * pair_counts[(label, file_id)])
+            # 逐样本读取标签和文件编号，列表顺序与输入数组完全一致。
             for label, file_id in zip(y.tolist(), groups.tolist())
         ],
         dtype=np.float64,
@@ -988,19 +1286,29 @@ def estimate_rest_threshold(
     step_len: int,
     percentile: float = 85.0,
 ) -> float:
+    """用训练集静坐窗口活动分数的指定百分位估计整体静止阈值。"""
+    # scores 收集所有静坐完整窗口的无量纲 motion_score。
     scores: List[float] = []
+    # 遍历训练文件级记录；每轮只处理标签为 sit 的原始采集。
     for record in records:
+        # 非静坐记录不能用于定义传感器静止噪声基线，直接跳过。
         if record.label != SIT_CLASS_NAME:
+            # 继续检查下一文件，不读取当前动态动作数据。
             continue
+        # data 形状 [N,6]，列为 gx、gy、gz(deg/s)、ax、ay、az(g)。
         data = load_imu_file(record.path)
         # 静坐阈值也基于清洗窗口估计，保证训练筛选与 ESP32 实时特征入口使用相同信号定义。
         scores.extend(
             motion_score(preprocess_imu_window(window))
             for window in iter_windows(data, window_len, step_len)
         )
+    # 没有静坐窗口时使用保守默认值，保证小型测试数据仍可构建样本。
     if not scores:
+        # 0.03 是无量纲整体活动分数默认下限，不依赖不存在的统计量。
         return 0.03
+    # threshold 是静坐分数指定百分位，float32 统计与后续特征精度一致。
     threshold = float(np.percentile(np.asarray(scores, dtype=np.float32), percentile))
+    # 至少返回 0.01，防止近乎常量静坐记录让阈值过低并误删正常动作。
     return max(threshold, 0.01)
 
 
@@ -1010,41 +1318,77 @@ def estimate_active_point_threshold(
     step_len: int,
     percentile: float = 90.0,
 ) -> float:
+    """用静坐逐点活动强度百分位估计连续活动点判定阈值。"""
+    # scores 收集全部静坐窗口每个采样点的无量纲 instantaneous_motion。
     scores: List[float] = []
+    # 遍历训练记录；终止条件为所有文件检查完成，每轮只累积静坐数据。
     for record in records:
+        # 动态动作会抬高逐点阈值，不能参与静止噪声估计。
         if record.label != SIT_CLASS_NAME:
+            # 跳过当前动态记录，继续检查下一文件。
             continue
+        # data 是工程单位 [N,6] 数组，前三列 deg/s，后三列 g。
         data = load_imu_file(record.path)
+        # 遍历当前静坐记录的全部完整滑窗；每轮累积窗口内 N 个逐点分数。
         for window in iter_windows(data, window_len, step_len):
             # 逐点活动阈值排除单轴尖峰贡献，防止静坐基线被传感器毛刺抬高。
             scores.extend(
                 instantaneous_motion(preprocess_imu_window(window)).tolist()
             )
+    # 无静坐逐点分数时返回经验默认值，避免 percentile 对空数组报错。
     if not scores:
+        # 0.02 是无量纲逐点活动阈值默认值，仅用于缺少静坐样本的兼容路径。
         return 0.02
+    # threshold 是静坐逐点分数指定百分位，反映传感器噪声与自然手腕微动上界。
     threshold = float(np.percentile(np.asarray(scores, dtype=np.float32), percentile))
+    # 下限 0.005 防止极低噪声记录使单精度微扰被判为持续动作。
     return max(threshold, 0.005)
 
 
 def series_features(values: np.ndarray) -> List[float]:
+    """提取一维序列的 8 个基础统计特征。
+
+    返回顺序固定为均值、标准差、最小值、最大值、均方根、平均绝对一阶差分、
+    去均值过零率、一阶差分标准差。输入必须是非空 ``[N]`` 序列；物理单位继承来源通道，
+    过零率无量纲。时间复杂度 O(N)，额外空间 O(N)。
+    """
+    # x 统一为非空 float32 一维序列；单位可能为 deg/s、g 或二者构造的派生量。
     x = np.asarray(values, dtype=np.float32)
+    # mean 是窗口算术均值，单位与输入序列相同。
     mean = float(np.mean(x))
+    # std 是总体标准差，刻画窗口内波动强度，单位与输入相同。
     std = float(np.std(x))
+    # min_v 是窗口最小采样值，用于保留负向极值信息。
     min_v = float(np.min(x))
+    # max_v 是窗口最大采样值，用于保留正向极值信息。
     max_v = float(np.max(x))
+    # energy 是平均平方值 E[x^2]，随后开平方得到与原序列同单位的 RMS。
     energy = float(np.mean(x * x))
+    # centered 是去均值序列 [N]，用于统计围绕基线的符号变化。
     centered = x - mean
+    # 至少两个采样点时才能定义相邻差分和相邻符号乘积。
     if len(x) > 1:
+        # diffs 形状 [N-1]，表示相邻采样的一阶差分，单位与输入相同。
         diffs = np.diff(x)
+        # abs_diffs 取一阶差分绝对值，避免正负变化相互抵消。
         abs_diffs = np.abs(diffs)
+        # mean_abs_diff 是平均变化幅度，反映动作平滑度和冲击强度。
         mean_abs_diff = float(np.mean(abs_diffs))
+        # std_diff 是差分总体标准差，反映相邻变化的不均匀程度。
         std_diff = float(np.std(diffs))
+        # sign_product 形状 [N-1]；小于 0 表示去均值序列在相邻点间穿过零轴。
         sign_product = centered[:-1] * centered[1:]
+        # zcr 是过零次数占相邻点对数的比例，范围 [0,1]、无量纲。
         zcr = float(np.mean(sign_product < 0.0))
+    # 单点序列没有相邻关系，三个差分/过零特征按定义退化为 0。
     else:
+        # 无一阶差分时平均绝对差分设为 0，保持输出有限。
         mean_abs_diff = 0.0
+        # 无一阶差分时差分标准差设为 0。
         std_diff = 0.0
+        # 无相邻点对时过零率设为 0。
         zcr = 0.0
+    # 按 FEATURE_STAT_NAMES 固定顺序返回 8 个 Python float，ESP32 必须保持相同顺序。
     return [
         mean,
         std,
@@ -1058,20 +1402,41 @@ def series_features(values: np.ndarray) -> List[float]:
 
 
 def gravity_aligned_series(window: np.ndarray) -> Tuple[np.ndarray, ...]:
+    """用窗口平均加速度估计重力方向，并分解垂直/水平加速度与角速度。
+
+    输入 ``window`` 形状为 ``[N,6]``，通道顺序 ``gx、gy、gz、ax、ay、az``；
+    角速度单位 deg/s，加速度单位 g。垂直分量为向量对重力单位向量的投影，水平分量为
+    ``sqrt(max(|v|^2-v_vertical^2,0))``。返回四个 ``[N]`` 序列，顺序为垂直加速度、
+    水平加速度、垂直角速度、水平角速度。夹紧负数用于抵消浮点舍入误差。
+    """
+    # data 是 float32 的 [N,6] 六轴窗口，不改变调用方原数组。
     data = np.asarray(window, dtype=np.float32)
+    # gravity 形状 [3]，由 ax、ay、az 窗口均值估计，单位 g。
     gravity = np.mean(data[:, 3:6], axis=0)
+    # gravity_norm 是平均加速度向量模长，单位 g，用于归一化方向。
     gravity_norm = float(np.linalg.norm(gravity))
+    # 模长小于 1e-6 g 时方向不可辨，使用传感器 z 轴作为确定性后备方向。
     if gravity_norm < 1e-6:
+        # gravity_unit 为 [0,0,1] 的无量纲单位向量，避免除零和 NaN。
         gravity_unit = np.asarray([0.0, 0.0, 1.0], dtype=np.float32)
+    # 平均加速度模长有效时，直接归一化得到当前窗口重力单位方向。
     else:
+        # 除以模长后向量范数约为 1，并转换为 float32 对齐 ESP32 单精度计算。
         gravity_unit = (gravity / gravity_norm).astype(np.float32)
 
+    # acc_vertical 形状 [N]，是三轴加速度在重力方向的有符号投影，单位 g。
     acc_vertical = data[:, 3:6] @ gravity_unit
+    # gyro_vertical 形状 [N]，是三轴角速度在同一方向的有符号投影，单位 deg/s。
     gyro_vertical = data[:, 0:3] @ gravity_unit
+    # acc_squared 形状 [N]，保存每点三轴加速度模平方，单位 g^2。
     acc_squared = np.sum(data[:, 3:6] * data[:, 3:6], axis=1)
+    # gyro_squared 形状 [N]，保存每点三轴角速度模平方，单位 (deg/s)^2。
     gyro_squared = np.sum(data[:, 0:3] * data[:, 0:3], axis=1)
+    # acc_horizontal 根据勾股分解求非负水平模；maximum 防止舍入产生负开方数。
     acc_horizontal = np.sqrt(np.maximum(acc_squared - acc_vertical * acc_vertical, 0.0))
+    # gyro_horizontal 同理求重力正交平面的角速度模，单位 deg/s。
     gyro_horizontal = np.sqrt(np.maximum(gyro_squared - gyro_vertical * gyro_vertical, 0.0))
+    # 返回四个 float32 的 [N] 序列，固定顺序与 GRAVITY_NAMES 和 ESP32 实现一致。
     return (
         acc_vertical.astype(np.float32),
         acc_horizontal.astype(np.float32),
@@ -1081,14 +1446,28 @@ def gravity_aligned_series(window: np.ndarray) -> Tuple[np.ndarray, ...]:
 
 
 def phase_features(values: np.ndarray) -> List[float]:
+    """把非空一维序列等分为四个时间相位，并提取每相位均值、标准差和绝对峰值。
+
+    输出长度为 ``PHASE_SEGMENTS*3=12``。分段使用整数边界，保证 Python 与 ESP32 在
+    窗口长度不能整除 4 时仍得到相同采样归属。时间复杂度 O(N)，额外空间 O(1)。
+    """
+    # x 是非空 float32 一维序列，物理单位继承来源信号。
     x = np.asarray(values, dtype=np.float32)
+    # result 按相位 0→3 依次累积“均值、标准差、绝对峰值”。
     result: List[float] = []
+    # 遍历固定 PHASE_SEGMENTS 个相位；每轮处理一个连续时间片并追加三个特征。
     for phase in range(PHASE_SEGMENTS):
+        # start 使用整数除法计算当前相位的包含起点，范围 [0,N)。
         start = (phase * len(x)) // PHASE_SEGMENTS
+        # end 是当前相位不包含终点，最后一个相位严格结束于 N。
         end = ((phase + 1) * len(x)) // PHASE_SEGMENTS
+        # segment 是 x[start:end] 的连续视图，长度由整数分段决定。
         segment = x[start:end]
+        # 极短序列可能让前部相位为空，此时使用最后一个样本保持统计量有限。
         if len(segment) == 0:
+            # x[-1:] 保持一维形状 [1]，避免 np.mean 空数组产生 NaN。
             segment = x[-1:]
+        # 当前相位追加均值、总体标准差、绝对峰值，顺序不得与特征名表错位。
         result.extend(
             [
                 float(np.mean(segment)),
@@ -1096,94 +1475,171 @@ def phase_features(values: np.ndarray) -> List[float]:
                 float(np.max(np.abs(segment))),
             ]
         )
+    # 返回长度固定为 12 的 Python float 列表，单位与输入相同。
     return result
 
 
 def normalized_phase_features(values: np.ndarray) -> List[float]:
+    """先对序列做窗口内 z-score，再提取 12 个无量纲相位特征。"""
+    # x 是非空 float32 一维输入，单位由来源通道决定。
     x = np.asarray(values, dtype=np.float32)
+    # mean 是全窗口均值，用于消除佩戴姿态和传感器直流偏置。
     mean = float(np.mean(x))
+    # std 是全窗口总体标准差，用于消除动作幅度尺度差异。
     std = float(np.std(x))
+    # 标准差大于 1e-6 时计算 z=(x-mean)/std；近常量序列改用全零避免除零。
     normalized = (x - mean) / std if std > 1e-6 else np.zeros_like(x)
+    # 返回四相位各三个无量纲特征，长度固定为 12。
     return phase_features(normalized)
 
 
 def impact_distribution_features(values: np.ndarray) -> List[float]:
+    """提取冲击序列的 5 个分位数、偏度、超额峰度和最大相邻跳变。
+
+    分位数用最近秩索引 ``floor(q*(N-1)+0.5)``，便于 ESP32 无插值复现；偏度和峰度
+    基于总体标准差归一化。输出长度 8，时间复杂度由排序主导为 O(N log N)。
+    """
+    # x 是非空 float32 一维冲击相关序列，单位继承来源信号。
     x = np.asarray(values, dtype=np.float32)
+    # ordered 是升序副本 [N]，用于确定性最近秩分位数。
     ordered = np.sort(x)
+    # quantiles 依次保存 10%、25%、50%、75%、90% 五个分位值。
     quantiles = []
+    # 遍历五个固定分位比例；每轮选择一个最近秩样本并追加结果。
     for fraction in (0.10, 0.25, 0.50, 0.75, 0.90):
+        # index 将 [0,1] 比例映射到 [0,N-1]，加 0.5 后向最近整数舍入。
         index = int(math.floor(fraction * (len(ordered) - 1) + 0.5))
+        # 追加排序数组对应值，单位与输入序列一致。
         quantiles.append(float(ordered[index]))
+    # mean 是序列总体均值，用于计算标准化三阶和四阶矩。
     mean = float(np.mean(x))
+    # std 是总体标准差，作为偏度和峰度分母。
     std = float(np.std(x))
+    # 标准差有效时才计算高阶标准化矩，避免近常量序列数值爆炸。
     if std > 1e-6:
+        # normalized 为无量纲 z-score 序列 [N]。
         normalized = (x - mean) / std
+        # skew=E[z^3]，正负号反映冲击分布向高值或低值方向拖尾。
         skew = float(np.mean(normalized**3))
+        # excess_kurtosis=E[z^4]-3，0 对应高斯参考峰度。
         excess_kurtosis = float(np.mean(normalized**4) - 3.0)
+    # 近常量序列没有可靠高阶矩，将二者置 0 保证有限输出。
     else:
+        # 偏度退化为 0，表示不提供分布不对称证据。
         skew = 0.0
+        # 超额峰度退化为 0，避免除以极小标准差。
         excess_kurtosis = 0.0
+    # 至少两点时取最大绝对一阶差分；单点序列没有相邻跳变，返回 0。
     max_abs_diff = float(np.max(np.abs(np.diff(x)))) if len(x) > 1 else 0.0
+    # 返回固定 8 维列表：五分位数、偏度、超额峰度、最大相邻跳变。
     return quantiles + [skew, excess_kurtosis, max_abs_diff]
 
 
 def temporal_features(values: np.ndarray) -> List[float]:
+    """提取活动占比、峰密度、主频、谱熵和自相关周期共 6 个时序特征。
+
+    输入为非空 ``[N]`` 序列，采样率固定 25 Hz。频率输出单位 Hz，自相关滞后输出秒，
+    其余特征无量纲。FFT 复杂度 O(N log N)，滞后扫描最坏 O(N^2)；仅离线提取及
+    对应 ESP32 固定短窗计算，不改变 BP 参数量。
+    """
+    # x 是 float32 一维序列，物理单位由来源信号决定。
     x = np.asarray(values, dtype=np.float32)
+    # centered 去除直流均值，形状 [N]，供峰值、频谱和自相关共同使用。
     centered = x - float(np.mean(x))
+    # activity 是去均值幅值 |x-mean|，单位与输入相同。
     activity = np.abs(centered)
+    # std 是窗口总体标准差，作为显著活动点和峰值的自适应阈值。
     std = float(np.std(x))
+    # 标准差有效时统计 |x-mean|>std 的点比例；常量序列活动占比定义为 0。
     high_activity_ratio = float(np.mean(activity > std)) if std > 1e-6 else 0.0
 
+    # 至少三点且存在变化时才能通过左右邻点判断局部峰。
     if len(x) > 2 and std > 1e-6:
+        # peaks 形状 [N-2]，标记高于一倍标准差且不小于右邻点的局部活动峰。
         peaks = (
             (activity[1:-1] > activity[:-2])
             & (activity[1:-1] >= activity[2:])
             & (activity[1:-1] > std)
         )
+        # 峰个数除以原序列长度，得到与窗口长度弱相关的无量纲峰密度。
         peak_count_normalized = float(np.sum(peaks)) / float(len(x))
+    # 极短或常量序列不存在可靠局部峰，峰密度置 0。
     else:
+        # 0 表示未检测到可定义的显著活动峰。
         peak_count_normalized = 0.0
 
+    # 对去均值序列计算实数单边 FFT；float64 降低功率和熵累加误差。
     spectrum = np.fft.rfft(centered.astype(np.float64))
+    # power 形状 [floor(N/2)+1]，是各频点幅值平方，单位为输入单位平方。
     power = np.asarray(np.abs(spectrum) ** 2, dtype=np.float64)
+    # 频谱非空时清除 0 Hz 直流项，避免残余均值影响主频和谱熵。
     if len(power):
+        # 原地把直流功率设为 0，其他频点不变。
         power[0] = 0.0
+    # power_sum 是全部非直流功率和，作为频率概率分布归一化分母。
     power_sum = float(np.sum(power))
+    # 总功率有效且至少含一个非直流频点时计算主频和归一化谱熵。
     if power_sum > 1e-12 and len(power) > 1:
+        # dominant_bin 是最大非直流功率所在 FFT 索引。
         dominant_bin = int(np.argmax(power))
+        # 频点间隔为 SAMPLE_RATE/N，主频单位 Hz，范围 [0,Nyquist]。
         dominant_frequency_hz = dominant_bin * SAMPLE_RATE / float(len(x))
+        # probabilities 对非直流频点功率归一化，和约为 1。
         probabilities = power[1:] / power_sum
+        # nonzero 排除概率 0 的频点，避免计算 0*log(0) 产生 NaN。
         nonzero = probabilities > 0.0
+        # Shannon 熵除以 log(频点数) 后约束到 [0,1]，衡量频谱分散程度。
         spectral_entropy = -float(
             np.sum(probabilities[nonzero] * np.log(probabilities[nonzero]))
         ) / math.log(max(len(probabilities), 2))
+    # 常量、近静止或过短序列没有可解析的动态频谱，两个频域特征置 0。
     else:
+        # 主频 0 Hz 表示未检测到可靠周期频率。
         dominant_frequency_hz = 0.0
+        # 谱熵置 0，避免对近零功率归一化。
         spectral_entropy = 0.0
 
+    # lag_start 把 0.15 秒换算为至少 1 点的最小自相关滞后，并夹紧到 N-1。
     lag_start = min(max(1, int(round(0.15 * SAMPLE_RATE))), max(len(x) - 1, 1))
+    # lag_end 取窗口一半与 1.20 秒中较小者，限制计算量和无重叠长滞后。
     lag_end = min(len(x) // 2, int(round(1.20 * SAMPLE_RATE)))
+    # autocorr_peak 默认 0，表示没有满足条件的周期相关证据。
     autocorr_peak = 0.0
+    # autocorr_peak_lag_seconds 默认 0 秒，与无周期证据含义一致。
     autocorr_peak_lag_seconds = 0.0
+    # 序列有波动且滞后范围非空时，扫描归一化自相关峰。
     if std > 1e-6 and lag_end >= lag_start:
+        # best_correlation 初始为理论下界 -1，确保首个有效滞后可更新。
         best_correlation = -1.0
+        # best_lag 初始设为最小滞后，保证即使相关都为 -1 仍有合法索引。
         best_lag = lag_start
+        # 遍历闭区间 [lag_start,lag_end]；每轮比较一对错位子序列。
         for lag in range(lag_start, lag_end + 1):
+            # left 是去均值序列前 N-lag 点，形状 [N-lag]。
             left = centered[:-lag]
+            # right 是后移 lag 点后的 N-lag 点，与 left 一一对应。
             right = centered[lag:]
+            # denominator 是两段 L2 范数乘积，用于把点积归一化到约 [-1,1]。
             denominator = math.sqrt(
                 float(np.dot(left, left)) * float(np.dot(right, right))
             )
+            # 分母有效时计算归一化相关；近零能量段返回 0 防止除零。
             correlation = (
                 float(np.dot(left, right)) / denominator
                 if denominator > 1e-12
                 else 0.0
             )
+            # 当前相关高于历史最佳值时更新峰值及其滞后点数。
             if correlation > best_correlation:
+                # 保存无量纲最大归一化自相关值。
                 best_correlation = correlation
+                # 保存产生最大相关的采样点滞后。
                 best_lag = lag
+        # 扫描结束后把最佳相关写入返回特征。
         autocorr_peak = best_correlation
+        # 滞后点数除以 25 Hz 转换为秒，便于表示动作周期。
         autocorr_peak_lag_seconds = best_lag / float(SAMPLE_RATE)
+    # 返回固定 6 维时序特征，顺序必须与 TEMPORAL_FEATURE_NAMES 和 C 端一致。
     return [
         high_activity_ratio,
         peak_count_normalized,
@@ -1645,6 +2101,7 @@ def _wrist_principal_gyro_projection(window: np.ndarray) -> np.ndarray:
     data = np.asarray(window, dtype=np.float64)
     # 非法或空窗口返回空序列，调用方将其解释为零换向。
     if data.ndim != 2 or data.shape[1] != 6 or len(data) == 0:
+        # 返回 float64 空数组，保持后续长度判断和数值类型确定。
         return np.zeros(0, dtype=np.float64)
     # 取三轴手腕角速度并去除窗口均值，抑制陀螺零偏。
     centered = data[:, 0:3] - np.mean(data[:, 0:3], axis=0, keepdims=True)
@@ -1664,6 +2121,7 @@ def _wrist_principal_gyro_projection(window: np.ndarray) -> np.ndarray:
         norm = float(np.linalg.norm(next_axis))
         # 近静止窗口矩阵能量过小，没有可靠主轴，返回全零投影。
         if norm <= 1e-12:
+            # 返回与窗口等长的零投影，表示没有主转动方向证据。
             return np.zeros(len(data), dtype=np.float64)
         # 归一化后进入下一次固定迭代。
         axis = next_axis / norm
@@ -1671,6 +2129,7 @@ def _wrist_principal_gyro_projection(window: np.ndarray) -> np.ndarray:
     anchor = int(np.argmax(np.abs(axis)))
     # 锚点为负时翻转整条轴，使 Python/C 对相同窗口得到一致符号。
     if float(axis[anchor]) < 0.0:
+        # 主轴乘 -1 只固定符号，不改变 PCA 方向或投影能量。
         axis = -axis
     # 返回每个采样点沿手腕主转动方向的带符号角速度。
     return centered @ axis
@@ -1682,6 +2141,7 @@ def _wrist_reversal_rate_hz(window: np.ndarray) -> float:
     projection = _wrist_principal_gyro_projection(window)
     # 少于两个点无法形成换向。
     if len(projection) < 2:
+        # 返回 0 Hz，表示没有可定义换向事件。
         return 0.0
     # 边缘复制后使用三点平均，抑制单点噪声导致的伪符号翻转。
     smoothed = np.convolve(
@@ -1695,6 +2155,7 @@ def _wrist_reversal_rate_hz(window: np.ndarray) -> float:
     valid = smoothed[np.abs(smoothed) >= threshold]
     # 少于两个有效点时没有可靠换向。
     if len(valid) < 2:
+        # 返回 0 Hz，避免把零点附近噪声视为换向。
         return 0.0
     # 相邻有效值乘积小于零表示一次主摆动方向换向。
     reversal_count = int(np.sum(valid[:-1] * valid[1:] < 0.0))
@@ -1708,6 +2169,7 @@ def _wrist_acf_second_first_ratio(gyro_magnitude: np.ndarray) -> float:
     values = np.asarray(gyro_magnitude, dtype=np.float64).reshape(-1)
     # 少于 10 点时不存在审批方案要求的 0.3 秒延迟范围。
     if len(values) < 10:
+        # 返回无量纲零值，表示无可解析第二/第一峰结构。
         return 0.0
     # 去除窗口均值，使自相关描述动态周期而非直流幅值。
     centered = values - float(np.mean(values))
@@ -1715,6 +2177,7 @@ def _wrist_acf_second_first_ratio(gyro_magnitude: np.ndarray) -> float:
     energy = float(np.dot(centered, centered))
     # 近静止窗口无周期证据，返回零。
     if energy <= 1e-12:
+        # 避免用近零能量归一化自相关产生不稳定值。
         return 0.0
     # 最小延迟为 round(0.30*25)=8 点，排除三点平滑尺度内的伪峰。
     minimum_lag = max(2, int(round(0.30 * SAMPLE_RATE)))
@@ -1722,6 +2185,7 @@ def _wrist_acf_second_first_ratio(gyro_magnitude: np.ndarray) -> float:
     maximum_lag = min(int(round(3.0 * SAMPLE_RATE)), len(values) // 2)
     # 无合法延迟范围时返回零。
     if maximum_lag <= minimum_lag:
+        # 搜索区间为空，返回无周期证据的零值。
         return 0.0
     # 按时间顺序计算 lag=minimum_lag..maximum_lag 的归一化自相关。
     correlations = np.asarray(
@@ -1733,6 +2197,7 @@ def _wrist_acf_second_first_ratio(gyro_magnitude: np.ndarray) -> float:
     )
     # 少于三个相关点不能定义两个内部时间峰。
     if len(correlations) < 3:
+        # 返回零，避免把区间边界误当作两个时间峰。
         return 0.0
     # 内部局部峰须严格高于左点、不低于右点且为正。
     peak_offsets = np.flatnonzero(
@@ -1742,11 +2207,13 @@ def _wrist_acf_second_first_ratio(gyro_magnitude: np.ndarray) -> float:
     ) + 1
     # 少于两个时间峰时没有第二/第一峰结构。
     if len(peak_offsets) < 2:
+        # 返回无量纲零值，表示未观察到两次周期重复。
         return 0.0
     # 第一峰按时间最早而非幅值最大定义。
     first_peak = max(float(correlations[int(peak_offsets[0])]), 0.0)
     # 第一峰过小时不执行除法。
     if first_peak <= 1e-12:
+        # 返回零，防止第二峰除以近零第一峰造成数值爆炸。
         return 0.0
     # 第二个时间峰除以第一峰，并限制异常边界到 [0,5]。
     return float(
@@ -1819,6 +2286,7 @@ def _additional_wrist_features(
     gyro_values = np.asarray(gyro_magnitude, dtype=np.float64).reshape(-1)
     # 非法输入返回固定六维零向量，避免异常窗口改变生产特征长度。
     if data.ndim != 2 or data.shape[1] != 6 or len(data) == 0 or len(gyro_values) != len(data):
+        # 六个零依次对应末六项弱类特征，维度合同保持不变。
         return [0.0] * 6
     # half_length 取窗口整半长度；奇数窗口中间点不参与前后形状比较。
     half_length = len(data) // 2
@@ -1828,6 +2296,7 @@ def _additional_wrist_features(
     reversed_second_half = gyro_values[-half_length:][::-1]
     # 少于两个点或近常量波形无法定义皮尔逊相关，确定性返回零。
     if half_length < 2:
+        # 前后半窗形态相关置 0，表示没有足够时间结构证据。
         out_in_shape_correlation = 0.0
     else:
         # 两条半窗分别去均值，只比较归一化波形而不重复编码总体强度。
@@ -1854,9 +2323,11 @@ def _additional_wrist_features(
     jerk = np.zeros(len(data), dtype=np.float64)
     # 至少两个时间点时，用相邻 specific-force 模长绝对差乘采样率计算 jerk。
     if len(data) > 1:
+        # 首点保持 0，其余 N-1 点写入 g/s 单位 jerk 近似值。
         jerk[1:] = np.abs(np.diff(acc_magnitude)) * float(SAMPLE_RATE)
     # 三点平滑使用边缘复制，保持输出长度并抑制单点量化尖峰。
     if len(jerk) >= 3:
+        # 计算三点移动平均 jerk，输出长度仍为 N。
         smoothed_jerk = np.convolve(
             np.pad(jerk, (1, 1), mode="edge"),
             np.ones(3, dtype=np.float64) / 3.0,
@@ -1885,8 +2356,10 @@ def _additional_wrist_features(
     for value in post_jerk:
         # 零峰值不应产生整段宽度；正峰值才累计有效点。
         if post_jerk_peak > 1e-12 and float(value) >= half_height:
+            # 当前连续点达到半高，半高宽点数加一。
             half_width_points += 1
         else:
+            # 首次低于半高即结束连续宽度扫描，后续回升不计入同一冲击。
             break
     # 点数除以采样率得到冲击半高宽，单位为秒。
     post_jerk_half_width = half_width_points / float(SAMPLE_RATE)
@@ -1910,12 +2383,15 @@ def _additional_wrist_features(
     for index in range(event_index + 1, max(event_index + 1, len(data) - 1)):
         # 连续两点均回到门槛内时，首点定义为恢复位置。
         if dynamic_acc_magnitude[index] <= recovery_threshold and dynamic_acc_magnitude[index + 1] <= recovery_threshold:
+            # 记录首次持续恢复位置，用于归一化恢复时间。
             recovery_index = index
+            # 已找到最早满足条件位置，终止后续扫描。
             break
     # 以事件后剩余窗口长度归一化恢复时间，正常范围为 [0,1]。
     recovery_time_ratio = (recovery_index - event_index) / float(max(len(data) - 1 - event_index, 1))
     # 周期峰检测先进行与分析脚本一致的三点边缘平滑。
     if len(gyro_values) >= 3:
+        # 计算三点移动平均角速度模，输出长度保持 N。
         smoothed_gyro = np.convolve(
             np.pad(gyro_values, (1, 1), mode="edge"),
             np.ones(3, dtype=np.float64) / 3.0,
@@ -1947,6 +2423,7 @@ def _additional_wrist_features(
     for index in ordered_candidates:
         # 与全部已选峰距离均达标时保留当前峰。
         if all(abs(index - kept) >= minimum_distance for kept in selected_peaks):
+            # 追加当前峰索引，后续较弱近邻峰将被间距条件拒绝。
             selected_peaks.append(index)
     # 时间升序后相邻差值才表示真实峰间隔。
     selected_peaks.sort()
@@ -1964,9 +2441,11 @@ def _additional_wrist_features(
     power = np.square(np.abs(np.fft.rfft(centered_gyro * np.hanning(len(centered_gyro)))))
     # 直流分量不属于动作周期，显式清零。
     if len(power):
+        # 将 0 Hz 功率设为零，使主峰和谐波只来自动态成分。
         power[0] = 0.0
     # 近静止或频谱不足三个点时，二次谐波比定义为零。
     if len(power) < 3 or float(np.sum(power)) <= 1e-12:
+        # 返回无量纲零值，表示没有可解析基频/二次谐波结构。
         harmonic_ratio = 0.0
     else:
         # 最大功率频点作为基频索引，平局时保留较低频点。
@@ -1992,7 +2471,7 @@ def _additional_wrist_features(
 
 
 def weak_class_features(series: Dict[str, np.ndarray]) -> List[float]:
-    """提取 38 项弱类特征；每个输入值形状为 [时间点数]。"""
+    """提取 33 项弱类特征；字典中每个输入序列形状为 ``[时间点数]``。"""
     # 计算加速度变化模长频谱，输入单位为 g/采样点，获得中/高频占比。
     _, acc_delta_mid, acc_delta_high, _, _, _ = _selected_spectral_features(
         series["acc_delta_mag"]
@@ -2081,65 +2560,119 @@ def weak_class_features(series: Dict[str, np.ndarray]) -> List[float]:
 
 
 def build_feature_series(window: np.ndarray) -> Dict[str, np.ndarray]:
+    """从 ``[N,6]`` 清洗窗口构造后续特征函数复用的一维信号字典。"""
+    # data 为 float32 的 [N,6]；固定通道顺序是 gx、gy、gz、ax、ay、az。
     data = np.asarray(window, dtype=np.float32)
+    # series 先保存六个原始轴视图；陀螺仪单位 deg/s，加速度计单位 g。
     series: Dict[str, np.ndarray] = {
         name: data[:, axis] for axis, name in enumerate(CHANNEL_NAMES)
     }
+    # gyro_mag 形状 [N]，是三轴角速度欧氏模，单位 deg/s，降低佩戴方向影响。
     series["gyro_mag"] = np.linalg.norm(data[:, 0:3], axis=1)
+    # acc_mag 形状 [N]，是三轴加速度欧氏模，单位 g，保留冲击和腾空强度。
     series["acc_mag"] = np.linalg.norm(data[:, 3:6], axis=1)
+    # gyro_delta_mag 形状 [N-1]，表示相邻角速度向量变化模，单位 deg/s。
     series["gyro_delta_mag"] = np.linalg.norm(np.diff(data[:, 0:3], axis=0), axis=1)
+    # acc_delta_mag 形状 [N-1]，表示相邻加速度向量变化模，单位 g。
     series["acc_delta_mag"] = np.linalg.norm(np.diff(data[:, 3:6], axis=0), axis=1)
+    # 遍历四个重力对齐名称及序列；每轮把 [N] 投影结果写入同名字典项。
     for name, values in zip(GRAVITY_NAMES, gravity_aligned_series(data)):
+        # 保存垂直/水平加速度和角速度，顺序由 GRAVITY_NAMES 固定。
         series[name] = values
+    # 返回所有基础序列；各特征组只读取字典，不重复计算模长和重力投影。
     return series
 
 
 def extract_features(window: np.ndarray) -> np.ndarray:
+    """把一个六轴窗口转换为与 ESP32 完全同序的 297 维 float32 特征。
+
+    输入形状 ``[N,6]``，通道 ``gx、gy、gz、ax、ay、az``，单位分别为 deg/s 和 g。
+    输出形状 ``[297]``，依次包含 112 维全局统计、48 维相位、24 维时序、48 维
+    归一化相位、32 维冲击分布和 33 维弱类机制特征。具体公式见
+    ``docs/算法文档.md``；特征名和 C 端顺序不得独立修改。
+    """
     # 所有特征统一从清洗后的 [N,6] 手腕 IMU 窗口提取，确保统计量和冲击特征不受孤立毛刺支配。
     data = preprocess_imu_window(window)
 
+    # series 缓存 14 个原始轴、模长、差分模和重力投影一维序列。
     series = build_feature_series(data)
+    # features 按模型输入合同逐组追加，最终长度固定为 297。
     features: List[float] = []
+    # 遍历 14 个全局序列；每轮追加 8 个基础统计量，共 112 维。
     for source in GLOBAL_SERIES_NAMES:
+        # 追加顺序与 ONE_SERIES_FEATURES 及 C 端全局统计输出一致。
         features.extend(series_features(series[source]))
+    # 遍历 4 个关键相位来源；每轮追加 4 相位×3 统计量，共 48 维。
     for source in PHASE_SOURCE_NAMES:
+        # 相位边界使用整数分段，确保 Python/C 对非整除窗口一致。
         features.extend(phase_features(series[source]))
+    # 遍历 4 个关键来源；每轮追加 6 个频域/周期特征，共 24 维。
     for source in PHASE_SOURCE_NAMES:
+        # 时序特征顺序由 TEMPORAL_FEATURES 固定。
         features.extend(temporal_features(series[source]))
+    # 遍历相同 4 个来源；每轮追加 12 个窗口内标准化相位特征，共 48 维。
     for source in PHASE_SOURCE_NAMES:
+        # 归一化相位主要保留动作形态，降低绝对幅度和佩戴差异影响。
         features.extend(normalized_phase_features(series[source]))
+    # 遍历相同 4 个来源；每轮追加 8 个分布/冲击特征，共 32 维。
     for source in PHASE_SOURCE_NAMES:
+        # 分位数使用最近秩算法，必须与 ESP32 不插值实现一致。
         features.extend(impact_distribution_features(series[source]))
+    # 追加 33 个针对跳跃弓步、跳跃深蹲、收腹跳等弱类的手腕机制特征。
     features.extend(weak_class_features(series))
+    # 返回连续 float32 数组 [297]；标准化和 BP 分支均依赖此固定列顺序。
     return np.asarray(features, dtype=np.float32)
 
 
 def build_feature_names() -> List[str]:
+    """按 ``extract_features`` 的追加规则生成 297 个稳定特征名称。"""
+    # names 按模型输入列号从 0 到 296 累积，导出时同时作为 Python/C 合同。
     names: List[str] = []
+    # 外层遍历 14 个全局序列，顺序与 extract_features 第一组一致。
     for source in GLOBAL_SERIES_NAMES:
+        # 内层遍历 8 个基础统计名称，每轮生成一个“来源_统计量”名称。
         for feature in ONE_SERIES_FEATURES:
+            # 追加一个全局统计特征名，共形成前 112 个名称。
             names.append(f"{source}_{feature}")
+    # 遍历 4 个相位来源，为每个来源生成 12 个原始相位名称。
     for source in PHASE_SOURCE_NAMES:
+        # phase 从 0 到 3，对应窗口由早到晚的四个连续时间片。
         for phase in range(PHASE_SEGMENTS):
+            # 每个相位按均值、标准差、绝对最大值固定顺序命名。
             for feature in PHASE_FEATURES:
+                # 追加当前来源、相位编号和统计量组成的唯一名称。
                 names.append(f"{source}_phase{phase}_{feature}")
+    # 遍历 4 个来源，为每个来源生成 6 个频域及自相关特征名。
     for source in PHASE_SOURCE_NAMES:
+        # 内层按 temporal_features 返回顺序遍历名称。
         for feature in TEMPORAL_FEATURES:
+            # 追加一个“来源_时序指标”名称，共 24 个。
             names.append(f"{source}_{feature}")
+    # 遍历 4 个来源，为窗口内 z-score 后的相位统计命名。
     for source in PHASE_SOURCE_NAMES:
+        # phase 从 0 到 3，时间顺序不变。
         for phase in range(PHASE_SEGMENTS):
+            # 每个标准化相位仍含均值、标准差、绝对最大值三项。
             for feature in PHASE_FEATURES:
+                # normalized_phase 前缀区分原始单位相位特征，共追加 48 项。
                 names.append(f"{source}_normalized_phase{phase}_{feature}")
+    # 遍历 4 个来源，生成分位数、偏度、峰度和最大跳变名称。
     for source in PHASE_SOURCE_NAMES:
+        # 内层顺序必须与 impact_distribution_features 的 8 项返回一致。
         for feature in IMPACT_DISTRIBUTION_FEATURES:
+            # 追加一个冲击分布特征名，共 32 项。
             names.append(f"{source}_{feature}")
+    # 在末尾追加 33 个弱类机制特征名称，与 weak_class_features 返回顺序一一对应。
     names.extend(WEAK_CLASS_FEATURE_NAMES)
+    # 返回长度 297 的名称列表；索引即标准化数组和模型权重输入列索引。
     return names
 
 
 def build_jump_shape_feature_indices(feature_names: Sequence[str]) -> List[int]:
+    """返回跳跃家族专家使用的尺度不变形态及弱类机制特征列索引。"""
     # weak_feature_set 保存 33 项经动作机理或文件级证据设计的弱类特征名称。
     weak_feature_set = set(WEAK_CLASS_FEATURE_NAMES)
+    # invariant_suffixes 列出对绝对幅度较不敏感的通用统计名称后缀。
     invariant_suffixes = (
         "_zcr",
         "_high_activity_ratio",
@@ -2151,6 +2684,7 @@ def build_jump_shape_feature_indices(feature_names: Sequence[str]) -> List[int]:
         "_skew",
         "_excess_kurtosis",
     )
+    # 返回保持原 297 维顺序的索引列表，专家输入列可由该列表稳定切片。
     return [
         index
         for index, name in enumerate(feature_names)
@@ -2165,21 +2699,28 @@ def split_records_by_file(
     records: Sequence[ImuRecord],
     seed: int = SEED,
 ) -> Tuple[List[ImuRecord], List[ImuRecord], List[ImuRecord]]:
+    """按原始文件分层划分训练、验证、测试集，禁止同一文件窗口跨集合泄漏。"""
+    # labels 与 records 等长，保存每个原始文件的动作类别整数索引。
     labels = [record.label_idx for record in records]
+    # 第一次分层划分产生 70% 训练文件和 30% 临时文件；随机种子固定可复现。
     train_records, temp_records = train_test_split(
         list(records),
         train_size=TRAIN_RATIO,
         random_state=seed,
         stratify=labels,
     )
+    # temp_labels 保存临时文件类别，用于第二次继续分层。
     temp_labels = [record.label_idx for record in temp_records]
+    # val_fraction_of_temp=0.5，使临时集等分为 15% 验证和 15% 测试。
     val_fraction_of_temp = VAL_RATIO / (VAL_RATIO + TEST_RATIO)
+    # 第二次分层划分临时文件；seed+1 与第一次随机流独立但仍可复现。
     val_records, test_records = train_test_split(
         temp_records,
         train_size=val_fraction_of_temp,
         random_state=seed + 1,
         stratify=temp_labels,
     )
+    # 返回三个新列表；划分单位是 ImuRecord 文件，不是高度相关的滑动窗口。
     return list(train_records), list(val_records), list(test_records)
 
 
@@ -2188,47 +2729,78 @@ def split_records_for_experiment(
     extra_train_records: Sequence[ImuRecord] = (),
     seed: int = SEED,
 ) -> Tuple[List[ImuRecord], List[ImuRecord], List[ImuRecord]]:
+    """划分基础数据后，仅把无重复的附加记录并入训练集。"""
+    # 基础数据严格按文件分层切为训练/验证/测试三部分。
     train_records, val_records, test_records = split_records_by_file(
         base_records,
         seed,
     )
+    # base_paths 保存解析后的基础文件绝对路径，用于检测跨数据源重复。
     base_paths = {record.path.resolve() for record in base_records}
+    # extra_paths 按附加记录顺序保存绝对路径，后续同时检测跨集和内部重复。
     extra_paths = [record.path.resolve() for record in extra_train_records]
+    # duplicate_paths 是附加训练集与基础数据集的交集；任何重复都会造成采集泄漏。
     duplicate_paths = base_paths.intersection(extra_paths)
+    # 发现跨数据源重复时立即拒绝实验，避免相同文件同时出现在训练和验证/测试候选中。
     if duplicate_paths:
+        # 报错按路径排序列出全部重复文件，便于清理数据清单。
         raise ValueError(
             "Extra training records duplicate base dataset paths: "
             + ", ".join(str(path) for path in sorted(duplicate_paths))
         )
+    # 附加路径列表长度与 set 长度不同表示附加训练清单内部重复。
     if len(extra_paths) != len(set(extra_paths)):
+        # 重复附加文件会被多次切窗并扭曲样本权重，因此拒绝继续。
         raise ValueError("Extra training records contain duplicate paths")
+    # 仅训练集追加外部记录；验证和测试仍完全来自基础数据划分。
     return train_records + list(extra_train_records), val_records, test_records
 
 
 def euler_rotation_matrix(rx: float, ry: float, rz: float) -> np.ndarray:
+    """生成按 ``Rz @ Ry @ Rx`` 组合的 3×3 右手系欧拉旋转矩阵。
+
+    ``rx、ry、rz`` 单位为弧度；返回 float32 正交矩阵，用于对角速度和加速度向量施加
+    相同小角度旋转，模拟手腕 IMU 佩戴姿态差异。
+    """
+    # sx、cx 分别是绕 x 轴角 rx 的正弦和余弦。
     sx, cx = math.sin(rx), math.cos(rx)
+    # sy、cy 分别是绕 y 轴角 ry 的正弦和余弦。
     sy, cy = math.sin(ry), math.cos(ry)
+    # sz、cz 分别是绕 z 轴角 rz 的正弦和余弦。
     sz, cz = math.sin(rz), math.cos(rz)
+    # rotation_x 是绕 x 轴旋转的 float32 3×3 矩阵。
     rotation_x = np.asarray(
         [[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]], dtype=np.float32
     )
+    # rotation_y 是绕 y 轴旋转的 float32 3×3 矩阵。
     rotation_y = np.asarray(
         [[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]], dtype=np.float32
     )
+    # rotation_z 是绕 z 轴旋转的 float32 3×3 矩阵。
     rotation_z = np.asarray(
         [[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32
     )
+    # 按先 x、后 y、再 z 的列向量约定组合并返回 float32 矩阵。
     return (rotation_z @ rotation_y @ rotation_x).astype(np.float32)
 
 
 def rotate_imu_window(window: np.ndarray, rotation: np.ndarray) -> np.ndarray:
+    """用同一 3×3 旋转矩阵变换窗口中的角速度和加速度三维向量。"""
+    # data 是 float32 的 [N,6] 输入，前三列 deg/s，后三列 g。
     data = np.asarray(window, dtype=np.float32)
+    # matrix 转为 float32，保证增强输出精度与模型输入一致。
     matrix = np.asarray(rotation, dtype=np.float32)
+    # 旋转矩阵必须严格为 [3,3]，否则无法与三轴行向量相乘。
     if matrix.shape != (3, 3):
+        # 报错包含实际形状，避免广播产生难以察觉的通道错误。
         raise ValueError(f"Expected rotation shape (3, 3), got {matrix.shape}")
+    # rotated 是独立 [N,6] 副本，增强不修改原始窗口。
     rotated = data.copy()
+    # 角速度行向量右乘 matrix.T，输出仍是 gx、gy、gz，单位 deg/s。
     rotated[:, 0:3] = data[:, 0:3] @ matrix.T
+    # 加速度使用完全相同旋转，保持两种传感器在同一虚拟坐标系中，单位 g。
     rotated[:, 3:6] = data[:, 3:6] @ matrix.T
+    # 返回形状不变的 float32 增强窗口 [N,6]。
     return rotated
 
 
@@ -2237,37 +2809,64 @@ def time_warp_window(
     rng: np.random.Generator,
     max_displacement: float = 0.03,
 ) -> np.ndarray:
+    """用单调正弦时间位移重采样六轴窗口，模拟约 ±3% 动作速度变化。"""
+    # data 是 float32 的 [N,6] 六轴窗口，通道顺序和单位保持不变。
     data = np.asarray(window, dtype=np.float32)
+    # 少于三点无法稳定插值，非正最大位移表示关闭时间扭曲。
     if len(data) < 3 or max_displacement <= 0.0:
+        # 返回独立副本，保证增强接口从不与输入共享可写存储。
         return data.copy()
+    # timeline 是从 0 到 1 的等间隔原始归一化时间轴，形状 [N]。
     timeline = np.linspace(0.0, 1.0, len(data), dtype=np.float64)
+    # phase 在 [0,2π) 均匀采样，随机改变局部加速/减速出现位置。
     phase = float(rng.uniform(0.0, 2.0 * math.pi))
+    # amplitude 在最大位移的 25% 到 100% 之间采样，避免每次增强强度固定。
     amplitude = float(rng.uniform(0.25, 1.0)) * max_displacement
+    # displacement 两端由 sin(πt) 强制为 0，中部产生平滑正负时间偏移。
     displacement = amplitude * np.sin(math.pi * timeline) * np.sin(
         2.0 * math.pi * timeline + phase
     )
+    # source_timeline 是每个输出时刻对应的原始采样位置，并夹紧到 [0,1]。
     source_timeline = np.clip(timeline + displacement, 0.0, 1.0)
+    # 累积最大值保证采样位置单调不回退，避免时间顺序反转。
     source_timeline = np.maximum.accumulate(source_timeline)
+    # 固定首点映射到原始首点，保持窗口起始边界。
     source_timeline[0] = 0.0
+    # 固定末点映射到原始末点，保持窗口终止边界。
     source_timeline[-1] = 1.0
+    # warped 预分配与输入同形状、同 dtype 的 [N,6] 输出数组。
     warped = np.empty_like(data)
+    # 遍历六个 IMU 通道；每轮独立线性插值但共享同一时间映射。
     for axis in range(data.shape[1]):
+        # np.interp 产生 float64 后转回 float32，写入当前通道且不混合轴。
         warped[:, axis] = np.interp(source_timeline, timeline, data[:, axis]).astype(
             np.float32
         )
+    # 返回时间长度、六轴顺序和物理单位均不变的增强窗口。
     return warped
 
 
 def augment_window(window: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    """组合小角度旋转、平滑时间扭曲和传感器噪声，生成一个训练窗口增强副本。"""
+    # max_angle 把允许的最大佩戴偏角从度转换为弧度。
     max_angle = math.radians(MAX_ROTATION_DEGREES)
+    # angles 形状 [3]，分别为 x、y、z 轴在 [-max_angle,max_angle] 的随机角度。
     angles = rng.uniform(-max_angle, max_angle, size=3)
+    # rotation 是 float32 3×3 组合旋转矩阵，三个参数单位为弧度。
     rotation = euler_rotation_matrix(float(angles[0]), float(angles[1]), float(angles[2]))
+    # 对角速度和加速度施加相同坐标旋转，保持物理一致性。
     augmented = rotate_imu_window(window, rotation)
+    # 使用最多 3% 平滑时间位移模拟动作速度差异，输出仍为 [N,6]。
     augmented = time_warp_window(augmented, rng, max_displacement=0.03)
+    # gyro_noise 是前三轴独立零均值高斯噪声，标准差 0.25 deg/s。
     gyro_noise = rng.normal(0.0, 0.25, size=augmented[:, 0:3].shape).astype(np.float32)
+    # acc_noise 是后三轴独立零均值高斯噪声，标准差 0.003 g。
     acc_noise = rng.normal(0.0, 0.003, size=augmented[:, 3:6].shape).astype(np.float32)
+    # 角速度通道原地叠加对应单位噪声，不影响加速度通道。
     augmented[:, 0:3] += gyro_noise
+    # 加速度通道原地叠加对应单位噪声，不影响角速度通道。
     augmented[:, 3:6] += acc_noise
+    # 返回 float32 [N,6] 增强窗口，标签和原始文件编号由调用方继承。
     return augmented
 
 
@@ -2281,9 +2880,18 @@ def build_samples(
     rng: np.random.Generator,
     progress_label: Optional[str] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, int]]:
+    """从文件记录生成过滤、增强后的 297 维窗口样本及审计计数。
+
+    返回 ``X:[样本数,297]``、``y:[样本数]``、``file_ids:[样本数]`` 和统计字典。
+    原始文件编号随增强样本继承，用于文件平衡采样和跨文件对比损失。
+    """
+    # features 按生成顺序保存每个窗口的 float32 [297] 特征向量。
     features: List[np.ndarray] = []
+    # labels 保存与 features 一一对应的动作类别整数索引。
     labels: List[int] = []
+    # file_ids 保存与 features 一一对应的本次 records 局部文件编号。
     file_ids: List[int] = []
+    # skipped 统计文件/窗口过滤和保留数量，供训练报告追踪前处理影响。
     skipped = {
         "too_short": 0,
         "rest_filtered": 0,
@@ -2293,8 +2901,11 @@ def build_samples(
         "motion_edge_trimmed_points": 0,
     }
 
+    # 遍历全部文件记录；file_id 从 0 递增，每轮读取、裁剪并切分一个原始文件。
     for file_id, record in enumerate(records):
+        # 指定进度标签时，在首文件及每 10 个文件输出一次可见特征提取进度。
         if progress_label and (file_id == 0 or file_id % 10 == 0):
+            # 日志包含当前文件序号、总文件数和已保留窗口数；flush 保证 PyCharm 实时显示。
             print(
                 f"features {progress_label} file={file_id + 1}/{len(records)} "
                 f"kept={skipped['kept_windows']}",
@@ -2312,58 +2923,96 @@ def build_samples(
         )
         # 累计被删除点数，便于训练报告量化清洗强度并发现异常过度裁剪。
         skipped["motion_edge_trimmed_points"] += original_length - len(data)
+        # 裁剪后短于完整窗口的文件无法生成固定维特征样本。
         if len(data) < window_len:
+            # 过短文件计数加一，用于数据质量报告。
             skipped["too_short"] += 1
+            # 结束当前文件处理，继续下一条 ImuRecord。
             continue
+        # record_kept 统计当前原始文件通过过滤的原始窗口数，不计增强副本。
         record_kept = 0
+        # 按固定窗口和步长遍历当前记录；每轮决定是否保留并提取特征。
         for window in iter_windows(data, window_len, step_len):
+            # 不满足当前类别活动强度规则的窗口视为首尾静止或异常窗口。
             if not keep_window_for_label(
                 window,
                 record.label,
                 rest_threshold,
                 active_point_threshold,
             ):
+                # 被活动规则拒绝的窗口计数加一。
                 skipped["rest_filtered"] += 1
+                # 跳过当前窗口，不写入特征、标签或文件编号。
                 continue
+            # 提取原始窗口 297 维特征并追加到样本列表。
             features.append(extract_features(window))
+            # 追加当前文件动作类别索引，与刚加入的特征一一对应。
             labels.append(record.label_idx)
+            # 追加当前原始文件编号，供后续文件平衡和跨文件正样本判定。
             file_ids.append(file_id)
+            # 全局保留样本数加一，包含原始窗口和后续增强窗口。
             skipped["kept_windows"] += 1
+            # 当前文件有效原始窗口数加一，用于决定是否启动回退窗口策略。
             record_kept += 1
+            # 只有训练集启用增强，验证/测试保持真实分布和确定性。
             if augment:
+                # 为每个有效原始窗口生成固定 AUGMENT_TIMES 个随机增强副本。
                 for _ in range(AUGMENT_TIMES):
+                    # 先增强六轴时序，再独立提取 297 维特征并追加。
                     features.append(extract_features(augment_window(window, rng)))
+                    # 增强样本继承原动作标签，不产生新类别。
                     labels.append(record.label_idx)
+                    # 增强样本继承原始文件编号，防止被当成跨文件对比正样本。
                     file_ids.append(file_id)
+                    # 每生成一个增强样本即更新总保留窗口计数。
                     skipped["kept_windows"] += 1
+        # 当前文件所有窗口均未通过过滤时，记录数据质量事件并按类别决定是否回退。
         if record_kept == 0:
+            # 无有效窗口文件数加一，便于定位阈值过严或采集失败。
             skipped["files_without_valid_window"] += 1
+            # 高动态动作没有合格窗口说明缺少持续动作证据，不用弱窗口回退污染标签。
             if record.label in HIGH_DYNAMIC_CLASSES:
+                # 继续下一文件，当前高动态文件不生成任何样本。
                 continue
+            # 非高动态类别收集裁剪后全部完整窗口，准备选一个最符合类别活动特性的回退样本。
             fallback_windows = list(iter_windows(data, window_len, step_len))
+            # 至少存在一个完整窗口时才执行分数排序和回退追加。
             if fallback_windows:
                 # 回退选择仍使用清洗后的运动分数，避免孤立尖峰成为“最佳”动作窗口。
                 scored = [
                     (motion_score(preprocess_imu_window(window)), window)
                     for window in fallback_windows
                 ]
+                # 静坐回退应选择运动分数最低窗口，尽量保持安静状态。
                 if record.label == SIT_CLASS_NAME:
+                    # best_window 是分数最小的静坐候选，元组第一项分数不再使用。
                     _, best_window = min(scored, key=lambda item: item[0])
+                # 普通非静坐动作回退选择运动分数最高窗口，保留最明显动作片段。
                 else:
+                    # best_window 是分数最大的候选，尽量降低静止片段标签噪声。
                     _, best_window = max(scored, key=lambda item: item[0])
+                # 回退窗口提取 297 维特征，仅追加原始窗口，不做增强。
                 features.append(extract_features(best_window))
+                # 回退样本继承当前文件动作类别索引。
                 labels.append(record.label_idx)
+                # 回退样本继承当前文件编号。
                 file_ids.append(file_id)
+                # 总保留样本数加一，与列表长度保持一致。
                 skipped["kept_windows"] += 1
 
+    # 所有文件处理后仍无样本时无法计算标准化参数或训练模型。
     if not features:
+        # 明确指出过滤后为空，便于检查窗口长度、阈值和数据单位。
         raise ValueError("No samples generated after filtering")
+    # 指定进度标签时输出一次完成日志，确保 PyCharm 中可见最终样本数。
     if progress_label:
+        # 最终日志把当前文件数写成总数并标记 complete=true。
         print(
             f"features {progress_label} file={len(records)}/{len(records)} "
             f"kept={skipped['kept_windows']} complete=true",
             flush=True,
         )
+    # 堆叠并返回 X:[S,297]、y:[S]、file_ids:[S] 和过滤统计字典。
     return (
         np.vstack(features).astype(np.float32),
         np.asarray(labels, dtype=np.int64),
@@ -2377,9 +3026,19 @@ def standardize(
     val_x: np.ndarray,
     test_x: np.ndarray,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """仅用训练集统计量执行逐特征 z-score 标准化。
+
+    对第 i 列计算 ``z_i=(x_i-mean_i)/std_i``。三个输入形状分别为
+    ``[训练样本数,297]``、``[验证样本数,297]``、``[测试样本数,297]``；返回三组
+    float32 标准分及 ``mean:[297]``、``std:[297]``。验证/测试不参与统计，防止泄漏。
+    """
+    # mean 形状 [297]，仅由训练样本逐列求均值得到，单位继承各原始特征。
     mean = np.mean(train_x, axis=0).astype(np.float32)
+    # std 形状 [297]，仅由训练样本逐列求总体标准差得到，单位同对应特征。
     std = np.std(train_x, axis=0).astype(np.float32)
+    # 标准差小于 1e-6 的近常量列改用 1，避免除零；该列标准化后接近 0。
     std[std < 1e-6] = 1.0
+    # 返回三组无量纲 float32 标准分以及供 ESP32 复现的训练均值和标准差。
     return (
         ((train_x - mean) / std).astype(np.float32),
         ((val_x - mean) / std).astype(np.float32),
@@ -2422,15 +3081,21 @@ def family_subset(
     class_names: Sequence[str],
     family_names: Sequence[str],
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """筛出指定动作家族样本，并把全局类别索引重编码为家族局部索引。"""
+    # global_indices 按 family_names 顺序查找各家族类在主模型中的输出索引。
     global_indices = [class_names.index(name) for name in family_names]
+    # global_to_local 把主模型索引映射到从 0 开始的专家输出索引。
     global_to_local = {
         global_idx: local_idx for local_idx, global_idx in enumerate(global_indices)
     }
+    # mask 形状 [样本数]，只保留 y 属于家族全局索引集合的样本。
     mask = np.isin(y, np.asarray(global_indices, dtype=np.int64))
+    # local_y 按筛选后样本顺序把全局标签映射为 int64 家族局部标签。
     local_y = np.asarray(
         [global_to_local[int(label)] for label in np.asarray(y)[mask]],
         dtype=np.int64,
     )
+    # 返回筛选后的特征、局部标签和原文件编号，三者第一维完全一致。
     return np.asarray(x)[mask], local_y, np.asarray(file_ids)[mask]
 
 
@@ -2440,23 +3105,38 @@ def route_family_predictions(
     class_names: Sequence[str],
     family_names: Sequence[str],
 ) -> np.ndarray:
+    """仅对主模型预测落入指定家族的样本，用专家局部预测替换全局类别。"""
+    # primary 是形状 [样本数] 的主模型全局类别索引。
     primary = np.asarray(primary_pred, dtype=np.int64)
+    # specialist 是同形状专家局部类别索引；非家族位置的值不会被使用。
     specialist = np.asarray(specialist_pred, dtype=np.int64)
+    # 两组预测必须逐样本对齐，否则路由会把专家结果写给错误窗口。
     if primary.shape != specialist.shape:
+        # 立即拒绝形状不一致输入，避免 NumPy 广播掩盖错误。
         raise ValueError("Primary and specialist predictions must have the same shape")
+    # family_global 按专家输出顺序保存对应主模型全局类别索引。
     family_global = np.asarray(
         [class_names.index(name) for name in family_names], dtype=np.int64
     )
+    # routed 复制主预测，非家族类别保持原值。
     routed = primary.copy()
+    # mask 标记主预测属于该家族的位置，只有这些位置允许专家覆盖。
     mask = np.isin(primary, family_global)
+    # 专家局部索引通过 family_global 查表转为全局索引并写回家族位置。
     routed[mask] = family_global[specialist[mask]]
+    # 返回形状 [样本数] 的最终全局类别索引。
     return routed
 
 
 def class_weight_tensor(labels: np.ndarray, class_count: int, device: torch.device) -> torch.Tensor:
+    """按类别样本数倒数生成均值约为 1 的交叉熵权重张量。"""
+    # counts 形状 [类别数]，统计每个整数标签在训练样本中的出现次数。
     counts = np.bincount(labels, minlength=class_count).astype(np.float32)
+    # 缺失类别计数改为 1 以避免除零；正常完整训练集不会触发此保护。
     counts[counts == 0.0] = 1.0
+    # weights_i=总样本数/(类别数*counts_i)，少数类获得更大损失权重。
     weights = counts.sum() / (class_count * counts)
+    # 返回训练设备上的 float32 [类别数] 张量，供 F.cross_entropy 使用。
     return torch.tensor(weights, dtype=torch.float32, device=device)
 
 
@@ -2470,6 +3150,7 @@ def pk_ce_class_weights(
     counts = np.bincount(labels, minlength=class_count).astype(np.float32)
     # 任一类别缺失都会使 P×K 和主分类合同无效，因此立即报错而不伪造权重。
     if np.any(counts <= 0.0):
+        # 缺失类别无法构造每批 P 个完整类别，停止训练并报告数据问题。
         raise ValueError("Every class requires at least one training window")
     # P×K 让采样概率变为 1/P；CE 乘以相对计数即可恢复原窗口先验。
     weights = counts / float(np.mean(counts))
@@ -2487,15 +3168,18 @@ class PKFileBatchSampler(Sampler[List[int]]):
         samples_per_class: int,
         seed: int,
     ):
+        """建立类别-文件-窗口三级索引，并计算每个 epoch 的 P×K 批次数。"""
         # 将标签保存为一维 int64 数组，元素表示每个窗口的类别索引。
         self.labels = np.asarray(labels, dtype=np.int64).reshape(-1)
         # 将文件编号保存为一维 int64 数组，用于避免同文件重叠窗口充当对比正样本。
         self.file_ids = np.asarray(file_ids, dtype=np.int64).reshape(-1)
         # 标签与文件编号必须逐窗口对应，否则采样出的来源约束无效。
         if self.labels.shape != self.file_ids.shape:
+            # 拒绝错位元数据，避免同文件约束应用到错误样本。
             raise ValueError("labels and file_ids must have the same shape")
         # K 必须为正整数；训练配置采用 K=6，单元测试可使用更小值。
         if samples_per_class <= 0:
+            # K<=0 无法形成有效批次，因此立即报告配置错误。
             raise ValueError("samples_per_class must be positive")
         # 保存每类每批样本数 K。
         self.samples_per_class = int(samples_per_class)
@@ -2527,10 +3211,12 @@ class PKFileBatchSampler(Sampler[List[int]]):
             }
 
     def __len__(self) -> int:
+        """返回一个 epoch 产生的完整 P×K 批次数。"""
         # 返回每个 epoch 产生的 P×K 批次数，供 DataLoader 计算长度。
         return self.batch_count
 
     def __iter__(self) -> Iterable[List[int]]:
+        """逐批生成类别均衡且优先跨文件的训练样本索引列表。"""
         # 使用“基础种子+epoch”构造独立随机流，兼顾复现和逐 epoch 洗牌。
         rng = np.random.default_rng(self.seed + self.epoch)
         # 迭代开始后递增 epoch，下一次 DataLoader 遍历将使用不同抽样序列。
@@ -2579,14 +3265,24 @@ def make_loader(
     pk_samples_per_class: int = 6,
     seed: int = SEED,
 ) -> DataLoader:
+    """把 NumPy 特征、标签和可选文件编号封装为训练或推理 DataLoader。
+
+    ``x`` 形状为 ``[样本数,特征数]``，``y`` 和 ``file_ids`` 形状为 ``[样本数]``。
+    采样优先级依次为 P×K 文件平衡、普通文件平衡、常规 shuffle。
+    """
+    # tensors 先保存 float32 特征和 int64 标签张量，第一维均为样本数。
     tensors: List[torch.Tensor] = [torch.from_numpy(x).float(), torch.from_numpy(y).long()]
+    # 训练损失需要原始文件编号时，追加第三个 int64 [样本数] 张量。
     if file_ids is not None:
+        # np.asarray 统一 dtype，torch.from_numpy 不复制时仍保持整数文件编号语义。
         tensors.append(torch.from_numpy(np.asarray(file_ids, dtype=np.int64)).long())
+    # TensorDataset 按样本索引同步返回 x、y 和可选 file_id，防止三者错位。
     dataset = TensorDataset(*tensors)
     # P×K 模式优先级高于普通文件加权采样，并要求提供逐窗口文件编号。
     if pk_file_balanced:
         # 缺少文件编号时无法保证同类 K 个窗口优先来自不同采集文件。
         if file_ids is None:
+            # 明确拒绝缺少 file_ids 的 P×K 配置。
             raise ValueError("file_ids are required for P x K file-balanced sampling")
         # 批采样器直接输出完整 P×K 索引列表，因此 DataLoader 不再接收 batch_size。
         batch_sampler = PKFileBatchSampler(
@@ -2597,39 +3293,62 @@ def make_loader(
         )
         # 每批输出 (x,y,file_id)，形状分别为 [P*K,特征数]、[P*K]、[P*K]。
         return DataLoader(dataset, batch_sampler=batch_sampler)
+    # 普通文件平衡模式按“类-文件-窗口”反频率权重有放回采样。
     if file_balanced:
+        # 文件平衡权重依赖逐窗口文件编号，缺失时不能构造正确权重。
         if file_ids is None:
+            # 立即报告调用错误，避免退化为仅类别平衡的非预期行为。
             raise ValueError("file_ids are required for file-balanced sampling")
+        # weights 是 double [样本数] 张量，每类、类内各文件总权重相等。
         weights = torch.as_tensor(
             file_balanced_sample_weights(y, file_ids), dtype=torch.double
         )
+        # generator 是采样器独立随机源，避免受模型 dropout 随机状态影响。
         generator = torch.Generator()
+        # 固定采样随机种子，使同一实验配置的数据顺序可复现。
         generator.manual_seed(seed)
+        # sampler 每 epoch 有放回抽取 len(y) 个索引，长文件不会因窗口多而占优。
         sampler = WeightedRandomSampler(
             weights,
             num_samples=len(y),
             replacement=True,
             generator=generator,
         )
+        # 返回按 batch_size 组批、由 sampler 决定索引顺序的 DataLoader。
         return DataLoader(dataset, batch_size=batch_size, sampler=sampler)
+    # 无特殊采样时使用普通固定批大小加载器，shuffle 由调用方决定。
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
 
 
 def predict(model: nn.Module, x: np.ndarray, device: torch.device) -> np.ndarray:
+    """批量运行模型并返回形状 ``[样本数]`` 的 argmax 类别索引。"""
+    # 切换到推理模式，关闭 dropout 等仅训练时生效的随机行为。
     model.eval()
+    # preds 按批保存 CPU int64 预测数组，最后沿样本维拼接。
     preds: List[np.ndarray] = []
+    # 构造无打乱推理加载器；占位标签全 0，仅满足 TensorDataset 接口。
     loader = make_loader(x, np.zeros(len(x), dtype=np.int64), batch_size=512, shuffle=False)
+    # 禁用梯度记录，降低评估内存和计算开销且不修改模型参数。
     with torch.no_grad():
+        # 依次遍历全部推理批次；每轮处理最多 512 个标准化特征向量。
         for batch_x, _ in loader:
+            # batch_x 移到目标设备，模型输出 logits 形状 [批大小,类别数]。
             logits = model(batch_x.to(device))
+            # 沿类别维取最大 logit 索引并移回 CPU，追加形状 [批大小] 的预测。
             preds.append(torch.argmax(logits, dim=1).cpu().numpy())
+    # 按原输入顺序拼接所有批预测，返回 int64 [样本数] 数组。
     return np.concatenate(preds)
 
 
 def evaluate(model: nn.Module, x: np.ndarray, y: np.ndarray, device: torch.device) -> Tuple[float, float, np.ndarray]:
+    """计算窗口级准确率、宏平均 F1，并返回逐样本预测。"""
+    # y_pred 形状 [样本数]，顺序与 x、y 一致。
     y_pred = predict(model, x, device)
+    # acc 是正确预测数除以样本数的窗口级准确率，范围 [0,1]。
     acc = float(accuracy_score(y, y_pred))
+    # macro_f1 对各类别 F1 等权平均；缺失分母按 0 处理，突出弱类表现。
     macro_f1 = float(f1_score(y, y_pred, average="macro", zero_division=0))
+    # 返回两个标量指标和 int64 [样本数] 预测，供逐类召回及混淆矩阵复用。
     return acc, macro_f1, y_pred
 
 
@@ -2638,6 +3357,8 @@ def weak_and_worst_f1(
     y_pred: np.ndarray,
     class_names: Sequence[str],
 ) -> Tuple[float, float]:
+    """返回预定义弱类平均 F1 和所有类别最小 F1。"""
+    # per_class 形状 [类别数]，按 class_names 索引计算每类 F1，零分母记 0。
     per_class = f1_score(
         y_true,
         y_pred,
@@ -2645,11 +3366,15 @@ def weak_and_worst_f1(
         average=None,
         zero_division=0,
     )
+    # weak_indices 保存当前数据集中存在的弱类输出索引。
     weak_indices = [
         class_names.index(name) for name in WEAK_CLASS_NAMES if name in class_names
     ]
+    # 存在弱类时等权平均其 F1；类别子集不含弱类时退化为全类平均。
     weak_f1 = float(np.mean(per_class[weak_indices])) if weak_indices else float(np.mean(per_class))
+    # worst_f1 是全部类别最低 F1；空指标数组时返回 0。
     worst_f1 = float(np.min(per_class)) if len(per_class) else 0.0
+    # 返回“弱类平均 F1、最差类别 F1”两个 [0,1] 标量。
     return weak_f1, worst_f1
 
 
@@ -2658,12 +3383,16 @@ def per_class_recalls(
     y_pred: np.ndarray,
     class_count: int,
 ) -> np.ndarray:
+    """按固定类别索引计算召回率 ``TP/(TP+FN)``，输出形状 ``[类别数]``。"""
+    # matrix 形状 [类别数,类别数]，行是真值、列是预测，缺失类别仍保留零行列。
     matrix = confusion_matrix(
         np.asarray(y_true),
         np.asarray(y_pred),
         labels=np.arange(class_count),
     )
+    # support 是每个真值类别样本数 TP+FN，形状 [类别数]。
     support = matrix.sum(axis=1)
+    # 安全逐类相除；无真值样本类别通过 out/where 返回 0 而非 NaN。
     return np.divide(
         np.diag(matrix),
         support,
@@ -2677,16 +3406,22 @@ def weak_and_min_recall(
     y_pred: np.ndarray,
     class_names: Sequence[str],
 ) -> Tuple[float, float, np.ndarray]:
+    """返回弱类平均召回、全类最低召回及按类别顺序的召回数组。"""
+    # recalls 形状 [类别数]，顺序严格等于 class_names。
     recalls = per_class_recalls(y_true, y_pred, len(class_names))
+    # weak_indices 保存本次类别表中预定义弱类的位置。
     weak_indices = [
         class_names.index(name) for name in WEAK_CLASS_NAMES if name in class_names
     ]
+    # 有弱类时等权平均其召回；测试类别子集不含弱类时退化为全类平均。
     weak_recall = (
         float(np.mean(recalls[weak_indices]))
         if weak_indices
         else float(np.mean(recalls))
     )
+    # min_recall 是最弱类别召回；空类别表防御性返回 0。
     min_recall = float(np.min(recalls)) if len(recalls) else 0.0
+    # 返回两个标量和完整 [类别数] 召回数组，供 checkpoint 与逐 epoch 日志使用。
     return weak_recall, min_recall, recalls
 
 
@@ -2696,6 +3431,8 @@ def validation_checkpoint_key(
     val_f1: float,
     val_acc: float,
 ) -> Tuple[float, float, float, float]:
+    """按最小召回、弱类召回、宏 F1、准确率构造字典序 checkpoint 评分。"""
+    # 元组比较先保障最弱类，再比较弱类整体，最后才比较全局 F1 和准确率。
     return val_min_recall, val_weak_recall, val_f1, val_acc
 
 
@@ -2718,25 +3455,41 @@ def train_model(
     supcon_weight: float = SUPCON_WEIGHT,
     dropout: float = DROPOUT,
 ) -> Tuple[nn.Module, Dict[str, object]]:
+    """训练主 BP 模型，逐 epoch 输出完整验证指标并按弱类优先规则早停。
+
+    输入 ``train_x``、``val_x`` 为无量纲标准化特征 ``[样本数,297]``；标签和文件编号
+    均为 ``[样本数]``。总损失为交叉熵、跨文件监督对比、困难对间隔和可选辅助头损失的
+    加权和。返回载入最佳验证状态的模型和训练历史；训练期功能不增加 ESP32 推理计算。
+    """
+    # EMA 衰减率必须位于 [0,1)，保证旧权重和当前权重系数非负且和为 1。
     if not 0.0 <= ema_decay < 1.0:
+        # 非法 EMA 配置会产生无意义权重，立即拒绝。
         raise ValueError("EMA decay must be in [0, 1)")
+    # 标签平滑率必须位于 [0,1)，1 会完全抹去真值类别目标。
     if not 0.0 <= label_smoothing < 1.0:
+        # 报告配置错误，避免损失静默偏离预期。
         raise ValueError("Label smoothing must be in [0, 1)")
     # SupCon 权重必须非负；0 表示保留代码路径但禁用其梯度贡献。
     if supcon_weight < 0.0:
+        # 负权重会鼓励同类跨文件嵌入分离，因此禁止。
         raise ValueError("SupCon weight must be non-negative")
     # Dropout 概率遵循 PyTorch 合同，1 会丢弃全部融合表示，因此上界不包含 1。
     if not 0.0 <= dropout < 1.0:
+        # 报告非法概率，避免模型构造后才出现底层异常。
         raise ValueError("Dropout must be in [0, 1)")
     # 辅助头属于多分支候选模型；平铺 BP 不具备对应运动属性头。
     if auxiliary_heads and not multi_branch:
+        # 拒绝不存在 auxiliary_loss 接口的平铺模型组合。
         raise ValueError("Auxiliary heads require the multi-branch model")
     # M1 当前没有训练期辅助头；T2 只允许比较融合深度这一项因素。
     if auxiliary_heads and deep_narrow:
+        # 保持消融变量单一，禁止辅助头与 M1 同时开启。
         raise ValueError("Auxiliary heads are disabled for the deep-narrow M1 ablation")
     # 深窄融合建立在六分支输入上，禁止与平铺 BP 组合。
     if deep_narrow and not multi_branch:
+        # M1 需要六组固定输入边界，平铺模式无法满足结构合同。
         raise ValueError("Deep-narrow M1 requires the multi-branch model")
+    # class_count 是主分类输出节点数，等于稳定类别名称表长度。
     class_count = len(class_names)
     # M1 优先于 M0 多分支；两者都关闭时使用兼容旧导出器的平铺 BP。
     if deep_narrow:
@@ -2744,15 +3497,18 @@ def train_model(
         model: nn.Module = DeepNarrowMultiBranchBPNet(
             train_x.shape[1], class_count, dropout=dropout
         ).to(device)
+    # 未启用 M1 但启用多分支时选择浅融合 M0。
     elif multi_branch:
         # 构造 80→64→32 的 M0 浅融合模型。
         model = MultiBranchBPNet(
             train_x.shape[1], class_count, dropout=dropout
         ).to(device)
     else:
-        # 构造 302→96→64→32 的平铺 BP。
+        # 构造 297→96→64→32 的平铺 BP。
         model = BPNet(train_x.shape[1], class_count, dropout=dropout).to(device)
+    # EMA 开启时创建同结构评估副本；关闭时保持 None，不增加训练内存。
     ema_model = copy.deepcopy(model).to(device) if ema_decay > 0.0 else None
+    # ema_state 在首个 epoch 后初始化为独立 state_dict 快照。
     ema_state: Optional[Dict[str, torch.Tensor]] = None
     # 仅在 P×K 模式显式请求时恢复原训练窗口类别先验；普通采样无需二次修正。
     ce_weights = (
@@ -2765,7 +3521,9 @@ def train_model(
         weight=ce_weights,
         label_smoothing=label_smoothing,
     )
+    # AdamW 优化全部可训练参数；学习率和解耦权重衰减由全局训练规格固定。
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+    # 训练加载器输出 (x,y,file_id)，供主损失和跨文件对比损失共同使用。
     loader = make_loader(
         train_x,
         train_y,
@@ -2780,35 +3538,56 @@ def train_model(
         seed=SEED,
     )
 
+    # best_state 初始保存未训练模型，保证即使首轮异常评分也有可加载状态。
     best_state = copy.deepcopy(model.state_dict())
+    # best_score 四项均从负无穷开始，首个有限验证结果必然成为最佳。
     best_score = (-float("inf"),) * 4
+    # best_epoch=0 表示尚未保存任何训练后 checkpoint。
     best_epoch = 0
+    # patience_left 是连续未改善 epoch 的剩余容忍次数。
     patience_left = PATIENCE
+    # history 按 epoch 保存损失和验证指标，供 JSON 报告与曲线复现。
     history: List[Dict[str, float]] = []
 
+    # 从 epoch 1 遍历到 MAX_EPOCHS；早停条件满足时可提前终止。
     for epoch in range(1, MAX_EPOCHS + 1):
+        # 切换训练模式，使 dropout 按配置随机丢弃融合表示。
         model.train()
+        # loss_sum 累计总损失乘批样本数，用于计算样本加权 epoch 均值。
         loss_sum = 0.0
+        # ce_sum 累计主交叉熵乘批样本数。
         ce_sum = 0.0
+        # supcon_sum 累计未乘权重的跨文件监督对比损失。
         supcon_sum = 0.0
+        # margin_sum 累计未乘权重的困难类别对间隔损失。
         margin_sum = 0.0
         # 累积五个训练期运动属性任务的加权前原始损失。
         auxiliary_sum = 0.0
+        # seen 统计本 epoch 已处理样本数，作为各平均损失分母。
         seen = 0
+        # 遍历训练加载器全部批次；每轮完成一次前向、反向和 AdamW 更新。
         for batch_x, batch_y, batch_file_ids in loader:
+            # batch_x 形状 [批大小,297]，移到 CPU/CUDA 训练设备。
             batch_x = batch_x.to(device)
+            # batch_y 形状 [批大小]，保存主类别 int64 索引。
             batch_y = batch_y.to(device)
+            # batch_file_ids 形状 [批大小]，用于排除同文件同类对比正样本。
             batch_file_ids = batch_file_ids.to(device)
+            # 清除旧梯度并置为 None，减少不必要的梯度缓冲写入。
             optimizer.zero_grad(set_to_none=True)
+            # 前向提取共享嵌入；M0/平铺为 [B,32]，M1 为 [B,24]。
             embeddings = model.forward_features(batch_x)
             # 三种模型均通过统一接口将 32 或 24 维嵌入映射到主类别 logits。
             logits = model.classify_features(embeddings)
+            # ce_loss 是含可选类别权重和标签平滑的主分类交叉熵标量。
             ce_loss = criterion(logits, batch_y)
+            # supcon_loss 拉近同类不同文件嵌入、分离异类嵌入。
             supcon_loss = cross_file_supervised_contrastive_loss(
                 embeddings,
                 batch_y,
                 batch_file_ids,
             )
+            # margin_loss 约束弱类真 logit 领先预定义易混类别至少固定间隔。
             margin_loss = hard_pair_margin_loss(logits, batch_y, class_names)
             # 仅多分支辅助模式计算五个属性头；关闭时返回与图相连的零值。
             auxiliary_loss = (
@@ -2823,32 +3602,47 @@ def train_model(
                 + HARD_PAIR_WEIGHT * margin_loss
                 + AUXILIARY_WEIGHT * auxiliary_loss
             )
+            # 反向传播总损失，计算所有主网络及可选辅助头参数梯度。
             loss.backward()
+            # AdamW 使用当前批梯度更新模型参数一次。
             optimizer.step()
+            # 按批样本数累加总损失，最后得到真正样本加权均值。
             loss_sum += float(loss.item()) * len(batch_x)
+            # 累加未加权交叉熵诊断值。
             ce_sum += float(ce_loss.item()) * len(batch_x)
+            # 累加未乘 supcon_weight 的对比损失诊断值。
             supcon_sum += float(supcon_loss.item()) * len(batch_x)
+            # 累加未乘 HARD_PAIR_WEIGHT 的间隔损失诊断值。
             margin_sum += float(margin_loss.item()) * len(batch_x)
             # 按批样本数累计辅助损失，供 epoch 日志计算加权平均。
             auxiliary_sum += float(auxiliary_loss.item()) * len(batch_x)
+            # 已见样本数增加当前批大小，P×K 最后一批同样固定完整。
             seen += len(batch_x)
 
+        # EMA 模型存在时，在 epoch 结束后用当前训练模型状态更新平滑参数。
         if ema_model is not None:
+            # ema_state 返回与 model.state_dict 同键同形状的独立平滑快照。
             ema_state = update_ema_state(
                 ema_state,
                 model.state_dict(),
                 ema_decay,
             )
+            # 把新 EMA 状态载入评估副本，训练模型参数保持不变。
             ema_model.load_state_dict(ema_state)
+            # 本 epoch 验证和最佳 checkpoint 使用平滑模型。
             evaluation_model = ema_model
+        # 未开启 EMA 时直接评估当前训练模型。
         else:
+            # evaluation_model 引用 model，不创建额外状态副本。
             evaluation_model = model
+        # 计算验证集窗口准确率、宏 F1 和逐样本预测。
         val_acc, val_f1, val_pred = evaluate(
             evaluation_model,
             val_x,
             val_y,
             device,
         )
+        # 计算弱类平均 F1 和所有类别最小 F1，用于日志诊断。
         val_weak_f1, val_worst_f1 = weak_and_worst_f1(
             val_y, val_pred, class_names
         )
@@ -2856,18 +3650,24 @@ def train_model(
         val_weak_recall, val_min_recall, val_class_recalls = weak_and_min_recall(
             val_y, val_pred, class_names
         )
+        # 总损失除以已见样本数；max 防御空加载器造成除零。
         avg_loss = loss_sum / max(seen, 1)
+        # 计算主交叉熵 epoch 样本加权均值。
         avg_ce = ce_sum / max(seen, 1)
+        # 计算监督对比损失 epoch 样本加权均值。
         avg_supcon = supcon_sum / max(seen, 1)
+        # 计算困难对间隔损失 epoch 样本加权均值。
         avg_margin = margin_sum / max(seen, 1)
         # epoch 辅助损失为所有已见样本的加权平均，关闭辅助头时恒为 0。
         avg_auxiliary = auxiliary_sum / max(seen, 1)
+        # score 以最弱类优先的四项字典序决定是否更新最佳 checkpoint。
         score = validation_checkpoint_key(
             val_min_recall,
             val_weak_recall,
             val_f1,
             val_acc,
         )
+        # 追加当前 epoch 所有可复核训练和验证指标，不遗漏弱类召回。
         history.append(
             {
                 "epoch": float(epoch),
@@ -2884,13 +3684,21 @@ def train_model(
                 "val_min_recall": val_min_recall,
             }
         )
+        # 当前评分严格优于历史最佳时保存评估模型状态并重置早停耐心。
         if score > best_score:
+            # 更新最佳四项评分元组。
             best_score = score
+            # 深拷贝 CPU/CUDA 状态，防止后续 epoch 原地修改最佳权重。
             best_state = copy.deepcopy(evaluation_model.state_dict())
+            # 记录产生当前最佳验证结果的 epoch 编号。
             best_epoch = epoch
+            # 验证改善后恢复完整早停耐心。
             patience_left = PATIENCE
+        # 未改善时消耗一次耐心，连续耗尽后停止训练。
         else:
+            # 剩余耐心减一，允许负值前在本轮日志中显示。
             patience_left -= 1
+        # progress_label 非空时追加实验/折次前缀，便于并行结果区分。
         label = f"{progress_label} " if progress_label else ""
         # weakest_index 定位本 epoch 验证集中召回率最低的类别。
         weakest_index = int(np.argmin(val_class_recalls))
@@ -2899,6 +3707,7 @@ def train_model(
             f"{name}:{float(recall):.4f}"
             for name, recall in zip(class_names, val_class_recalls)
         )
+        # 每个 epoch 输出总损失、各子损失、全局指标、弱类指标、逐类召回和早停状态。
         print(
             f"{label}epoch={epoch:03d} loss={avg_loss:.4f} "
             f"ce={avg_ce:.4f} supcon={avg_supcon:.4f} margin={avg_margin:.4f} "
@@ -2913,10 +3722,14 @@ def train_model(
             f"best_epoch={best_epoch} patience_left={patience_left}",
             flush=True,
         )
+        # 连续未改善轮数达到 PATIENCE 时触发早停，保留历史最佳 checkpoint。
         if patience_left <= 0:
+            # 退出 epoch 循环，不再执行剩余最大轮次。
             break
 
+    # 训练结束后把历史最佳验证状态载回主模型，确保后续测试和导出不使用末轮权重。
     model.load_state_dict(best_state)
+    # 返回最佳模型及完整训练配置/历史，供实验报告和最终工件保存。
     return model, {
         "best_epoch": best_epoch,
         "ema_decay": ema_decay,
@@ -2945,13 +3758,19 @@ def train_family_specialist(
     progress_label: str,
     pk_batches: bool = False,
 ) -> Dict[str, object]:
+    """训练三类跳跃形态专家，并返回模型、专用标准化参数和特征列合同。"""
+    # family_names 按固定专家输出顺序保留当前主类别表中存在的目标动作。
     family_names = [
         name for name in FAMILY_SPECIALIST_CLASS_NAMES if name in class_names
     ]
+    # 少于两个家族类别无法形成分类问题，专家训练没有意义。
     if len(family_names) < 2:
+        # 明确报告类别配置不足，避免构造单输出伪分类器。
         raise ValueError("Family specialist requires at least two configured classes")
+    # specialist_feature_indices 是从 297 维输入中选择的形态不变和弱类机制列索引。
     specialist_feature_indices = build_jump_shape_feature_indices(build_feature_names())
 
+    # 筛出训练集家族样本，并把全局标签重编码为专家局部标签。
     train_family_raw, train_family_y, train_family_file_ids = family_subset(
         train_x_raw,
         train_y,
@@ -2959,6 +3778,7 @@ def train_family_specialist(
         class_names,
         family_names,
     )
+    # 筛出验证集家族样本；临时顺序索引仅满足 family_subset 的 file_ids 接口。
     val_family_raw, val_family_y, _ = family_subset(
         val_x_raw,
         val_y,
@@ -2966,6 +3786,7 @@ def train_family_specialist(
         class_names,
         family_names,
     )
+    # 筛出测试集家族样本；验证模式下输入可为空但二维特征维度保持 297。
     test_family_raw, test_family_y, _ = family_subset(
         test_x_raw,
         test_y,
@@ -2973,9 +3794,13 @@ def train_family_specialist(
         class_names,
         family_names,
     )
+    # 训练专家只保留审核选定特征列，输出形状 [训练家族样本数,专家特征数]。
     train_family_raw = train_family_raw[:, specialist_feature_indices]
+    # 验证专家输入使用完全相同列索引和顺序。
     val_family_raw = val_family_raw[:, specialist_feature_indices]
+    # 测试专家输入使用完全相同列索引和顺序。
     test_family_raw = test_family_raw[:, specialist_feature_indices]
+    # 仅用家族训练样本统计量标准化训练、验证和测试专家输入。
     (
         train_family_x,
         val_family_x,
@@ -2984,6 +3809,7 @@ def train_family_specialist(
         specialist_std,
     ) = standardize(train_family_raw, val_family_raw, test_family_raw)
 
+    # 输出专家类别、样本数和输入维度，PyCharm 可见训练启动状态。
     print(
         f"start {progress_label} specialist=family "
         f"classes={family_names} train={len(train_family_y)} "
@@ -2991,6 +3817,7 @@ def train_family_specialist(
         f"feature_dim={len(specialist_feature_indices)}",
         flush=True,
     )
+    # 复用主训练循环训练专家 BP；关闭 SupCon，保留可选 P×K 文件平衡。
     specialist_model, specialist_meta = train_model(
         train_family_x,
         train_family_y,
@@ -3005,6 +3832,7 @@ def train_family_specialist(
         # 可选 P×K 批次使三类等量且同类样本优先跨文件，针对会话泛化失败。
         pk_batches=pk_batches,
     )
+    # 返回专家部署所需模型、标准化向量、局部类别顺序、原特征索引和训练历史。
     return {
         "model": specialist_model,
         "mean": specialist_mean,
@@ -3023,22 +3851,37 @@ def load_primary_artifacts(
     device: torch.device,
     multi_branch: bool = False,
 ) -> Tuple[nn.Module, np.ndarray, np.ndarray]:
+    """加载已保存主模型与标准化参数，并验证输入维度及窗口长度合同。"""
+    # 统一转换为 Path，兼容命令行或测试传入字符串路径。
     artifact_dir = Path(artifact_dir)
+    # config_path 指向包含 mean、std、window_len 的无 pickle NPZ 配置。
     config_path = artifact_dir / "scaler_and_config.npz"
+    # model_path 指向 PyTorch state_dict 文件。
     model_path = artifact_dir / "best_model.pt"
+    # 以禁用 pickle 的只读方式加载标准化和窗口配置，降低不可信对象执行风险。
     with np.load(config_path, allow_pickle=False) as config:
+        # mean 是 float32 [输入维度] 训练特征均值。
         mean = np.asarray(config["mean"], dtype=np.float32)
+        # std 是 float32 [输入维度] 训练特征标准差，已含近零列保护。
         std = np.asarray(config["std"], dtype=np.float32)
+        # saved_window_len 从标量或单元素数组统一解析为整数采样点数。
         saved_window_len = int(np.asarray(config["window_len"]).reshape(-1)[0])
+    # mean/std 必须与当前特征提取维度完全一致，通常为 [297]。
     if mean.shape != (input_dim,) or std.shape != (input_dim,):
+        # 拒绝旧维度工件，防止广播或列错位导致错误推理。
         raise ValueError("Primary artifact feature dimension does not match current extractor")
+    # 保存模型使用的窗口点数必须与当前实验窗口一致。
     if saved_window_len != expected_window_len:
+        # 报错同时给出保存值和请求值，避免不同时间尺度特征混用。
         raise ValueError(
             f"Primary artifact window_len={saved_window_len} does not match "
             f"requested window_len={expected_window_len}"
         )
+    # 仅加载张量权重到目标设备，不反序列化任意 Python 对象。
     state = torch.load(model_path, map_location=device, weights_only=True)
+    # 兼容包含 primary 键的主模型+专家联合 checkpoint。
     if isinstance(state, dict) and "primary" in state:
+        # 提取主模型 state_dict，忽略同文件中的专家权重。
         state = state["primary"]
     # 按命令行声明恢复平铺 BP 或六分支 M0；结构必须与保存参数键完全匹配。
     model: nn.Module = (
@@ -3046,8 +3889,11 @@ def load_primary_artifacts(
         if multi_branch
         else BPNet(input_dim, class_count).to(device)
     )
+    # 严格加载全部参数键和形状，结构不匹配时由 PyTorch 报错。
     model.load_state_dict(state)
+    # 切换推理模式，关闭 dropout，固定后续验证输出。
     model.eval()
+    # 返回可推理模型以及 [input_dim] 均值和标准差。
     return model, mean, std
 
 
@@ -3072,18 +3918,25 @@ def train_one_experiment(
     dropout: float = DROPOUT,
     suppress_normalized_phase: bool = False,
 ) -> Dict[str, object]:
+    """执行一个窗口规格的文件划分、前处理、训练、路由评估和结果汇总。"""
+    # 把窗口秒数换算为窗口点数和固定步长点数。
     window_len, step_len = window_lengths(window_seconds)
+    # 以原始文件为单位划分训练/验证/测试，并仅向训练集追加额外记录。
     train_records, val_records, test_records = split_records_for_experiment(
         records,
         extra_train_records,
         seed,
     )
+    # 仅从训练文件静坐窗口估计整体活动阈值，避免验证/测试统计泄漏。
     rest_threshold = estimate_rest_threshold(train_records, window_len, step_len)
+    # 仅从训练文件静坐逐点分数估计连续活动点阈值。
     active_point_threshold = estimate_active_point_threshold(
         train_records, window_len, step_len
     )
+    # 构造该窗口规格独立增强随机流；窗口秒数进入种子以区分不同实验。
     rng = np.random.default_rng(seed + int(window_seconds * 100))
 
+    # 训练文件切窗、过滤、增强并提取 X:[S_train,297]、标签和文件编号。
     train_x_raw, train_y, train_file_ids, train_stats = build_samples(
         train_records,
         window_len,
@@ -3094,6 +3947,7 @@ def train_one_experiment(
         rng=rng,
         progress_label=f"window={window_seconds:.1f}s split=train",
     )
+    # 验证文件只切窗和过滤，不增强，保持真实文件级泛化评估。
     val_x_raw, val_y, _, val_stats = build_samples(
         val_records,
         window_len,
@@ -3104,11 +3958,17 @@ def train_one_experiment(
         rng=rng,
         progress_label=f"window={window_seconds:.1f}s split=val",
     )
+    # 搜参验证模式禁止生成或查看测试窗口，避免多次试验污染最终测试集。
     if validation_only:
+        # test_x_raw 保持二维 [0,297] 形状，后续标准化和掩码可走统一路径。
         test_x_raw = np.empty((0, train_x_raw.shape[1]), dtype=np.float32)
+        # test_y 是空 int64 标签数组 [0]。
         test_y = np.empty(0, dtype=np.int64)
+        # test_stats 明确记录测试被验证模式跳过，不伪装成零样本数据质量问题。
         test_stats: Dict[str, int] = {"skipped_validation_only": 1}
+    # 正式确认模式才从独立测试文件生成不增强窗口。
     else:
+        # 测试样本构建规则与验证集一致，且不参与任何训练统计。
         test_x_raw, test_y, _, test_stats = build_samples(
             test_records,
             window_len,
@@ -3120,13 +3980,16 @@ def train_one_experiment(
             progress_label=f"window={window_seconds:.1f}s split=test",
         )
 
+    # 输出窗口、步长和两个活动阈值，使 PyCharm 中可见前处理配置。
     print(
         f"start window={window_seconds:.1f}s window_len={window_len} step_len={step_len} "
         f"rest_threshold={rest_threshold:.5f} "
         f"active_point_threshold={active_point_threshold:.5f}",
         flush=True,
     )
+    # 未提供已有工件时，从当前训练集计算标准化并训练新主模型。
     if primary_artifact_dir is None:
+        # 标准化返回三组 [样本数,297] 无量纲输入及 [297] mean/std。
         train_x, val_x, test_x, mean, std = standardize(
             train_x_raw, val_x_raw, test_x_raw
         )
@@ -3136,6 +3999,7 @@ def train_one_experiment(
         val_x = apply_model_feature_mask(val_x, suppress_normalized_phase)
         # 完整模式测试输入和验证模式空数组均保持同一 [样本数,297] 合同。
         test_x = apply_model_feature_mask(test_x, suppress_normalized_phase)
+        # 训练主 BP 并返回最佳验证 checkpoint 和逐 epoch 历史。
         model, train_meta = train_model(
             train_x,
             train_y,
@@ -3155,7 +4019,9 @@ def train_one_experiment(
             supcon_weight=supcon_weight,
             dropout=dropout,
         )
+    # 提供工件目录时不重训主模型，只按当前数据执行一致性评估或训练专家。
     else:
+        # 加载主模型和其训练 mean/std，并验证窗口长度、特征维度。
         model, mean, std = load_primary_artifacts(
             primary_artifact_dir,
             input_dim=train_x_raw.shape[1],
@@ -3164,8 +4030,11 @@ def train_one_experiment(
             device=device,
             multi_branch=multi_branch,
         )
+        # 用保存的 [297] mean/std 标准化当前训练原始特征。
         train_x = ((train_x_raw - mean) / std).astype(np.float32)
+        # 验证特征使用相同保存参数，不能重新拟合。
         val_x = ((val_x_raw - mean) / std).astype(np.float32)
+        # 测试特征使用相同保存参数；空数组路径也保持 [0,297]。
         test_x = ((test_x_raw - mean) / std).astype(np.float32)
         # 加载主模型时也按当前显式开关处理训练输入，供后续专家流程和一致性检查使用。
         train_x = apply_model_feature_mask(train_x, suppress_normalized_phase)
@@ -3173,22 +4042,34 @@ def train_one_experiment(
         val_x = apply_model_feature_mask(val_x, suppress_normalized_phase)
         # 固定主模型测试输入执行相同掩码；验证模式下数组为空但维度合法。
         test_x = apply_model_feature_mask(test_x, suppress_normalized_phase)
+        # 训练元数据标记主模型来源绝对路径，不伪造 epoch 历史。
         train_meta = {"loaded_from": str(Path(primary_artifact_dir).resolve())}
+        # 输出主模型加载位置，便于可见训练过程区分“重训”和“复用”。
         print(
             f"primary_model_loaded={Path(primary_artifact_dir).resolve()}",
             flush=True,
         )
+    # 评估主模型在验证集的原始准确率、宏 F1 和预测。
     flat_val_acc, flat_val_f1, flat_val_pred = evaluate(model, val_x, val_y, device)
+    # 验证模式跳过测试推理，并用 NaN 明确表示“未评估”而不是零分。
     if validation_only:
+        # 测试准确率设 NaN，报告序列化时保留未评估语义。
         flat_test_acc = float("nan")
+        # 测试宏 F1 同样设 NaN。
         flat_test_f1 = float("nan")
+        # 测试预测为空 int64 [0] 数组。
         flat_test_pred = np.empty(0, dtype=np.int64)
+    # 正式模式评估主模型独立测试集。
     else:
+        # 返回主模型测试准确率、宏 F1 和逐样本预测。
         flat_test_acc, flat_test_f1, flat_test_pred = evaluate(
             model, test_x, test_y, device
         )
+    # training_meta 先保存主模型训练或加载元数据，专家开启时再追加。
     training_meta: Dict[str, object] = {"primary": train_meta}
+    # 开启家族专家时训练局部分类器并对主模型家族预测进行重判。
     if enable_family_specialist:
+        # 专家使用原始未标准化 297 维特征自行选择列并拟合专用 mean/std。
         specialist = train_family_specialist(
             train_x_raw,
             train_y,
@@ -3202,22 +4083,31 @@ def train_one_experiment(
             progress_label=f"window={window_seconds:.1f}s",
             pk_batches=pk_batches,
         )
+        # specialist_model 应为当前平铺 BP 专家，输出家族局部类别 logits。
         specialist_model = specialist["model"]
+        # 运行时类型断言保护后续导出层索引合同。
         assert isinstance(specialist_model, BPNet)
+        # specialist_mean 是 float32 [专家特征数] 训练均值。
         specialist_mean = np.asarray(specialist["mean"], dtype=np.float32)
+        # specialist_std 是 float32 [专家特征数] 训练标准差。
         specialist_std = np.asarray(specialist["std"], dtype=np.float32)
+        # specialist_names 按专家局部输出顺序保存动作名称。
         specialist_names = list(specialist["class_names"])
+        # specialist_feature_indices 是专家从 297 维主特征读取的 int64 列索引。
         specialist_feature_indices = np.asarray(
             specialist["feature_indices"], dtype=np.int64
         )
+        # 验证集选取专家列并按专家训练统计标准化，形状 [S_val,专家特征数]。
         specialist_val_x = (
             (val_x_raw[:, specialist_feature_indices] - specialist_mean)
             / specialist_std
         ).astype(np.float32)
+        # 测试集执行相同专家列选择和标准化；验证模式下第一维为 0。
         specialist_test_x = (
             (test_x_raw[:, specialist_feature_indices] - specialist_mean)
             / specialist_std
         ).astype(np.float32)
+        # 专家对所有验证窗口输出局部类别预测，路由时只使用主预测属于家族的位置。
         specialist_val_pred = predict(specialist_model, specialist_val_x, device)
         # 验证模式没有测试样本，避免对空张量调用 predict 的 concatenate 路径。
         specialist_test_pred = (
@@ -3225,6 +4115,7 @@ def train_one_experiment(
             if validation_only
             else predict(specialist_model, specialist_test_x, device)
         )
+        # 仅替换主验证预测中的家族类别，其他八类保持主模型结果。
         val_pred = route_family_predictions(
             flat_val_pred,
             specialist_val_pred,
@@ -3242,46 +4133,75 @@ def train_one_experiment(
                 specialist_names,
             )
         )
+        # 在训练元数据中追加专家逐 epoch 历史及配置。
         training_meta["family_specialist"] = specialist["training"]
+    # 未启用专家时部署和评估都直接使用单一主模型预测。
     else:
+        # None 明确表示没有第二模型需要保存或导出。
         specialist_model = None
+        # 空均值数组与无专家状态对应，避免误用主模型均值。
         specialist_mean = np.empty(0, dtype=np.float32)
+        # 空标准差数组与无专家状态对应。
         specialist_std = np.empty(0, dtype=np.float32)
+        # 空类别表表示路由关闭。
         specialist_names = []
+        # 空特征索引表示专家不读取主特征列。
         specialist_feature_indices = np.empty(0, dtype=np.int64)
+        # 最终验证预测直接引用主模型预测。
         val_pred = flat_val_pred
+        # 最终测试预测直接引用主模型预测或验证模式空数组。
         test_pred = flat_test_pred
+    # 根据最终路由预测计算验证窗口准确率。
     val_acc = float(accuracy_score(val_y, val_pred))
+    # 根据最终路由预测计算验证宏平均 F1，弱类与强类等权。
     val_f1 = float(f1_score(val_y, val_pred, average="macro", zero_division=0))
+    # 验证模式继续保持测试全局指标为 NaN。
     if validation_only:
+        # 未评估测试准确率。
         test_acc = float("nan")
+        # 未评估测试宏 F1。
         test_f1 = float("nan")
+    # 正式模式基于最终路由预测计算独立测试指标。
     else:
+        # 测试窗口级准确率范围 [0,1]。
         test_acc = float(accuracy_score(test_y, test_pred))
+        # 测试宏 F1 对 11 类等权，零分母按 0。
         test_f1 = float(
             f1_score(test_y, test_pred, average="macro", zero_division=0)
         )
+    # 计算验证弱类平均召回、最低类别召回和完整逐类召回数组。
     val_weak_recall, val_min_recall, val_recalls = weak_and_min_recall(
         val_y, val_pred, class_names
     )
+    # 验证模式的测试召回全部标记为 NaN，禁止被误读为零召回。
     if validation_only:
+        # 保持 test_acc 未评估语义，防止前面分支后续意外覆盖。
         test_acc = float("nan")
+        # 测试弱类平均召回未评估。
         test_weak_recall = float("nan")
+        # 测试最低类别召回未评估。
         test_min_recall = float("nan")
+        # test_recalls 形状 [类别数]，每项均为 NaN。
         test_recalls = np.full(len(class_names), np.nan, dtype=np.float64)
+    # 正式模式计算测试弱类、最弱类和逐类召回。
     else:
+        # 返回测试召回指标，顺序与 class_names 一致。
         test_weak_recall, test_min_recall, test_recalls = weak_and_min_recall(
             test_y, test_pred, class_names
         )
 
+    # 验证模式只输出训练/验证指标，并显式提示测试跳过。
     if validation_only:
+        # 日志包含样本数、准确率、宏 F1 和最低召回，供候选筛选。
         print(
             f"window={window_seconds:.1f}s train={len(train_y)} val={len(val_y)} "
             f"val_acc={val_acc:.4f} val_f1={val_f1:.4f} "
             f"val_min_recall={val_min_recall:.4f} "
             "validation_only=true test_evaluation_skipped=true"
         )
+    # 正式模式同时输出独立测试准确率、宏 F1 和最低召回。
     else:
+        # 汇总日志便于 PyCharm 中直接比较一个窗口规格的最终结果。
         print(
             f"window={window_seconds:.1f}s "
             f"train={len(train_y)} val={len(val_y)} test={len(test_y)} "
@@ -3291,6 +4211,7 @@ def train_one_experiment(
             f"test_min_recall={test_min_recall:.4f}"
         )
 
+    # 返回模型、部署参数、数据划分、全部指标和训练历史的完整实验字典。
     return {
         "window_seconds": window_seconds,
         "window_len": window_len,
@@ -3360,22 +4281,36 @@ def evaluate_external_holdout(
     device: torch.device,
     validation_only: bool = False,
 ) -> Dict[str, object]:
+    """使用最佳主模型评估完全外部文件，并按外部存在类别报告召回率。"""
+    # 验证模式禁止访问外部留出集，返回显式跳过原因。
     if validation_only:
+        # skipped=True 供报告生成器区分未评估和评估失败。
         return {"skipped": True, "reason": "validation_only"}
+    # 未提供任何外部记录时返回可序列化跳过结果。
     if not records:
+        # 原因 no_external_holdout 表示调用方没有配置数据，并非模型错误。
         return {"skipped": True, "reason": "no_external_holdout"}
+    # labels 收集外部记录实际包含的动作目录名称。
     labels = {record.label for record in records}
+    # unknown_labels 是外部标签与主模型稳定类别表的差集。
     unknown_labels = labels.difference(class_names)
+    # 外部数据出现未知类别时没有对应输出节点，必须拒绝评估。
     if unknown_labels:
+        # 报错按名称排序列出未知类，便于修正目录或类别配置。
         raise ValueError(
             "External holdout contains unknown labels: "
             + ", ".join(sorted(unknown_labels))
         )
 
+    # 复用最佳实验窗口点数，保证外部时域尺度与训练一致。
     window_len = int(best_result["window_len"])
+    # 复用最佳实验步长点数。
     step_len = int(best_result["step_len"])
+    # 复用训练静坐估计的整体活动阈值。
     rest_threshold = float(best_result["rest_threshold"])
+    # 复用训练静坐估计的逐点活动阈值。
     active_point_threshold = float(best_result["active_point_threshold"])
+    # 外部记录不增强，按训练相同清洗、裁剪、过滤和 297 维提取规则生成样本。
     raw_x, y_true, _, stats = build_samples(
         records,
         window_len,
@@ -3386,7 +4321,9 @@ def evaluate_external_holdout(
         rng=np.random.default_rng(SEED),
         progress_label="external_holdout=" + ",".join(sorted(labels)),
     )
+    # 防御性处理过滤后零窗口情况，避免标准化和预测对空输入报错。
     if len(y_true) == 0:
+        # 返回文件和过滤统计，便于判断阈值过严或外部采集过短。
         return {
             "skipped": True,
             "reason": "no_kept_windows",
@@ -3394,25 +4331,38 @@ def evaluate_external_holdout(
             "files": [str(record.path) for record in records],
             "sample_stats": stats,
         }
+    # mean 是最佳主模型训练集 float32 [297] 均值。
     mean = np.asarray(best_result["mean"], dtype=np.float32)
+    # std 是最佳主模型训练集 float32 [297] 标准差。
     std = np.asarray(best_result["std"], dtype=np.float32)
+    # 用固定训练参数标准化外部原始特征，输出无量纲 [S_ext,297]。
     x = ((raw_x - mean) / std).astype(np.float32)
     # 外部推理严格复用候选保存的主模型输入掩码，默认 False 兼容旧工件。
     x = apply_model_feature_mask(
         x,
         bool(best_result.get("suppress_normalized_phase", False)),
     )
+    # 读取最佳实验主模型对象；专家外部路由未在该函数启用。
     model = best_result["model"]
     # 外部留出集允许评估平铺 BP 或多分支候选，两者均实现 nn.Module 前向接口。
     assert isinstance(model, nn.Module)
+    # 批量预测外部每个窗口的主类别索引。
     y_pred = predict(model, x, device)
+    # present_labels 按主类别顺序保留外部实际出现的动作名。
     present_labels = [name for name in class_names if name in labels]
+    # class_recalls 保存“动作名→该动作窗口召回率”的映射。
     class_recalls = {}
+    # 遍历外部存在的类别；每轮只评估该真值类别对应窗口。
     for label in present_labels:
+        # label_idx 是动作名在主模型输出中的全局索引。
         label_idx = class_names.index(label)
+        # target 形状 [外部样本数]，标记当前真值类别窗口。
         target = y_true == label_idx
+        # 当前类召回率是正确预测为 label_idx 的目标窗口比例。
         class_recalls[label] = float(np.mean(y_pred[target] == label_idx))
+    # recalls 是按 present_labels 顺序的召回标量列表，用于汇总最小值和均值。
     recalls = list(class_recalls.values())
+    # report 汇总外部文件数、窗口数、逐类召回、最小/宏召回和过滤统计。
     report = {
         "skipped": False,
         "file_count": len(records),
@@ -3423,9 +4373,13 @@ def evaluate_external_holdout(
         "files": [str(record.path) for record in records],
         "sample_stats": stats,
     }
+    # 外部留出集只含一个类别时追加便捷 label/recall 字段，兼容单弱类报告。
     if len(present_labels) == 1:
+        # label 保存唯一外部动作名称。
         report["label"] = present_labels[0]
+        # recall 保存该唯一动作窗口召回率。
         report["recall"] = class_recalls[present_labels[0]]
+    # 返回可直接写入 JSON 的外部留出评估字典。
     return report
 
 
@@ -3435,49 +4389,86 @@ def save_confusion_matrix(
     class_names: Sequence[str],
     save_path: Path,
 ) -> None:
+    """保存按固定类别顺序绘制的测试集混淆矩阵 PNG。"""
+    # matrix 形状 [类别数,类别数]，行是真值、列是预测，元素是窗口计数。
     matrix = confusion_matrix(y_true, y_pred, labels=list(range(len(class_names))))
+    # 图宽至少 8 英寸，并随类别数增大以避免坐标标签重叠。
     fig_w = max(8.0, len(class_names) * 0.75)
+    # 创建等宽高 Matplotlib 图和单一坐标轴。
     fig, ax = plt.subplots(figsize=(fig_w, fig_w))
+    # 用蓝色热图显示混淆计数，矩阵位置保持行真值、列预测。
     im = ax.imshow(matrix, cmap="Blues")
+    # 添加颜色条说明颜色对应计数大小。
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    # x 轴设置一个刻度对应每个预测类别列。
     ax.set_xticks(np.arange(len(class_names)))
+    # y 轴设置一个刻度对应每个真值类别行。
     ax.set_yticks(np.arange(len(class_names)))
+    # x 轴类别名旋转 45 度并右对齐，降低长名称重叠。
     ax.set_xticklabels(class_names, rotation=45, ha="right", fontsize=8)
+    # y 轴类别名按固定输出顺序显示。
     ax.set_yticklabels(class_names, fontsize=8)
+    # x 轴标记为预测类别。
     ax.set_xlabel("Predicted")
+    # y 轴标记为真实类别。
     ax.set_ylabel("True")
+    # 外层遍历全部真值类别行；每轮处理一行计数文本。
     for i in range(matrix.shape[0]):
+        # 内层遍历全部预测类别列；每轮在单元格中心写一个整数。
         for j in range(matrix.shape[1]):
+            # 写入 matrix[i,j] 窗口计数，字号 7 适配 11×11 网格。
             ax.text(j, i, int(matrix[i, j]), ha="center", va="center", fontsize=7)
+    # 自动调整边距，确保旋转标签和颜色条不被画布裁切。
     fig.tight_layout()
+    # 以 180 DPI 写入目标 PNG 路径，目录由上层保存函数预先创建。
     fig.savefig(save_path, dpi=180)
+    # 关闭图对象释放内存，避免多实验循环累计 Matplotlib 资源。
     plt.close(fig)
 
 
 def c_float(value: float) -> str:
+    """把 Python 数值转换为最多 9 位有效数字的 C ``float`` 字面量。"""
+    # C 模型数组不能安全携带 NaN/Inf，非有限值统一退化为 0。
     if not np.isfinite(value):
+        # 0.0 是确定性有限后备值，避免生成器输出编译器相关宏。
         value = 0.0
+    # 9 位有效数字足以往返 float32，同时控制头文件体积。
     literal = f"{float(value):.9g}"
+    # 纯整数字符串需要补小数点，防止与 f 后缀组合时语义不明确。
     if "." not in literal and "e" not in literal.lower():
+        # 追加 .0 后明确表示浮点常量。
         literal += ".0"
+    # 添加 f 后缀，要求 C/C++ 按单精度常量计算并匹配 ESP32 float。
     return f"{literal}f"
 
 
 def c_string(value: str) -> str:
+    """转义反斜杠和双引号，并返回合法 C 字符串字面量。"""
+    # 先转义反斜杠，再转义双引号，防止特征名或类别名破坏头文件语法。
     escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    # 在转义内容两侧添加双引号，返回可直接嵌入 C 数组的字符串。
     return f'"{escaped}"'
 
 
 def c_array_1d(name: str, data: np.ndarray, const_type: str = "float") -> str:
+    """把任意形状数值展平为一行 C 静态一维常量数组定义。"""
+    # values 按 NumPy C 顺序展平，并逐项转换为有限 float32 字面量。
     values = ", ".join(c_float(v) for v in np.asarray(data).reshape(-1))
+    # 返回包含类型、变量名、元素数和初始化值的完整 C 声明。
     return f"static const {const_type} {name}[{len(np.asarray(data).reshape(-1))}] = {{ {values} }};"
 
 
 def c_array_2d(name: str, data: np.ndarray) -> str:
+    """把二维权重矩阵转换为按 ``[输出神经元][输入神经元]`` 存储的 C 数组。"""
+    # arr 保持 PyTorch Linear 权重的二维 [out_features,in_features] 行主序。
     arr = np.asarray(data)
+    # rows 按输出神经元顺序累积每一行 C 初始化文本。
     rows = []
+    # 遍历矩阵每个输出神经元权重行；每轮生成一个花括号子数组。
     for row in arr:
+        # 当前行各输入权重转换为单精度字面量并按列顺序连接。
         rows.append("  { " + ", ".join(c_float(v) for v in row) + " }")
+    # 返回完整二维静态 float 数组，维度与 arr.shape 完全一致。
     return f"static const float {name}[{arr.shape[0]}][{arr.shape[1]}] = {{\n" + ",\n".join(rows) + "\n};"
 
 
@@ -3487,36 +4478,67 @@ def export_esp32_header(
     feature_names: Sequence[str],
     save_path: Path,
 ) -> None:
+    """把平铺主 BP、可选专家、标准化参数和特征提取实现生成单个 ESP32 头文件。
+
+    Linear 权重保持 PyTorch ``[输出,输入]`` 顺序，C 前向计算
+    ``y[o]=bias[o]+sum_i(weight[o][i]*x[i])``，激活为 ReLU。生成内容包含中文说明、
+    297 维特征顺序、六轴预处理、标准化及推理函数，供 ESP32-S3 单精度执行。
+    """
+    # result 主模型必须是平铺 BP，当前单头导出器按 net 固定层索引读取权重。
     model = result["model"]
+    # 类型断言防止把多分支 state_dict 按平铺层号错误导出。
     assert isinstance(model, BPNet)
+    # state 保存主模型所有层参数；张量仍可能位于 CUDA。
     state = model.state_dict()
+    # w1 形状 [96,297]，是输入到第一隐藏层的权重。
     w1 = state["net.0.weight"].cpu().numpy()
+    # b1 形状 [96]，是第一隐藏层偏置。
     b1 = state["net.0.bias"].cpu().numpy()
+    # w2 形状 [64,96]，是第二隐藏层权重。
     w2 = state["net.3.weight"].cpu().numpy()
+    # b2 形状 [64]，是第二隐藏层偏置。
     b2 = state["net.3.bias"].cpu().numpy()
+    # w3 形状 [32,64]，是第三隐藏层权重。
     w3 = state["net.6.weight"].cpu().numpy()
+    # b3 形状 [32]，是第三隐藏层偏置。
     b3 = state["net.6.bias"].cpu().numpy()
+    # w4 形状 [类别数,32]，是输出分类层权重。
     w4 = state["net.8.weight"].cpu().numpy()
+    # b4 形状 [类别数]，是输出分类层偏置。
     b4 = state["net.8.bias"].cpu().numpy()
 
+    # specialist_model 可能是三类平铺专家，也可能不存在。
     specialist_model = result.get("specialist_model")
+    # has_specialist 只在对象确为 BPNet 时启用专家导出块。
     has_specialist = isinstance(specialist_model, BPNet)
+    # specialist_names 按专家局部输出顺序保存类别名。
     specialist_names = list(result.get("specialist_class_names", []))
     # suppress_normalized_phase 决定主 BP 是否把 48 个冗余阶段特征固定为训练均值零分。
     suppress_normalized_phase = bool(result.get("suppress_normalized_phase", False))
+    # specialist_lines 保存可选专家索引、标准化和四层参数的 C 声明文本。
     specialist_lines: List[str] = []
+    # specialist_feature_dim 默认 0；有专家时改为选中特征列数量。
     specialist_feature_dim = 0
+    # 存在有效专家时提取局部类别映射、输入列索引及网络权重。
     if has_specialist:
+        # 再次收窄静态类型，保证以下 state_dict 层号属于 BPNet。
         assert isinstance(specialist_model, BPNet)
+        # specialist_state 保存专家四个 Linear 层参数。
         specialist_state = specialist_model.state_dict()
+        # specialist_global_indices 把专家局部输出索引映射回主模型全局类别索引。
         specialist_global_indices = [class_names.index(name) for name in specialist_names]
+        # specialist_feature_indices 是专家从主 297 维特征向量抽取的列号。
         specialist_feature_indices = np.asarray(
             result.get("specialist_feature_indices", np.arange(len(feature_names))),
             dtype=np.int64,
         )
+        # 专家输入维度等于特征索引数量。
         specialist_feature_dim = int(len(specialist_feature_indices))
+        # 专家第一层输入列数必须与导出的索引数量完全一致。
         if specialist_state["net.0.weight"].shape[1] != specialist_feature_dim:
+            # 不一致会导致 C 端越界或遗漏权重，立即阻止生成。
             raise ValueError("Specialist feature index count does not match model input")
+        # 组装专家全局类映射、特征列、mean/std 和四层权重偏置声明。
         specialist_lines = [
             "static const int SPECIALIST_GLOBAL_CLASS_INDEX[SPECIALIST_CLASS_NUM] = { "
             + ", ".join(str(index) for index in specialist_global_indices)
@@ -3542,12 +4564,18 @@ def export_esp32_header(
             c_array_1d("SB4", specialist_state["net.8.bias"].cpu().numpy()),
         ]
 
+    # mean 是主模型 float32 [297] 训练特征均值，C 标准化逐列使用。
     mean = np.asarray(result["mean"], dtype=np.float32)
+    # std 是主模型 float32 [297] 训练特征标准差，已应用 1e-6 下限保护。
     std = np.asarray(result["std"], dtype=np.float32)
+    # window_len 是实时环形缓冲区达到一次推理所需采样点数。
     window_len = int(result["window_len"])
+    # rest_threshold 是整体窗口活动分数阈值，默认 0.03 兼容旧结果。
     rest_threshold = float(result.get("rest_threshold", 0.03))
+    # active_point_threshold 是逐点活动强度阈值，默认 0.02 兼容旧结果。
     active_point_threshold = float(result.get("active_point_threshold", 0.02))
 
+    # lines 按头文件顺序保存宏、中文说明、常量数组、特征函数和 BP 前向源码。
     lines = [
         "#ifndef ESP32_BP_MODEL_H",
         "#define ESP32_BP_MODEL_H",
@@ -5985,10 +7013,13 @@ static inline int bp_predict_from_window(const float window[WINDOW_LEN][AXIS_NUM
 #endif
 """,
     ]
+    # 用 UTF-8 写入完整头文件，保留自动生成的中文公式和一致性说明。
     save_path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def serializable_experiment(result: Dict[str, object]) -> Dict[str, object]:
+    """从实验结果中筛出可直接写入 JSON 的指标、划分和样本统计字段。"""
+    # keep 列出允许进入汇总报告的纯标量、列表和字典键，排除模型及 NumPy 预测数组。
     keep = {
         "window_seconds",
         "window_len",
@@ -6023,6 +7054,7 @@ def serializable_experiment(result: Dict[str, object]) -> Dict[str, object]:
         "test_files",
         "sample_stats",
     }
+    # 仅返回 result 中实际存在的白名单字段，兼容验证模式缺少测试键的结果。
     return {key: result[key] for key in keep if key in result}
 
 
@@ -6030,11 +7062,14 @@ def deployment_gate_status(
     best_result: Dict[str, object],
     class_names: Sequence[str],
 ) -> Tuple[bool, np.ndarray]:
+    """按普通类门槛和弱类 85% 门槛判断测试逐类召回是否允许部署。"""
+    # recalls 形状 [类别数]，由最佳实验独立测试真值和最终预测计算。
     recalls = per_class_recalls(
         np.asarray(best_result["y_test"]),
         np.asarray(best_result["test_pred"]),
         len(class_names),
     )
+    # thresholds 按 class_names 生成每类目标；弱类使用放宽的 0.85，其余类使用全局门槛。
     thresholds = np.asarray(
         [
             WEAK_TARGET_MIN_CLASS_RECALL
@@ -6044,6 +7079,7 @@ def deployment_gate_status(
         ],
         dtype=np.float64,
     )
+    # 全部逐类召回达到各自门槛时返回 True，同时返回完整召回数组供失败报告使用。
     return bool(np.all(recalls >= thresholds)), recalls
 
 
@@ -6055,16 +7091,27 @@ def export_model_headers(
     repository_header_path: Path,
     export_when_below_target: bool,
 ) -> bool:
+    """按部署门槛生成输出头文件，并仅在达标时同步到仓库 ESP32 目录。"""
+    # reached_target 表示独立测试集所有类别召回达到各自部署门槛。
     reached_target, _ = deployment_gate_status(best_result, class_names)
+    # 未达标且未显式允许调试导出时，禁止生成可能被误用的模型头。
     if not reached_target and not export_when_below_target:
+        # 返回 False 告知主流程模型未通过部署门槛且没有写头文件。
         return False
 
+    # 创建实验输出头文件父目录，已存在时不报错。
     output_header_path.parent.mkdir(parents=True, exist_ok=True)
+    # 生成包含特征、标准化、BP 参数和推理函数的 ESP32 C 头文件。
     export_esp32_header(best_result, class_names, feature_names, output_header_path)
+    # 只有正式达标模型才能更新仓库默认部署头，调试导出不得覆盖生产工件。
     if reached_target:
+        # 创建仓库部署头父目录，兼容首次生成。
         repository_header_path.parent.mkdir(parents=True, exist_ok=True)
+        # 输出路径与仓库路径不同才复制，避免同文件复制自身异常。
         if output_header_path.resolve() != repository_header_path.resolve():
+            # 字节复制已生成 UTF-8 头文件到 ESP32 生产位置。
             shutil.copyfile(output_header_path, repository_header_path)
+    # 返回部署门槛状态；True 表示仓库生产头可更新，False 仅可能生成调试头。
     return reached_target
 
 
@@ -6077,15 +7124,25 @@ def save_outputs(
     export_when_below_target: bool,
     repository_header_path: Path = ESP32_MODEL_HEADER,
 ) -> bool:
+    """保存正式测试模型、标准化配置、混淆矩阵、JSON 报告和可选 ESP32 头文件。"""
+    # 创建输出目录及缺失父目录，不删除已有其他实验文件。
     output_dir.mkdir(parents=True, exist_ok=True)
+    # y_test 是最佳实验独立测试真值 [测试样本数]。
     y_test = np.asarray(best_result["y_test"])
+    # test_pred 是最终主模型或主+专家路由预测 [测试样本数]。
     test_pred = np.asarray(best_result["test_pred"])
 
+    # 保存 11×11 测试混淆矩阵 PNG，类别顺序与模型输出一致。
     save_confusion_matrix(y_test, test_pred, class_names, output_dir / "confusion_matrix.png")
+    # 主模型对象用于保存 state_dict；正式导出路径当前要求平铺 BP。
     model = best_result["model"]
+    # 类型断言保护固定平铺层索引和下游加载合同。
     assert isinstance(model, BPNet)
+    # 可选 specialist_model 是三类家族重判 BP。
     specialist_model = best_result.get("specialist_model")
+    # 存在专家时把主模型和专家 state_dict 写入同一命名字典。
     if isinstance(specialist_model, BPNet):
+        # 保存联合 checkpoint，键名明确区分主模型与家族专家。
         torch.save(
             {
                 "primary": model.state_dict(),
@@ -6093,8 +7150,11 @@ def save_outputs(
             },
             output_dir / "best_model.pt",
         )
+    # 无专家时保持旧格式，只保存主模型 state_dict 兼容既有加载器。
     else:
+        # 写入平铺主 BP 参数到 best_model.pt。
         torch.save(model.state_dict(), output_dir / "best_model.pt")
+    # scaler_config 保存 Python/ESP32 共同需要的标准化、类别、特征和窗口合同。
     scaler_config = {
         "mean": np.asarray(best_result["mean"], dtype=np.float32),
         "std": np.asarray(best_result["std"], dtype=np.float32),
@@ -6120,7 +7180,9 @@ def save_outputs(
             [bool(best_result.get("suppress_normalized_phase", False))], dtype=np.bool_
         ),
     }
+    # 存在专家时追加其专用 mean/std、局部类别顺序和主特征列索引。
     if isinstance(specialist_model, BPNet):
+        # update 保持主配置键不变，并加入四个专家部署数组。
         scaler_config.update(
             {
                 "specialist_mean": np.asarray(
@@ -6137,8 +7199,10 @@ def save_outputs(
                 ),
             }
         )
+    # 使用 NPZ 保存全部数值/字符串数组，不启用 pickle 对象序列化。
     np.savez(output_dir / "scaler_and_config.npz", **scaler_config)
 
+    # report 汇总最终指标、类别/特征顺序、外部留出结果和所有候选实验。
     report = {
         "seed": SEED,
         "sample_rate": SAMPLE_RATE,
@@ -6182,9 +7246,12 @@ def save_outputs(
         ),
         "all_experiments": [serializable_experiment(result) for result in all_results],
     }
+    # 以 UTF-8 打开正式训练报告，确保中文类别和路径可读。
     with (output_dir / "training_report.json").open("w", encoding="utf-8") as file:
+        # 缩进 2 空格写入 JSON，保留非 ASCII 字符且便于人工审阅。
         json.dump(report, file, ensure_ascii=False, indent=2)
 
+    # 尝试按部署门槛生成/同步 ESP32 头文件，并返回是否正式达标。
     return export_model_headers(
         best_result,
         class_names,
@@ -6202,11 +7269,16 @@ def save_validation_outputs(
     feature_names: Sequence[str],
     output_dir: Path,
 ) -> None:
+    """保存验证候选模型、配置和验证报告；不评估测试集也不导出生产头。"""
+    # 创建候选输出目录及缺失父目录。
     output_dir.mkdir(parents=True, exist_ok=True)
+    # 读取验证选择出的最佳主模型，可能是平铺、M0 或 M1。
     model = best_result["model"]
     # 验证候选允许保存任意 PyTorch 主模型；正式 ESP32 导出仍由门槛和专用导出器控制。
     assert isinstance(model, nn.Module)
+    # 保存候选 state_dict，供后续确认训练或离线复核使用。
     torch.save(model.state_dict(), output_dir / "best_model.pt")
+    # 保存候选 mean/std、类别/特征顺序、窗口阈值及模型类型，不含测试统计。
     np.savez(
         output_dir / "scaler_and_config.npz",
         mean=np.asarray(best_result["mean"], dtype=np.float32),
@@ -6243,6 +7315,7 @@ def save_validation_outputs(
             ]
         ),
     )
+    # validation_keys 是允许进入候选实验列表的验证字段白名单。
     validation_keys = {
         "window_seconds",
         "window_len",
@@ -6269,6 +7342,7 @@ def save_validation_outputs(
         "val_files",
         "sample_stats",
     }
+    # report 汇总最佳验证指标、分类报告和全部候选窗口结果，不包含测试集结果。
     report = {
         "mode": "validation_only",
         "seed": SEED,
@@ -6303,56 +7377,80 @@ def save_validation_outputs(
             for result in all_results
         ],
     }
+    # 用 UTF-8 打开验证报告目标文件。
     with (output_dir / "validation_report.json").open("w", encoding="utf-8") as file:
+        # 写入易读 JSON，保留中文和路径字符。
         json.dump(report, file, ensure_ascii=False, indent=2)
 
 
 def parse_ema_decay(value: str) -> float:
+    """解析命令行 EMA 衰减率并验证范围 ``[0,1)``。"""
+    # 把 argparse 传入字符串转换为 Python float。
     decay = float(value)
+    # EMA 系数必须非负且小于 1，才能保留当前参数的正权重。
     if not 0.0 <= decay < 1.0:
+        # 抛出 ValueError，由 argparse 报告非法参数。
         raise ValueError("EMA decay must be in [0, 1)")
+    # 返回通过范围检查的 EMA 衰减率。
     return decay
 
 
 def parse_label_smoothing(value: str) -> float:
+    """解析命令行标签平滑率并验证范围 ``[0,1)``。"""
+    # 把命令行字符串转换为 Python float。
     smoothing = float(value)
+    # 平滑率 1 会完全移除真类目标，负值也不符合交叉熵定义。
     if not 0.0 <= smoothing < 1.0:
+        # 抛出 ValueError，由 argparse 显示合法区间。
         raise ValueError("Label smoothing must be in [0, 1)")
+    # 返回通过验证的标签平滑率。
     return smoothing
 
 
 def parse_nonnegative_float(value: str) -> float:
+    """解析用于损失权重的非负浮点命令行参数。"""
     # 将命令行字符串转换为浮点数，供非负损失权重使用。
     parsed = float(value)
     # 负损失权重会反向优化目标，属于无效训练配置。
     if parsed < 0.0:
+        # 拒绝负值，避免把辅助目标变成反向奖励。
         raise ValueError("Value must be non-negative")
     # 返回已验证的非负浮点数。
     return parsed
 
 
 def parse_dropout(value: str) -> float:
+    """解析 dropout 概率并验证 PyTorch 合法范围 ``[0,1)``。"""
     # 将命令行字符串转换为 dropout 概率。
     dropout = float(value)
     # PyTorch dropout 合法区间为 [0,1)，1 会丢弃全部表示。
     if not 0.0 <= dropout < 1.0:
+        # 拒绝负概率和全丢弃概率。
         raise ValueError("Dropout must be in [0, 1)")
     # 返回已验证的 dropout 概率。
     return dropout
 
 
 def parse_args() -> argparse.Namespace:
+    """定义并解析训练、验证、消融、数据路径和模型导出命令行参数。"""
+    # 创建参数解析器并给出脚本用途说明。
     parser = argparse.ArgumentParser(description="Train IMU BP model and export ESP32 header.")
+    # 主数据集目录；默认按项目路径和兼容路径自动解析。
     parser.add_argument("--dataset-dir", type=Path, default=None)
+    # 只并入训练集的附加已标注目录，不进入验证或测试。
     parser.add_argument("--extra-train-dir", type=Path, default=None)
+    # 完成模型选择后才加载的外部留出数据目录。
     parser.add_argument("--external-holdout-dir", type=Path, default=None)
+    # 模型、配置、报告和候选头文件输出目录。
     parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR)
+    # 可选已验证主模型目录，用于跳过主训练并只训练家族专家。
     parser.add_argument(
         "--primary-artifact-dir",
         type=Path,
         default=None,
         help="Reuse a validated primary BP model and train only the family specialist.",
     )
+    # 启用三类家族专家训练和预测路由。
     parser.add_argument("--enable-family-specialist", action="store_true")
     # 启用六组物理特征独立编码后融合的候选 BP 结构。
     parser.add_argument("--multi-branch", action="store_true")
@@ -6366,20 +7464,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--auxiliary-heads", action="store_true")
     # 将 48 个归一化四阶段特征在标准化后设为训练均值零分，用于 Round36 证据候选。
     parser.add_argument("--suppress-normalized-phase", action="store_true")
+    # 验证模式只访问训练/验证文件，禁止测试构建、外部留出和头文件导出。
     parser.add_argument(
         "--validation-only",
         action="store_true",
         help="Train and select with validation data without constructing or evaluating test windows.",
     )
+    # 固定数据划分、增强、采样和模型初始化随机种子。
     parser.add_argument("--seed", type=int, default=SEED)
+    # 允许未达部署门槛时生成仅供调试的输出目录头文件。
     parser.add_argument("--export-when-below-target", action="store_true")
+    # 覆盖最大训练 epoch；每轮仍保留弱类优先早停。
     parser.add_argument("--max-epochs", type=int, default=MAX_EPOCHS)
+    # epoch 级参数 EMA 衰减率，0 表示关闭。
     parser.add_argument(
         "--ema-decay",
         type=parse_ema_decay,
         default=0.0,
         help="Epoch-level BP parameter EMA decay; 0 disables EMA.",
     )
+    # 主交叉熵标签平滑率，0 表示硬 one-hot 目标。
     parser.add_argument(
         "--label-smoothing",
         type=parse_label_smoothing,
@@ -6394,6 +7498,7 @@ def parse_args() -> argparse.Namespace:
     )
     # 暴露主模型 dropout；Round25 使用 0.20 抑制多分支过拟合。
     parser.add_argument("--dropout", type=parse_dropout, default=DROPOUT)
+    # 指定一个或多个窗口秒数；每个值单独训练并按验证最弱类指标选优。
     parser.add_argument(
         "--window-seconds",
         type=float,
@@ -6401,46 +7506,67 @@ def parse_args() -> argparse.Namespace:
         choices=WINDOW_SECONDS_CHOICES,
         default=list(WINDOW_SECONDS_LIST),
     )
+    # 返回 argparse Namespace，字段名与以上长参数去掉前缀并转下划线后一致。
     return parser.parse_args()
 
 
 def main() -> None:
+    """执行可见训练入口：加载数据、逐窗口训练、选择最佳模型、评估并保存工件。"""
+    # 解析命令行配置，所有后续实验均以该 Namespace 为唯一运行参数来源。
     args = parse_args()
     # 辅助头依赖多分支模型的 32 维融合嵌入，命令行组合错误时立即终止。
     if args.auxiliary_heads and not args.multi_branch:
+        # 平铺 BP 没有辅助头接口，拒绝不兼容配置。
         raise ValueError("--auxiliary-heads requires --multi-branch")
     # M1 必须建立在六分支编码之上。
     if args.deep_narrow and not args.multi_branch:
+        # 拒绝没有六分支输入边界的 M1 配置。
         raise ValueError("--deep-narrow requires --multi-branch")
     # T2 不允许同时启用训练期辅助头，避免混入第二个实验变量。
     if args.deep_narrow and args.auxiliary_heads:
+        # 拒绝深度与辅助任务同时改变的非单变量消融。
         raise ValueError("--deep-narrow cannot be combined with --auxiliary-heads")
     # 先验修正只对均匀 P×K 采样有定义，其他采样方式不能启用。
     if args.pk_prior_corrected_ce and not args.pk_batches:
+        # 普通文件平衡采样下不应用 P×K 先验修正。
         raise ValueError("--pk-prior-corrected-ce requires --pk-batches")
+    # 声明修改模块级 MAX_EPOCHS，使 train_model 使用命令行覆盖值。
     global MAX_EPOCHS
+    # 保存本次运行最大 epoch；早停仍可提前结束。
     MAX_EPOCHS = args.max_epochs
+    # 固定全部随机源，确保相同命令尽量复现划分、增强和权重初始化。
     set_seed(args.seed)
 
+    # 解析有效主数据集根目录。
     dataset_dir = resolve_dataset_dir(args.dataset_dir)
+    # 扫描主文件记录、稳定类别顺序和类别名索引映射。
     records, class_names, label_to_idx = scan_dataset(dataset_dir)
+    # 搜参前只加载附加训练记录；外部留出集显式保持未加载。
     extra_train_records, _ = load_additional_records(
         args.extra_train_dir,
         args.external_holdout_dir,
         label_to_idx,
         validation_only=True,
     )
+    # 生成与 extract_features 一一对应的 297 个特征名称。
     feature_names = build_feature_names()
+    # CUDA 可用时训练在 GPU，否则使用 CPU；ESP32 导出始终为 float32 参数。
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    # 输出主数据集绝对路径，便于在 PyCharm 控制台核对数据来源。
     print(f"dataset_dir={dataset_dir.resolve()}")
+    # 输出实际训练设备。
     print(f"device={device}")
+    # 输出类别数、原始文件数和特征维度，确认 11 类/297 维合同。
     print(f"class_count={len(class_names)} file_count={len(records)} feature_dim={len(feature_names)}")
+    # 输出附加训练文件数并确认外部留出尚未加载，避免测试泄漏。
     print(
         f"extra_train_file_count={len(extra_train_records)} "
         f"external_holdout_loaded=false"
     )
+    # 输出稳定类别名称顺序，该顺序即模型和 ESP32 输出索引顺序。
     print(f"class_names={class_names}")
+    # 输出窗口、增强、损失、结构和验证模式的完整运行配置。
     print(
         f"window_seconds={args.window_seconds} augment_times={AUGMENT_TIMES} "
         f"max_rotation_degrees={MAX_ROTATION_DEGREES:.1f} "
@@ -6458,8 +7584,11 @@ def main() -> None:
         f"validation_only={args.validation_only}"
     )
 
+    # all_results 按命令行窗口顺序保存每个完整实验结果字典。
     all_results: List[Dict[str, object]] = []
+    # 遍历用户指定的全部窗口秒数；每轮独立划分、提特征、训练和验证。
     for window_seconds in args.window_seconds:
+        # 执行当前窗口规格实验，训练期间每个 epoch 都在 PyCharm 输出完整指标。
         result = train_one_experiment(
             window_seconds,
             records,
@@ -6481,8 +7610,10 @@ def main() -> None:
             dropout=args.dropout,
             suppress_normalized_phase=args.suppress_normalized_phase,
         )
+        # 追加当前实验结果，供后续验证最弱类优先选优和报告保存。
         all_results.append(result)
 
+    # 按验证最低召回、宏 F1、准确率字典序选择最佳窗口实验。
     best_result = max(
         all_results,
         key=lambda item: (
@@ -6491,7 +7622,9 @@ def main() -> None:
             float(item["val_acc"]),
         ),
     )
+    # 验证模式保存候选后立即结束，绝不加载外部留出或独立测试结果。
     if args.validation_only:
+        # 保存验证最佳模型、标准化配置和全部候选验证报告。
         save_validation_outputs(
             best_result,
             all_results,
@@ -6499,13 +7632,16 @@ def main() -> None:
             feature_names,
             args.output_dir,
         )
+        # 输出最佳验证实验分隔标题。
         print("========== best validation experiment ==========")
+        # 输出最佳窗口、验证准确率、宏 F1 和最低类别召回。
         print(
             f"best_window={best_result['window_seconds']}s "
             f"val_acc={best_result['val_acc']:.4f} "
             f"val_f1={best_result['val_f1']:.4f} "
             f"val_min_recall={best_result['val_min_recall']:.4f}"
         )
+        # 输出验证集逐类 precision、recall、F1 和支持数。
         print(
             classification_report(
                 np.asarray(best_result["y_val"]),
@@ -6514,23 +7650,30 @@ def main() -> None:
                 zero_division=0,
             )
         )
+        # 明确提示测试、外部评估和头文件导出均已跳过。
         print("validation_only=true test_evaluation_skipped=true header_export_skipped=true")
+        # 输出验证工件绝对目录。
         print(f"outputs={args.output_dir.resolve()}")
+        # 验证模式任务完成，返回且不执行后续正式测试路径。
         return
 
+    # 模型和窗口选择完成后才加载外部留出记录，保护其独立性。
     _, external_holdout_records = load_additional_records(
         None,
         args.external_holdout_dir,
         label_to_idx,
         validation_only=False,
     )
+    # 使用最佳实验固定前处理、标准化和主模型评估外部留出集。
     external_holdout = evaluate_external_holdout(
         best_result,
         external_holdout_records,
         class_names,
         device,
     )
+    # 把外部评估写入最佳结果，随后一并保存到正式训练报告。
     best_result["external_holdout"] = external_holdout
+    # 输出外部文件数、最小和宏召回，未配置时显示 skipped 状态及 NaN。
     print(
         f"external_holdout_loaded={not bool(external_holdout['skipped'])} "
         f"external_holdout_file_count={external_holdout.get('file_count', 0)} "
@@ -6540,6 +7683,7 @@ def main() -> None:
         f"{external_holdout.get('macro_recall', external_holdout.get('recall', float('nan'))):.4f}"
     )
 
+    # 保存正式工件并按逐类召回门槛决定是否导出/同步 ESP32 头。
     reached_target = save_outputs(
         best_result,
         all_results,
@@ -6549,12 +7693,15 @@ def main() -> None:
         args.export_when_below_target or EXPORT_WHEN_BELOW_TARGET,
     )
 
+    # 输出正式最佳实验分隔标题。
     print("========== best experiment ==========")
+    # 输出最佳窗口及验证/测试准确率和宏 F1。
     print(
         f"best_window={best_result['window_seconds']}s "
         f"val_acc={best_result['val_acc']:.4f} val_f1={best_result['val_f1']:.4f} "
         f"test_acc={best_result['test_acc']:.4f} test_f1={best_result['test_f1']:.4f}"
     )
+    # 输出独立测试集逐类 precision、recall、F1 和支持数。
     print(
         classification_report(
             np.asarray(best_result["y_test"]),
@@ -6563,30 +7710,40 @@ def main() -> None:
             zero_division=0,
         )
     )
+    # 全部类别达到门槛时报告正式头文件输出和仓库同步位置。
     if reached_target:
+        # target_reached=true 表示生产 ESP32 头可更新。
         print(
             f"target_reached=true output_header={args.output_dir / 'esp32_bp_model.h'} "
             f"repository_header={ESP32_MODEL_HEADER}"
         )
+    # 未达门槛时列出失败类别及召回，默认不生成头文件。
     else:
+        # 重新取得按 class_names 顺序的测试召回数组。
         _, test_recalls = deployment_gate_status(best_result, class_names)
+        # thresholds 按类别生成普通门槛或弱类 0.85 门槛。
         thresholds = [
             WEAK_TARGET_MIN_CLASS_RECALL
             if name in RELAXED_RECALL_CLASS_NAMES
             else TARGET_MIN_CLASS_RECALL
             for name in class_names
         ]
+        # failed 只保留召回低于对应门槛的“类别:召回率”文本。
         failed = [
             f"{name}:{recall:.4f}"
             for name, recall, threshold in zip(class_names, test_recalls, thresholds)
             if recall < threshold
         ]
+        # 输出未达标状态、头文件跳过状态和失败类别列表。
         print(
             "target_reached=false header_export_skipped=true "
             f"failed_class_recalls={failed}"
         )
+    # 无论是否达标都输出报告和模型工件所在绝对目录。
     print(f"outputs={args.output_dir.resolve()}")
 
 
+# 仅直接运行脚本时启动训练；被测试或评估脚本导入时不自动执行。
 if __name__ == "__main__":
+    # 调用可见训练主入口，所有 epoch 日志输出到当前 PyCharm 控制台。
     main()
