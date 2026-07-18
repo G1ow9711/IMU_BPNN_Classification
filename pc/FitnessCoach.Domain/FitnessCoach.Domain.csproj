@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- 领域层只定义跨界面、存储和蓝牙共用的数据合同，不依赖任何平台 API。 -->
+  <PropertyGroup>
+    <!-- 上位机正式目标为 .NET 8，便于在 Windows 10/11 使用长期支持运行时。 -->
+    <TargetFramework>net8.0</TargetFramework>
+    <!-- 开启可空引用分析，避免 BLE 断线状态中的空对象被误用。 -->
+    <Nullable>enable</Nullable>
+    <!-- 自动导入 System 等基础命名空间，减少重复样板代码。 -->
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- 所有编译警告视为错误，防止协议字段截断或可空问题进入交付。 -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+</Project>

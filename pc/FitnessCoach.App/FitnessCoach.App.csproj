@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- 上位机使用 .NET 8 WPF，Windows 10/11 可直接运行。 -->
+  <PropertyGroup>
+    <!-- 生成带入口点的 Windows 桌面程序。 -->
+    <OutputType>WinExe</OutputType>
+    <!-- 固定 Windows 版 .NET 8，避免误用仅控制台目标。 -->
+    <TargetFramework>net8.0-windows10.0.26100.0</TargetFramework>
+    <!-- Windows 10 2004 及以上可运行 WinRT BLE；编译合同使用 26100。 -->
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+    <!-- 开启 WPF 编译任务和 XAML 资源处理。 -->
+    <UseWPF>true</UseWPF>
+    <!-- 开启可空引用检查，提前发现断连和空摘要问题。 -->
+    <Nullable>enable</Nullable>
+    <!-- 自动导入常用基础命名空间。 -->
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- 所有编译警告都视为错误，防止线程和绑定问题被忽略。 -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- 引用共享领域对象和设备会话接口。 -->
+    <ProjectReference Include="..\FitnessCoach.Domain\FitnessCoach.Domain.csproj" />
+    <!-- 引用无硬件 Mock；未来真实 BLE 适配器也位于该层。 -->
+    <ProjectReference Include="..\FitnessCoach.Bluetooth\FitnessCoach.Bluetooth.csproj" />
+    <!-- 引用 Windows.Devices.Bluetooth 真 GATT transport。 -->
+    <ProjectReference Include="..\FitnessCoach.Bluetooth.Windows\FitnessCoach.Bluetooth.Windows.csproj" />
+    <!-- 引用本地历史和设置仓储。 -->
+    <ProjectReference Include="..\FitnessCoach.Infrastructure\FitnessCoach.Infrastructure.csproj" />
+  </ItemGroup>
+</Project>

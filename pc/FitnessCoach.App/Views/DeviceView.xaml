@@ -1,0 +1,208 @@
+<UserControl x:Class="FitnessCoach.App.Views.DeviceView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!-- 设备页允许小窗口滚动。 -->
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <!-- 页面内容纵向排列。 -->
+        <StackPanel MaxWidth="980" HorizontalAlignment="Left">
+            <!-- 附近蓝牙设备卡片提供与系统设置相似的可见扫描、选择和连接流程。 -->
+            <Border Background="{StaticResource CardBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="14" Padding="24" Margin="0,0,0,18">
+                <!-- 扫描标题、候选列表和操作按钮纵向排列。 -->
+                <StackPanel>
+                    <!-- 标题行左侧说明列表用途，右侧提供显式刷新。 -->
+                    <Grid>
+                        <!-- 标题占剩余宽度，按钮保持内容宽度。 -->
+                        <Grid.ColumnDefinitions>
+                            <!-- 标题列自适应页面宽度。 -->
+                            <ColumnDefinition Width="*" />
+                            <!-- 扫描按钮列按内容宽度排列。 -->
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <!-- 列表标题使用中文，不暴露内部扫描 API 名称。 -->
+                        <TextBlock Grid.Column="0" Text="附近蓝牙设备" FontSize="22" FontWeight="SemiBold" VerticalAlignment="Center" />
+                        <!-- 用户点击后执行有限时间主动扫描。 -->
+                        <Button Grid.Column="1" Style="{StaticResource BaseButtonStyle}" Content="扫描设备" Command="{Binding ScanDevicesCommand}" />
+                    </Grid>
+                    <!-- 扫描进度、数量和错误在同一区域显示。 -->
+                    <TextBlock Text="{Binding ScanStatus}" Foreground="{StaticResource SecondaryTextBrush}" TextWrapping="Wrap" Margin="4,8,4,12" />
+
+                    <!-- 候选列表显示附近产品和其它蓝牙设备，选中项双向写回视图模型。 -->
+                    <ListBox ItemsSource="{Binding NearbyDevices}"
+                             SelectedItem="{Binding SelectedNearbyDevice, Mode=TwoWay}"
+                             Background="#080808"
+                             BorderBrush="{StaticResource BorderBrush}"
+                             BorderThickness="1"
+                             MinHeight="170"
+                             MaxHeight="300"
+                             ScrollViewer.VerticalScrollBarVisibility="Auto">
+                        <!-- 行容器使用深色圆角选择反馈，避免系统默认白色列表破坏主题。 -->
+                        <ListBox.ItemContainerStyle>
+                            <!-- 每行横向拉满列表宽度。 -->
+                            <Style TargetType="ListBoxItem">
+                                <!-- 行内容占满可用宽度。 -->
+                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                <!-- 默认文字使用主文字颜色。 -->
+                                <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}" />
+                                <!-- 默认背景透明。 -->
+                                <Setter Property="Background" Value="Transparent" />
+                                <!-- 行间留出轻微边距。 -->
+                                <Setter Property="Margin" Value="4,3" />
+                                <!-- 自定义模板提供圆角选中边框。 -->
+                                <Setter Property="Template">
+                                    <Setter.Value>
+                                        <!-- 模板绑定当前行背景和前景。 -->
+                                        <ControlTemplate TargetType="ListBoxItem">
+                                            <!-- 行外框承载设备模板。 -->
+                                            <Border x:Name="RowBorder" Background="{TemplateBinding Background}" BorderBrush="Transparent" BorderThickness="1" CornerRadius="10" Padding="4">
+                                                <!-- 显示绑定的数据模板。 -->
+                                                <ContentPresenter />
+                                            </Border>
+                                            <!-- 选择和悬停使用不同强度主色反馈。 -->
+                                            <ControlTemplate.Triggers>
+                                                <!-- 鼠标悬停时显示弱边框。 -->
+                                                <Trigger Property="IsMouseOver" Value="True">
+                                                    <!-- 使用低亮度青绿边框。 -->
+                                                    <Setter TargetName="RowBorder" Property="BorderBrush" Value="#326B5C" />
+                                                </Trigger>
+                                                <!-- 选中时使用主色边框和深绿背景。 -->
+                                                <Trigger Property="IsSelected" Value="True">
+                                                    <!-- 突出用户准备连接的设备。 -->
+                                                    <Setter TargetName="RowBorder" Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+                                                    <!-- 保持文字对比度的深绿背景。 -->
+                                                    <Setter TargetName="RowBorder" Property="Background" Value="#102B24" />
+                                                </Trigger>
+                                            </ControlTemplate.Triggers>
+                                        </ControlTemplate>
+                                    </Setter.Value>
+                                </Setter>
+                            </Style>
+                        </ListBox.ItemContainerStyle>
+                        <!-- 每台设备显示名称、类型、系统标识、配对状态和信号强度。 -->
+                        <ListBox.ItemTemplate>
+                            <!-- 单行设备模板。 -->
+                            <DataTemplate>
+                                <!-- 行卡片留出触控高度。 -->
+                                <Grid Margin="12,9">
+                                    <!-- 左侧身份占剩余宽度，右侧状态固定宽度。 -->
+                                    <Grid.ColumnDefinitions>
+                                        <!-- 名称和系统标识列。 -->
+                                        <ColumnDefinition Width="*" />
+                                        <!-- 配对与信号列。 -->
+                                        <ColumnDefinition Width="180" />
+                                    </Grid.ColumnDefinitions>
+                                    <!-- 左侧显示广播名、产品类型和精确系统标识。 -->
+                                    <StackPanel Grid.Column="0">
+                                        <!-- 广播名为用户主要辨认字段。 -->
+                                        <TextBlock Text="{Binding DisplayName}" FontSize="18" FontWeight="SemiBold" TextWrapping="Wrap" />
+                                        <!-- 产品或其它设备分类用于阻止误连。 -->
+                                        <TextBlock Text="{Binding DeviceKindText}" Foreground="{StaticResource AccentBrush}" Margin="0,4,0,0" />
+                                        <!-- Windows 系统设备 ID 供多台同名设备和售后诊断区分。 -->
+                                        <TextBlock Text="{Binding DeviceId}" Foreground="{StaticResource SecondaryTextBrush}" FontSize="11" TextTrimming="CharacterEllipsis" ToolTip="{Binding DeviceId}" Margin="0,4,14,0" />
+                                    </StackPanel>
+                                    <!-- 右侧显示系统配对状态和当前 RSSI。 -->
+                                    <StackPanel Grid.Column="1" HorizontalAlignment="Right" VerticalAlignment="Center">
+                                        <!-- 配对状态使用主文字。 -->
+                                        <TextBlock Text="{Binding PairingText}" HorizontalAlignment="Right" FontWeight="SemiBold" />
+                                        <!-- 信号强度使用中文单位。 -->
+                                        <TextBlock Text="{Binding SignalText}" HorizontalAlignment="Right" Foreground="{StaticResource SecondaryTextBrush}" Margin="0,5,0,0" />
+                                    </StackPanel>
+                                </Grid>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+
+                    <!-- 只有选中产品手柄时按钮可执行；其它设备仍可查看但不能误连。 -->
+                    <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                        <!-- 按用户明确选中的系统设备 ID 建立连接。 -->
+                        <Button Style="{StaticResource PrimaryButtonStyle}" Content="连接所选手柄" Command="{Binding ConnectSelectedCommand}" />
+                        <!-- 说明其它设备只作为环境参考显示。 -->
+                        <TextBlock Text="其它设备仅供查看，不能进入健身协议。" Foreground="{StaticResource SecondaryTextBrush}" VerticalAlignment="Center" Margin="12,0,0,0" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- 设备概要卡片。 -->
+            <Border Background="{StaticResource CardBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="14" Padding="24">
+                <!-- 卡片字段纵向排列。 -->
+                <StackPanel>
+                    <!-- 页面说明。 -->
+                    <TextBlock Text="连接与恢复" FontSize="22" FontWeight="SemiBold" />
+                    <!-- 当前模式必须明确真机 BLE 状态。 -->
+                    <TextBlock Text="{Binding DeviceMode}" Foreground="{StaticResource WarningBrush}" Margin="0,8,0,18" />
+
+                    <!-- 两列表格展示设备身份和权威状态。 -->
+                    <Grid Margin="0,0,0,18">
+                        <!-- 标签列和数值列。 -->
+                        <Grid.ColumnDefinitions>
+                            <!-- 固定标签宽度保持对齐。 -->
+                            <ColumnDefinition Width="135" />
+                            <!-- 数值列占剩余空间。 -->
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <!-- 七个设备字段逐行排列。 -->
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <!-- 设备标识标签。 -->
+                        <TextBlock Grid.Row="0" Grid.Column="0" Text="设备标识" Foreground="{StaticResource SecondaryTextBrush}" Margin="0,4" />
+                        <!-- 设备标识值。 -->
+                        <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding DeviceIdText}" FontWeight="SemiBold" Margin="0,4" TextWrapping="Wrap" />
+                        <!-- 型号标签。 -->
+                        <TextBlock Grid.Row="1" Grid.Column="0" Text="设备型号" Foreground="{StaticResource SecondaryTextBrush}" Margin="0,4" />
+                        <!-- 标准 Device Information 型号。 -->
+                        <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding ModelNumber}" Margin="0,4" TextWrapping="Wrap" />
+                        <!-- 硬件修订标签。 -->
+                        <TextBlock Grid.Row="2" Grid.Column="0" Text="硬件修订" Foreground="{StaticResource SecondaryTextBrush}" Margin="0,4" />
+                        <!-- 硬件修订值。 -->
+                        <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding HardwareRevision}" Margin="0,4" />
+                        <!-- 固件版本标签。 -->
+                        <TextBlock Grid.Row="3" Grid.Column="0" Text="固件版本" Foreground="{StaticResource SecondaryTextBrush}" Margin="0,4" />
+                        <!-- 固件版本值。 -->
+                        <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding FirmwareRevision}" Margin="0,4" />
+                        <!-- 电池标签。 -->
+                        <TextBlock Grid.Row="4" Grid.Column="0" Text="电池电量" Foreground="{StaticResource SecondaryTextBrush}" Margin="0,4" />
+                        <!-- 权威 LiveState 电量。 -->
+                        <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding BatteryText}" Foreground="{StaticResource AccentBrush}" Margin="0,4" />
+                        <!-- 蓝牙最大传输单元标签。 -->
+                        <TextBlock Grid.Row="5" Grid.Column="0" Text="最大传输单元" Foreground="{StaticResource SecondaryTextBrush}" Margin="0,4" />
+                        <!-- 当前协商最大传输单元。 -->
+                        <TextBlock Grid.Row="5" Grid.Column="1" Text="{Binding AttMtuText}" Margin="0,4" />
+                        <!-- 状态修订号标签。 -->
+                        <TextBlock Grid.Row="6" Grid.Column="0" Text="状态修订号" Foreground="{StaticResource SecondaryTextBrush}" Margin="0,4" />
+                        <!-- 最近权威状态修订号。 -->
+                        <TextBlock Grid.Row="6" Grid.Column="1" Text="{Binding StateRevisionText}" Margin="0,4" />
+                    </Grid>
+
+                    <!-- 链路状态标签。 -->
+                    <TextBlock Text="链路状态" Foreground="{StaticResource SecondaryTextBrush}" />
+                    <!-- 链路状态值。 -->
+                    <TextBlock Text="{Binding ConnectionStatus}" Foreground="{StaticResource AccentBrush}" FontSize="20" FontWeight="SemiBold" Margin="0,4,0,16" />
+                    <!-- 连接和断开按钮横向排列。 -->
+                    <StackPanel Orientation="Horizontal">
+                        <!-- 连接模拟设备或真实手柄。 -->
+                        <Button Style="{StaticResource PrimaryButtonStyle}" Content="快速连接手柄" Command="{Binding ConnectCommand}" />
+                        <!-- 仅断开上位机链路。 -->
+                        <Button Style="{StaticResource BaseButtonStyle}" Content="断开连接" Command="{Binding DisconnectCommand}" />
+                        <!-- 取消 Windows 系统配对并清除上位机固定设备选择；Mock 下清除模拟重连基线。 -->
+                        <Button Style="{StaticResource BaseButtonStyle}" Content="忘记设备" Command="{Binding ForgetDeviceCommand}" />
+                    </StackPanel>
+                    <!-- 显示最近状态或错误。 -->
+                    <TextBlock Text="{Binding Message}" Foreground="{StaticResource SecondaryTextBrush}" TextWrapping="Wrap" Margin="4,16,4,0" />
+                </StackPanel>
+            </Border>
+
+            <!-- 固定电源合同卡片。 -->
+            <Border Background="#0A1110" BorderBrush="#16483A" BorderThickness="1" CornerRadius="14" Padding="20" Margin="0,18,0,0">
+                <!-- 电源说明允许换行。 -->
+                <TextBlock Text="{Binding PowerContract}" Foreground="{StaticResource AccentBrush}" TextWrapping="Wrap" FontSize="15" />
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

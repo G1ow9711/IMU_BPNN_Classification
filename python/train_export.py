@@ -3548,38 +3548,67 @@ def export_esp32_header(
     rest_threshold = float(result.get("rest_threshold", 0.03))
     active_point_threshold = float(result.get("active_point_threshold", 0.02))
 
+    # lines 按最终 C 头文件顺序保存保护宏、依赖、维度、阈值、数组和运行时函数。
     lines = [
+        "/* 本文件由 Python 导出器生成；维度、阈值和算法顺序必须与训练端保持一致。 */",
+        "/* 头文件保护宏避免同一编译单元重复包含时产生类型或函数重定义。 */",
         "#ifndef ESP32_BP_MODEL_H",
         "#define ESP32_BP_MODEL_H",
         "",
+        "/* math.h 提供 sqrtf、fabsf、cosf、sinf、logf、floorf、expf 和 isfinite。 */",
         "#include <math.h>",
+        "/* stdint.h 提供动作段累计器使用的 uint32_t 与 UINT32_MAX。 */",
         "#include <stdint.h>",
         "",
+        "/* WINDOW_LEN 是单次推理窗口采样点数；62 点在 25 Hz 下对应 2.48 秒。 */",
         f"#define WINDOW_LEN {window_len}",
+        "/* AXIS_NUM 固定为六轴，索引顺序必须为 gx、gy、gz、ax、ay、az。 */",
         "#define AXIS_NUM 6",
+        "/* SAMPLE_RATE_HZ 是六轴同步采样率，单位 Hz。 */",
         f"#define SAMPLE_RATE_HZ {SAMPLE_RATE}",
+        "/* FEATURE_DIM 是 extract_features_from_window 输出的 float 特征数量。 */",
         f"#define FEATURE_DIM {len(feature_names)}",
+        "/* CLASS_NUM 是分类输出数量，索引顺序由训练工件 class_names 固定。 */",
         f"#define CLASS_NUM {len(class_names)}",
+        "/* SUPPRESS_NORMALIZED_PHASE 为一时把标准化后 184:232 特征固定为训练均值。 */",
         f"#define SUPPRESS_NORMALIZED_PHASE {1 if suppress_normalized_phase else 0}",
+        "/* NORMALIZED_PHASE_MODEL_START 是归一化四阶段组的半开起始索引。 */",
         f"#define NORMALIZED_PHASE_MODEL_START {NORMALIZED_PHASE_MODEL_START}",
+        "/* NORMALIZED_PHASE_MODEL_END 是归一化四阶段组的半开结束索引。 */",
         f"#define NORMALIZED_PHASE_MODEL_END {NORMALIZED_PHASE_MODEL_END}",
+        "/* HAS_FAMILY_SPECIALIST 标记旧平铺模型是否附带动作族专家；最终双 M0 特征头为零。 */",
         f"#define HAS_FAMILY_SPECIALIST {1 if has_specialist else 0}",
+        "/* SPECIALIST_CLASS_NUM 是可选专家输出类别数；未启用时为零。 */",
         f"#define SPECIALIST_CLASS_NUM {len(specialist_names) if has_specialist else 0}",
+        "/* SPECIALIST_FEATURE_DIM 是可选专家选取的原始特征数量；未启用时为零。 */",
         f"#define SPECIALIST_FEATURE_DIM {specialist_feature_dim}",
+        "/* HIDDEN1 是旧平铺 BP 第一隐藏层宽度，仅兼容历史单模型导出。 */",
         f"#define HIDDEN1 {HIDDEN1}",
+        "/* HIDDEN2 是旧平铺 BP 第二隐藏层宽度，仅兼容历史单模型导出。 */",
         f"#define HIDDEN2 {HIDDEN2}",
+        "/* HIDDEN3 是旧平铺 BP 第三隐藏层宽度，仅兼容历史单模型导出。 */",
         f"#define HIDDEN3 {HIDDEN3}",
+        "/* PHASE_SEGMENTS 把关键序列等分为四段，用于动作相位统计。 */",
         f"#define PHASE_SEGMENTS {PHASE_SEGMENTS}",
+        "/* TEMPORAL_LOGIT_HISTORY 是兼容的固定历史平滑槽数；最终主路径使用动作段累计。 */",
         f"#define TEMPORAL_LOGIT_HISTORY {TEMPORAL_LOGIT_HISTORY}",
+        "/* 基础 M0 融合权重由开发验证集锁定，部署端不得再次调参。 */",
         f"#define ENSEMBLE_BASE_LOGIT_WEIGHT {c_float(ENSEMBLE_BASE_LOGIT_WEIGHT)}",
+        "/* 掩码 M0 融合权重与基础权重之和为一。 */",
         f"#define ENSEMBLE_MASKED_LOGIT_WEIGHT {c_float(ENSEMBLE_MASKED_LOGIT_WEIGHT)}",
         "",
+        "/* REST_MOTION_THRESHOLD 是训练角色静坐窗口估计的无量纲静止门槛。 */",
         f"static const float REST_MOTION_THRESHOLD = {c_float(rest_threshold)};",
+        "/* ACTIVE_POINT_THRESHOLD 是逐采样活动分数门槛，活动分数无量纲。 */",
         f"static const float ACTIVE_POINT_THRESHOLD = {c_float(active_point_threshold)};",
+        "/* HIGH_DYNAMIC_MIN_RATIO 要求高动态动作窗口至少 20% 采样点处于活动状态。 */",
         "static const float HIGH_DYNAMIC_MIN_RATIO = 0.2f;",
+        "/* 陀螺单轴孤立尖峰阈值，单位 deg/s。 */",
         f"static const float PREPROCESS_GYRO_SPIKE_THRESHOLD_DPS = {c_float(PREPROCESS_GYRO_SPIKE_THRESHOLD_DPS)};",
+        "/* 加速度计单轴孤立尖峰阈值，单位 g。 */",
         f"static const float PREPROCESS_ACC_SPIKE_THRESHOLD_G = {c_float(PREPROCESS_ACC_SPIKE_THRESHOLD_G)};",
         "",
+        "/* CLASS_NAMES 把 0..CLASS_NUM-1 输出索引映射到固定英文动作标识。 */",
         "static const char* CLASS_NAMES[CLASS_NUM] = { "
         + ", ".join(c_string(name) for name in class_names)
         + " };",
@@ -3840,247 +3869,483 @@ static inline void preprocess_imu_window(
     }
 }
 
+/*
+ * 追加一条等间隔序列的八项基础统计：均值、总体标准差、最小值、最大值、RMS、
+ * 平均绝对一阶差、围绕均值的过零率和一阶差总体标准差。
+ * x 长度为 n，输入单位可为 deg/s、g 或其采样差；feature 形状为 [FEATURE_DIM]，idx 指向下一写入索引。
+ * 要求 n>=2 且指针有效；时间复杂度 O(n)，额外空间 O(1)，公式见 docs/算法文档.md 第 7.2 节。
+ */
 static inline void append_series_features(const float* x, int n, float* feature, int* idx) {
+    /* sum 累计输入一阶矩，单位继承 x。 */
     float sum = 0.0f;
+    /* sum2 累计输入平方和，用于 RMS，单位为 x 的平方。 */
     float sum2 = 0.0f;
+    /* min_v 从首样本开始维护最小值，避免依赖固定量程哨兵。 */
     float min_v = x[0];
+    /* max_v 从首样本开始维护最大值。 */
     float max_v = x[0];
+    /* 第一遍遍历 n 个样本，累计一阶矩、平方和与范围。 */
     for (int i = 0; i < n; i++) {
+        /* v 是当前输入样本，物理单位继承 x。 */
         float v = x[i];
+        /* 累加原始值供均值计算。 */
         sum += v;
+        /* 累加平方值供均方根计算。 */
         sum2 += v * v;
+        /* 当前样本更小时更新最小值。 */
         if (v < min_v) min_v = v;
+        /* 当前样本更大时更新最大值。 */
         if (v > max_v) max_v = v;
     }
+    /* mean 是总体均值，单位继承 x。 */
     float mean = sum / (float)n;
+    /* energy 是均方值 E[x^2]，开方后得到 RMS。 */
     float energy = sum2 / (float)n;
-    float var = energy - mean * mean;
+    /* variance_sum 采用与 NumPy std 更接近的两遍中心差平方和，避免大均值下 E[x^2]-E[x]^2 消减。 */
+    float variance_sum = 0.0f;
+    /* 第二遍只累计围绕已知均值的平方差，输入单位平方。 */
+    for (int i = 0; i < n; i++) {
+        /* centered 是当前值到总体均值的有符号偏差。 */
+        float centered = x[i] - mean;
+        /* 累计总体方差分子；n 最多 62，float32 不会溢出正常 IMU 范围。 */
+        variance_sum += centered * centered;
+    }
+    /* 除以 n 得到与 np.std 默认 ddof=0 一致的总体方差。 */
+    float var = variance_sum / (float)n;
+    /* 理论方差非负；夹紧负零附近舍入误差，保护 sqrtf。 */
     if (var < 0.0f) var = 0.0f;
+    /* std 是输入序列总体标准差，单位继承 x。 */
     float std = sqrtf(var);
+    /* mean_abs_diff 累计相邻绝对差，描述平均变化速度。 */
     float mean_abs_diff = 0.0f;
+    /* diff_sum 累计一阶差，用于差分均值。 */
     float diff_sum = 0.0f;
+    /* diff_sum2 累计一阶差平方，用于差分方差。 */
     float diff_sum2 = 0.0f;
+    /* zcr_count 先累计穿过全窗均值的相邻点对数量。 */
     float zcr_count = 0.0f;
+    /* 从第二个样本开始遍历全部 n-1 个相邻差。 */
     for (int i = 1; i < n; i++) {
+        /* diff 是当前样本减前一样本的一阶差。 */
         float diff = x[i] - x[i - 1];
+        /* 累加相邻绝对差。 */
         mean_abs_diff += fabsf(diff);
+        /* 累加有符号差分。 */
         diff_sum += diff;
+        /* 累加差分平方。 */
         diff_sum2 += diff * diff;
+        /* a 是前一样本相对全窗均值的偏差。 */
         float a = x[i - 1] - mean;
+        /* b 是当前样本相对全窗均值的偏差。 */
         float b = x[i] - mean;
+        /* 符号乘积为负表示相邻样本严格穿过均值，累计一次。 */
         if (a * b < 0.0f) zcr_count += 1.0f;
     }
+    /* std_diff 默认零；n<=1 时不存在有效差分。 */
     float std_diff = 0.0f;
+    /* 只有至少两个采样点时才把差分累计量转换为统计量。 */
     if (n > 1) {
+        /* 除以相邻点对数得到平均绝对差。 */
         mean_abs_diff = mean_abs_diff / (float)(n - 1);
+        /* mean_diff 是一阶差总体均值。 */
         float mean_diff = diff_sum / (float)(n - 1);
+        /* diff_var 使用 E[d^2]-E[d]^2，与 Python 差分总体方差合同一致。 */
         float diff_var = diff_sum2 / (float)(n - 1) - mean_diff * mean_diff;
+        /* 浮点消减出现微小负值时夹紧到零。 */
         if (diff_var < 0.0f) diff_var = 0.0f;
+        /* 开方得到一阶差总体标准差。 */
         std_diff = sqrtf(diff_var);
+        /* 把过零计数归一化为 [0,1] 比例。 */
         zcr_count = zcr_count / (float)(n - 1);
     }
+    /* 按 Python build_feature_names 固定顺序追加均值。 */
     feature[(*idx)++] = mean;
+    /* 追加总体标准差。 */
     feature[(*idx)++] = std;
+    /* 追加最小值。 */
     feature[(*idx)++] = min_v;
+    /* 追加最大值。 */
     feature[(*idx)++] = max_v;
+    /* 追加 RMS；energy 非负。 */
     feature[(*idx)++] = sqrtf(energy);
+    /* 追加平均绝对一阶差。 */
     feature[(*idx)++] = mean_abs_diff;
+    /* 追加围绕全窗均值的过零比例。 */
     feature[(*idx)++] = zcr_count;
+    /* 追加一阶差总体标准差，完成八项输出。 */
     feature[(*idx)++] = std_diff;
 }
 
+/*
+ * 把长度 n 的序列等分为四个时间相位，并为每段追加均值、总体标准差和最大绝对值。
+ * 输入单位继承 x，输出 12 项保持对应物理单位；时间复杂度 O(n)，额外空间 O(1)。
+ */
 static inline void append_phase_features(const float* x, int n, float* feature, int* idx) {
+    /* 依次处理 0..PHASE_SEGMENTS-1，整数边界覆盖全部 n 个样本且不重叠。 */
     for (int phase = 0; phase < PHASE_SEGMENTS; phase++) {
+        /* start 是当前半开区间起点。 */
         int start = (phase * n) / PHASE_SEGMENTS;
+        /* end 是当前半开区间终点。 */
         int end = ((phase + 1) * n) / PHASE_SEGMENTS;
+        /* 极短输入发生空段时至少保留一个采样点。 */
         if (end <= start) end = start + 1;
+        /* 末段边界不得超过输入长度。 */
         if (end > n) end = n;
+        /* sum 累计当前相位样本，用于均值。 */
         float sum = 0.0f;
-        float sum2 = 0.0f;
+        /* max_abs 保存当前相位最大绝对幅值。 */
         float max_abs = 0.0f;
+        /* 第一遍处理当前相位的全部样本。 */
         for (int i = start; i < end; i++) {
+            /* value 是当前相位样本，单位继承 x。 */
             float value = x[i];
+            /* 累加样本值。 */
             sum += value;
-            sum2 += value * value;
+            /* abs_value 用于与当前最大绝对值比较。 */
             float abs_value = fabsf(value);
+            /* 发现更大绝对幅值时更新。 */
             if (abs_value > max_abs) max_abs = abs_value;
         }
+        /* count 是当前相位实际样本数，经过边界保护后至少为一。 */
         int count = end - start;
+        /* mean 是相位均值。 */
         float mean = sum / (float)count;
-        float variance = sum2 / (float)count - mean * mean;
+        /* variance_sum 使用两遍中心差平方和，降低大幅角速度相位段的消减误差。 */
+        float variance_sum = 0.0f;
+        /* 再遍历当前相位段，计算相对已知均值的平方偏差。 */
+        for (int i = start; i < end; i++) {
+            /* centered 单位与原序列一致。 */
+            float centered = x[i] - mean;
+            /* 累计总体方差分子。 */
+            variance_sum += centered * centered;
+        }
+        /* ddof=0 与 Python np.std 保持一致。 */
+        float variance = variance_sum / (float)count;
+        /* 理论方差非负；夹紧舍入产生的微小负值。 */
         if (variance < 0.0f) variance = 0.0f;
+        /* 按均值、标准差、最大绝对值固定顺序追加。 */
         feature[(*idx)++] = mean;
+        /* 追加相位总体标准差。 */
         feature[(*idx)++] = sqrtf(variance);
+        /* 追加相位最大绝对幅值。 */
         feature[(*idx)++] = max_abs;
     }
 }
 
+/*
+ * 先在全窗执行 z=(x-mean)/std，再对无量纲序列追加四相位统计。
+ * std<=1e-6 时全部标准分取零，防止除零；时间复杂度 O(n)，额外空间 WINDOW_LEN 个 float。
+ */
 static inline void append_normalized_phase_features(const float* x, int n, float* feature, int* idx) {
+    /* sum 累计原序列一阶矩。 */
     float sum = 0.0f;
+    /* sum2 累计原序列平方和。 */
     float sum2 = 0.0f;
+    /* normalized 保存最多 WINDOW_LEN 个无量纲标准分。 */
     float normalized[WINDOW_LEN];
+    /* 遍历输入并累计均值与方差所需统计量。 */
     for (int i = 0; i < n; i++) {
+        /* 累加当前原始值。 */
         sum += x[i];
+        /* 累加当前原始值平方。 */
         sum2 += x[i] * x[i];
     }
+    /* mean 是全窗均值，单位继承 x。 */
     float mean = sum / (float)n;
+    /* variance 是总体方差，单位为输入单位平方。 */
     float variance = sum2 / (float)n - mean * mean;
+    /* 夹紧浮点消减导致的负值。 */
     if (variance < 0.0f) variance = 0.0f;
+    /* std 是全窗总体标准差。 */
     float std = sqrtf(variance);
+    /* 逐点生成无量纲标准分；近常量序列统一置零。 */
     for (int i = 0; i < n; i++) {
+        /* 三元表达式阻止 std 近零时出现 NaN 或无穷值。 */
         normalized[i] = std > 1e-6f ? (x[i] - mean) / std : 0.0f;
     }
+    /* 复用相位统计函数追加 12 项无量纲特征。 */
     append_phase_features(normalized, n, feature, idx);
 }
 
+/*
+ * 追加 10/25/50/75/90 百分位、偏度、超额峰度和最大相邻跳变共八项冲击分布特征。
+ * 输入 x 长度为 n 且 n<=WINDOW_LEN；分位数使用最近位置规则，时间最坏 O(n^2)，空间 O(n)。
+ * 偏度和峰度无量纲，分位数与最大跳变单位继承 x；公式见 docs/算法文档.md 第 7.6 节。
+ */
 static inline void append_impact_distribution_features(const float* x, int n, float* feature, int* idx) {
+    /* ordered 保存输入副本并就地插入排序，不修改调用者序列。 */
     float ordered[WINDOW_LEN];
+    /* sum 累计一阶矩。 */
     float sum = 0.0f;
+    /* sum2 累计平方和。 */
     float sum2 = 0.0f;
+    /* max_abs_diff 保存相邻采样最大绝对跳变。 */
     float max_abs_diff = 0.0f;
+    /* 复制 n 个输入并收集矩与跳变统计。 */
     for (int i = 0; i < n; i++) {
+        /* 保存当前输入供后续排序。 */
         ordered[i] = x[i];
+        /* 累加当前输入。 */
         sum += x[i];
+        /* 累加当前输入平方。 */
         sum2 += x[i] * x[i];
+        /* 首点没有前驱，从第二点开始计算相邻差。 */
         if (i > 0) {
+            /* abs_diff 是当前点与前一点的绝对变化。 */
             float abs_diff = fabsf(x[i] - x[i - 1]);
+            /* 更大跳变出现时更新最大值。 */
             if (abs_diff > max_abs_diff) max_abs_diff = abs_diff;
         }
     }
+    /* 插入排序从第二个元素开始，固定小窗无需动态内存。 */
     for (int i = 1; i < n; i++) {
+        /* value 保存当前待插入值。 */
         float value = ordered[i];
+        /* j 从已排序前缀末端向前寻找位置。 */
         int j = i - 1;
+        /* 大于 value 的元素依次右移。 */
         while (j >= 0 && ordered[j] > value) {
+            /* 当前较大元素右移一格。 */
             ordered[j + 1] = ordered[j];
+            /* 继续检查更前元素。 */
             j--;
         }
+        /* 把 value 写入最终有序位置。 */
         ordered[j + 1] = value;
     }
+    /* fractions 固定五个百分位，顺序必须与 Python 特征名一致。 */
     const float fractions[5] = { 0.10f, 0.25f, 0.50f, 0.75f, 0.90f };
+    /* 逐百分位按 floor(q*(n-1)+0.5) 选取最近秩位置。 */
     for (int q = 0; q < 5; q++) {
+        /* position 经过 q 范围保护后位于 0..n-1。 */
         int position = (int)floorf(fractions[q] * (float)(n - 1) + 0.5f);
+        /* 追加当前百分位值。 */
         feature[(*idx)++] = ordered[position];
     }
+    /* mean 是原序列总体均值。 */
     float mean = sum / (float)n;
+    /* variance 使用总体二阶矩计算。 */
     float variance = sum2 / (float)n - mean * mean;
+    /* 夹紧浮点消减造成的微小负值。 */
     if (variance < 0.0f) variance = 0.0f;
+    /* std 是总体标准差。 */
     float std = sqrtf(variance);
+    /* skew 默认零，近常量序列没有稳定偏度。 */
     float skew = 0.0f;
+    /* kurtosis 默认零，近常量序列没有稳定峰度。 */
     float kurtosis = 0.0f;
+    /* 只有标准差大于 1e-6 才执行高阶标准化，避免除零放大噪声。 */
     if (std > 1e-6f) {
+        /* 遍历全部样本累计标准分三次方和四次方。 */
         for (int i = 0; i < n; i++) {
+            /* z 是当前样本无量纲标准分。 */
             float z = (x[i] - mean) / std;
+            /* z2 复用平方，减少乘法。 */
             float z2 = z * z;
+            /* 累计三阶标准矩。 */
             skew += z2 * z;
+            /* 累计四阶标准矩。 */
             kurtosis += z2 * z2;
         }
+        /* 除以 n 得到总体偏度。 */
         skew /= (float)n;
+        /* 四阶总体标准矩减三得到超额峰度。 */
         kurtosis = kurtosis / (float)n - 3.0f;
     }
+    /* 追加无量纲偏度。 */
     feature[(*idx)++] = skew;
+    /* 追加无量纲超额峰度。 */
     feature[(*idx)++] = kurtosis;
+    /* 追加最大相邻绝对跳变，完成八项输出。 */
     feature[(*idx)++] = max_abs_diff;
 }
 
+/*
+ * 追加高活动比例、峰密度、主频、归一化谱熵、最强自相关和对应延迟六项时序特征。
+ * 输入长度 n<=WINDOW_LEN，采样率 SAMPLE_RATE_HZ；频率单位 Hz，其余输出无量纲或秒。
+ * 直接 DFT 与自相关使时间复杂度为 O(n^2)，额外空间 O(n)；近常量序列返回确定性零。
+ */
 static inline void append_temporal_features(const float* x, int n, float* feature, int* idx) {
+    /* sum 累计序列一阶矩。 */
     float sum = 0.0f;
+    /* sum2 累计序列平方和。 */
     float sum2 = 0.0f;
+    /* 遍历全部输入样本收集总体统计量。 */
     for (int i = 0; i < n; i++) {
+        /* 累加当前样本。 */
         sum += x[i];
+        /* 累加当前样本平方。 */
         sum2 += x[i] * x[i];
     }
+    /* mean 是全窗总体均值。 */
     float mean = sum / (float)n;
+    /* variance 是总体方差。 */
     float variance = sum2 / (float)n - mean * mean;
+    /* 夹紧舍入产生的微小负值，保护平方根。 */
     if (variance < 0.0f) variance = 0.0f;
+    /* std 是总体标准差。 */
     float std = sqrtf(variance);
+    /* high_count 统计偏离均值超过一个标准差的活动点。 */
     int high_count = 0;
+    /* peak_count 统计显著绝对局部峰。 */
     int peak_count = 0;
+    /* 遍历每个样本计算活动量，并在有双邻点时检测峰。 */
     for (int i = 0; i < n; i++) {
+        /* activity 是当前样本相对均值的绝对偏差。 */
         float activity = fabsf(x[i] - mean);
+        /* 非常量序列中，超过一倍标准差视为高活动点。 */
         if (std > 1e-6f && activity > std) high_count++;
+        /* 局部峰必须有前后邻点且序列方差有效。 */
         if (i > 0 && i < n - 1 && std > 1e-6f) {
+            /* previous 是前一样本相对均值的绝对偏差。 */
             float previous = fabsf(x[i - 1] - mean);
+            /* next 是后一样本相对均值的绝对偏差。 */
             float next = fabsf(x[i + 1] - mean);
+            /* 当前严格高于前点、不低于后点且超过标准差时累计显著峰。 */
             if (activity > previous && activity >= next && activity > std) peak_count++;
         }
     }
 
+    /* frequency_bin_count 是不含直流的单边频点数。 */
     int frequency_bin_count = n / 2;
+    /* spectral_power 保存频点 1..n/2 的功率，最大长度 WINDOW_LEN/2+1。 */
     float spectral_power[WINDOW_LEN / 2 + 1];
+    /* total_power 累计全部非直流频点功率。 */
     float total_power = 0.0f;
+    /* dominant_power 从负值开始，确保首个频点可成为主频。 */
     float dominant_power = -1.0f;
+    /* dominant_bin 保存最强功率频点索引。 */
     int dominant_bin = 0;
+    /* two_pi 是直接 DFT 相位使用的 2*pi 单精度常量。 */
     const float two_pi = 6.2831853071795864769f;
+    /* 遍历不含直流的单边频点并计算去均值 DFT。 */
     for (int k = 1; k <= frequency_bin_count; k++) {
+        /* real 累加当前频点实部。 */
         float real = 0.0f;
+        /* imaginary 累加当前频点虚部。 */
         float imaginary = 0.0f;
+        /* 遍历 n 个时域样本执行直接 DFT。 */
         for (int sample = 0; sample < n; sample++) {
+            /* centered 去除直流均值，单位继承输入。 */
             float centered = x[sample] - mean;
+            /* angle 是当前频点与采样位置的相位，单位 rad。 */
             float angle = two_pi * (float)k * (float)sample / (float)n;
+            /* 累加余弦实部。 */
             real += centered * cosf(angle);
+            /* 使用负正弦约定累加虚部。 */
             imaginary -= centered * sinf(angle);
         }
+        /* power 是当前频点幅值平方。 */
         float power = real * real + imaginary * imaginary;
+        /* 数组索引 k-1 对应频点 k。 */
         spectral_power[k - 1] = power;
+        /* 累加非直流总功率。 */
         total_power += power;
+        /* 严格更大时更新主频，平局保留较低频点。 */
         if (power > dominant_power) {
+            /* 保存新的最大功率。 */
             dominant_power = power;
+            /* 保存新的主频索引。 */
             dominant_bin = k;
         }
     }
+    /* dominant_frequency_hz 默认零，覆盖无有效频谱场景。 */
     float dominant_frequency_hz = 0.0f;
+    /* spectral_entropy 默认零，覆盖无功率或单频点场景。 */
     float spectral_entropy = 0.0f;
+    /* 总功率有效且至少一个频点时才计算频率与熵。 */
     if (total_power > 1e-12f && frequency_bin_count > 0) {
+        /* k*fs/n 把主频索引换算为 Hz。 */
         dominant_frequency_hz = (float)dominant_bin * (float)SAMPLE_RATE_HZ / (float)n;
+        /* 至少两个频点才能用 log(K) 归一化谱熵。 */
         if (frequency_bin_count > 1) {
+            /* 遍历全部单边非直流频点。 */
             for (int k = 0; k < frequency_bin_count; k++) {
+                /* probability 是当前频点功率占总功率比例。 */
                 float probability = spectral_power[k] / total_power;
+                /* 零概率项按极限 p*log(p)=0 跳过。 */
                 if (probability > 0.0f) {
+                    /* 累加 Shannon 熵的负 p*ln(p)。 */
                     spectral_entropy -= probability * logf(probability);
                 }
             }
+            /* 除以 ln(K) 把谱熵归一化到 [0,1]。 */
             spectral_entropy /= logf((float)frequency_bin_count);
         }
     }
 
+    /* lag_start 是 0.15 秒换算并四舍五入后的最小自相关延迟。 */
     int lag_start = (int)(0.15f * (float)SAMPLE_RATE_HZ + 0.5f);
+    /* 延迟至少为一个样本，禁止零延迟恒等峰。 */
     if (lag_start < 1) lag_start = 1;
+    /* 极短输入时把起点夹到最后有效延迟。 */
     if (lag_start > n - 1) lag_start = n - 1;
+    /* lag_end 初始取半窗，避免过少重叠样本。 */
     int lag_end = n / 2;
+    /* max_lag 是 1.20 秒对应的最大采样延迟。 */
     int max_lag = (int)(1.20f * (float)SAMPLE_RATE_HZ + 0.5f);
+    /* 搜索终点不超过 1.20 秒。 */
     if (lag_end > max_lag) lag_end = max_lag;
+    /* autocorr_peak 默认零，覆盖近常量序列。 */
     float autocorr_peak = 0.0f;
+    /* autocorr_peak_lag 默认零，对应零秒输出。 */
     int autocorr_peak_lag = 0;
+    /* 标准差有效且延迟区间非空时搜索最强归一化自相关。 */
     if (std > 1e-6f && lag_end >= lag_start) {
+        /* best_correlation 从 -1 开始，保证首个合法相关可更新。 */
         float best_correlation = -1.0f;
+        /* best_lag 默认最小延迟。 */
         int best_lag = lag_start;
+        /* 逐延迟遍历 0.15..1.20 秒候选。 */
         for (int lag = lag_start; lag <= lag_end; lag++) {
+            /* dot 累计两个去均值重叠片段点积。 */
             float dot = 0.0f;
+            /* left_energy 累计左片段平方和。 */
             float left_energy = 0.0f;
+            /* right_energy 累计右片段平方和。 */
             float right_energy = 0.0f;
+            /* 遍历当前延迟下 n-lag 个重叠样本。 */
             for (int i = 0; i < n - lag; i++) {
+                /* left 是当前左样本去均值值。 */
                 float left = x[i] - mean;
+                /* right 是向后 lag 样本的去均值值。 */
                 float right = x[i + lag] - mean;
+                /* 累加点积。 */
                 dot += left * right;
+                /* 累加左片段能量。 */
                 left_energy += left * left;
+                /* 累加右片段能量。 */
                 right_energy += right * right;
             }
+            /* denominator 是两个重叠片段 L2 范数乘积。 */
             float denominator = sqrtf(left_energy * right_energy);
+            /* 分母近零时相关定义为零，避免除零。 */
             float correlation = denominator > 1e-12f ? dot / denominator : 0.0f;
+            /* 严格更大时更新，平局保留较早延迟。 */
             if (correlation > best_correlation) {
+                /* 保存当前最大相关。 */
                 best_correlation = correlation;
+                /* 保存对应采样延迟。 */
                 best_lag = lag;
             }
         }
+        /* 输出最强归一化相关，理论范围接近 [-1,1]。 */
         autocorr_peak = best_correlation;
+        /* 输出最强相关的采样延迟。 */
         autocorr_peak_lag = best_lag;
     }
 
+    /* 追加高活动点比例；近常量序列定义为零。 */
     feature[(*idx)++] = std > 1e-6f ? (float)high_count / (float)n : 0.0f;
+    /* 追加显著峰数量除以序列长度得到的峰密度。 */
     feature[(*idx)++] = (float)peak_count / (float)n;
+    /* 追加主频，单位 Hz。 */
     feature[(*idx)++] = dominant_frequency_hz;
+    /* 追加归一化谱熵。 */
     feature[(*idx)++] = spectral_entropy;
+    /* 追加最强归一化自相关。 */
     feature[(*idx)++] = autocorr_peak;
+    /* 把采样延迟除以采样率换算为秒并追加。 */
     feature[(*idx)++] = (float)autocorr_peak_lag / (float)SAMPLE_RATE_HZ;
 }
 
@@ -4291,62 +4556,110 @@ static inline void free_flight_features_from_window(
     *longest_ratio = (float)longest_run / (float)WINDOW_LEN;
 }
 
+/*
+ * 返回去均值自相关第一次不大于零的延迟秒数，用于描述动作由同相转为反相的时间尺度。
+ * x 长度为 n，输入单位在点积符号判断中抵消；最多搜索 min(n/2,3 秒)，时间 O(n^2)、空间 O(1)。
+ */
 static inline float autocorr_first_zero_seconds(const float* x, int n) {
+    /* mean 累加全窗均值，单位继承 x。 */
     float mean = 0.0f;
+    /* 遍历 n 个样本累计输入值。 */
     for (int i = 0; i < n; i++) mean += x[i];
+    /* 除以 n 得到总体均值。 */
     mean /= (float)n;
+    /* energy 保存零延迟去均值能量 C(0)。 */
     float energy = 0.0f;
+    /* 遍历全窗累计中心差平方。 */
     for (int i = 0; i < n; i++) {
+        /* centered 是当前样本到均值的偏差。 */
         float centered = x[i] - mean;
+        /* 累加去均值能量。 */
         energy += centered * centered;
     }
+    /* 近常量输入没有可信零交叉，返回确定性零秒。 */
     if (energy <= 1e-12f) return 0.0f;
+    /* max_lag 初始为半窗，保证每个相关至少有半数样本重叠。 */
     int max_lag = n / 2;
+    /* three_seconds 是三秒对应的采样点数。 */
     int three_seconds = 3 * SAMPLE_RATE_HZ;
+    /* 搜索不超过三秒。 */
     if (max_lag > three_seconds) max_lag = three_seconds;
+    /* 从一个采样延迟开始，依次寻找首个非正自相关。 */
     for (int lag = 1; lag <= max_lag; lag++) {
+        /* dot 累计当前延迟下去均值重叠片段点积。 */
         float dot = 0.0f;
+        /* 当前延迟有 n-lag 对重叠样本。 */
         for (int i = 0; i < n - lag; i++) {
+            /* 累加 C(lag)，这里只需符号而无需归一化。 */
             dot += (x[i] - mean) * (x[i + lag] - mean);
         }
+        /* 首次到达非正相关时把采样延迟换算为秒返回。 */
         if (dot <= 0.0f) return (float)lag / (float)SAMPLE_RATE_HZ;
     }
+    /* 搜索范围内始终为正时返回最大已检查延迟秒数。 */
     return (float)max_lag / (float)SAMPLE_RATE_HZ;
 }
 
+/*
+ * 返回去均值归一化自相关中阈值不低于 0.20 的最强次峰。
+ * 输出无量纲，近常量或无显著峰时为零；搜索至 min(n/2,3 秒)，时间 O(n^2)、空间 O(n)。
+ */
 static inline float autocorr_secondary_peak(const float* x, int n) {
+    /* mean 累加序列均值。 */
     float mean = 0.0f;
+    /* 遍历全部输入累计一阶矩。 */
     for (int i = 0; i < n; i++) mean += x[i];
+    /* 除以 n 得到总体均值。 */
     mean /= (float)n;
+    /* energy 保存 C(0) 去均值能量。 */
     float energy = 0.0f;
+    /* 遍历全窗累计去均值平方和。 */
     for (int i = 0; i < n; i++) {
+        /* centered 是当前中心化样本。 */
         float centered = x[i] - mean;
+        /* 累加零延迟能量。 */
         energy += centered * centered;
     }
+    /* 近常量序列没有可信相关峰，返回零。 */
     if (energy <= 1e-12f) return 0.0f;
+    /* max_lag 初始取半窗。 */
     int max_lag = n / 2;
+    /* three_seconds 限制最大物理延迟。 */
     int three_seconds = 3 * SAMPLE_RATE_HZ;
+    /* 搜索范围不超过三秒。 */
     if (max_lag > three_seconds) max_lag = three_seconds;
+    /* autocorr 保存延迟 1..max_lag 的归一化相关，容量覆盖半窗。 */
     float autocorr[WINDOW_LEN / 2];
+    /* 逐延迟计算 C(lag)/C(0)。 */
     for (int lag = 1; lag <= max_lag; lag++) {
+        /* dot 累计当前延迟重叠片段点积。 */
         float dot = 0.0f;
+        /* 遍历 n-lag 对重叠中心化样本。 */
         for (int i = 0; i < n - lag; i++) {
+            /* 累加未归一化自相关。 */
             dot += (x[i] - mean) * (x[i + lag] - mean);
         }
+        /* 除以零延迟能量，保存无量纲相关。 */
         autocorr[lag - 1] = dot / energy;
     }
+    /* secondary_peak 默认零，表示没有满足阈值的局部峰。 */
     float secondary_peak = 0.0f;
+    /* 跳过首尾相关项，只检查同时具有左右邻点的候选。 */
     for (int i = 1; i < max_lag - 1; i++) {
+        /* value 是当前候选归一化相关。 */
         float value = autocorr[i];
+        /* 当前项需严格高于左侧、不低于右侧、达到 0.20 且超过历史最优。 */
         if (
             value > autocorr[i - 1] &&
             value >= autocorr[i + 1] &&
             value >= 0.20f &&
             value > secondary_peak
         ) {
+            /* 保存当前最强显著次峰。 */
             secondary_peak = value;
         }
     }
+    /* 返回无量纲最强次峰。 */
     return secondary_peak;
 }
 
@@ -4550,26 +4863,49 @@ static inline void positive_peak_shape_features(
         : 0.0f;
 }
 
+/*
+ * 计算两条等长序列的零延迟 Pearson 相关系数。
+ * left/right 长度均为 n，物理单位在归一化中抵消；输出近似 [-1,1]，常量输入返回零。
+ * 时间复杂度 O(n)，额外空间 O(1)。
+ */
 static inline float series_correlation(const float* left, const float* right, int n) {
+    /* left_mean 累加左序列均值。 */
     float left_mean = 0.0f;
+    /* right_mean 累加右序列均值。 */
     float right_mean = 0.0f;
+    /* 一次遍历同时累计两条序列。 */
     for (int i = 0; i < n; i++) {
+        /* 累加左序列当前样本。 */
         left_mean += left[i];
+        /* 累加右序列当前样本。 */
         right_mean += right[i];
     }
+    /* 除以 n 得到左序列总体均值。 */
     left_mean /= (float)n;
+    /* 除以 n 得到右序列总体均值。 */
     right_mean /= (float)n;
+    /* dot 累计两条中心化序列点积。 */
     float dot = 0.0f;
+    /* left_energy 累计左中心化能量。 */
     float left_energy = 0.0f;
+    /* right_energy 累计右中心化能量。 */
     float right_energy = 0.0f;
+    /* 第二遍处理全部配对样本。 */
     for (int i = 0; i < n; i++) {
+        /* a 是左序列当前中心化样本。 */
         float a = left[i] - left_mean;
+        /* b 是右序列当前中心化样本。 */
         float b = right[i] - right_mean;
+        /* 累加中心化点积。 */
         dot += a * b;
+        /* 累加左平方和。 */
         left_energy += a * a;
+        /* 累加右平方和。 */
         right_energy += b * b;
     }
+    /* denominator 是两个 L2 范数乘积。 */
     float denominator = sqrtf(left_energy * right_energy);
+    /* 分母有效时返回归一化相关，否则常量序列定义为零。 */
     return denominator > 1e-12f ? dot / denominator : 0.0f;
 }
 
@@ -4641,59 +4977,103 @@ static inline float max_cross_correlation(const float* left, const float* right,
     return best_correlation;
 }
 
+/*
+ * 计算窗口运动分数 S=std(|a|)+std(|g|)/200，用于静止与动态窗口筛选。
+ * window 形状 [WINDOW_LEN,6]，前三轴 deg/s、后三轴 g；输出无量纲，时间 O(N)、空间 O(1)。
+ */
 static inline float bp_window_motion_score(const float window[WINDOW_LEN][AXIS_NUM]) {
+    /* gyro_sum 累计角速度模长，单位 deg/s。 */
     float gyro_sum = 0.0f;
+    /* gyro_sum2 累计角速度模长平方。 */
     float gyro_sum2 = 0.0f;
+    /* acc_sum 累计加速度模长，单位 g。 */
     float acc_sum = 0.0f;
+    /* acc_sum2 累计加速度模长平方。 */
     float acc_sum2 = 0.0f;
+    /* 遍历完整 62 点窗口，通道顺序固定 gx、gy、gz、ax、ay、az。 */
     for (int i = 0; i < WINDOW_LEN; i++) {
+        /* gyro_mag 是当前三轴角速度欧氏模长，单位 deg/s。 */
         float gyro_mag = sqrtf(
             window[i][0] * window[i][0] +
             window[i][1] * window[i][1] +
             window[i][2] * window[i][2]
         );
+        /* acc_mag 是当前三轴加速度欧氏模长，单位 g。 */
         float acc_mag = sqrtf(
             window[i][3] * window[i][3] +
             window[i][4] * window[i][4] +
             window[i][5] * window[i][5]
         );
+        /* 累加角速度模长。 */
         gyro_sum += gyro_mag;
+        /* 累加角速度模长平方。 */
         gyro_sum2 += gyro_mag * gyro_mag;
+        /* 累加加速度模长。 */
         acc_sum += acc_mag;
+        /* 累加加速度模长平方。 */
         acc_sum2 += acc_mag * acc_mag;
     }
+    /* gyro_mean 是角速度模长总体均值。 */
     float gyro_mean = gyro_sum / (float)WINDOW_LEN;
+    /* acc_mean 是加速度模长总体均值。 */
     float acc_mean = acc_sum / (float)WINDOW_LEN;
+    /* gyro_var 使用总体二阶矩计算角速度模长方差。 */
     float gyro_var = gyro_sum2 / (float)WINDOW_LEN - gyro_mean * gyro_mean;
+    /* acc_var 使用总体二阶矩计算加速度模长方差。 */
     float acc_var = acc_sum2 / (float)WINDOW_LEN - acc_mean * acc_mean;
+    /* 夹紧角速度方差的浮点负零误差。 */
     if (gyro_var < 0.0f) gyro_var = 0.0f;
+    /* 夹紧加速度方差的浮点负零误差。 */
     if (acc_var < 0.0f) acc_var = 0.0f;
+    /* 角速度标准差除以 200 后与加速度标准差相加，返回训练端同公式分数。 */
     return sqrtf(acc_var) + sqrtf(gyro_var) / 200.0f;
 }
 
+/*
+ * 计算逐点活动分数超过 ACTIVE_POINT_THRESHOLD 的采样比例。
+ * 单点分数为相邻加速度差模长加角速度模长/200；输出范围 [0,1]，时间 O(N)、空间 O(1)。
+ */
 static inline float bp_window_active_ratio(const float window[WINDOW_LEN][AXIS_NUM]) {
+    /* active_count 统计判为活动的采样点数量。 */
     int active_count = 0;
+    /* 遍历窗口全部采样点；首点没有加速度前驱，差分取零。 */
     for (int i = 0; i < WINDOW_LEN; i++) {
+        /* gyro_mag 是当前三轴角速度模长，单位 deg/s。 */
         float gyro_mag = sqrtf(
             window[i][0] * window[i][0] +
             window[i][1] * window[i][1] +
             window[i][2] * window[i][2]
         );
+        /* acc_delta 默认零，对应首点没有上一采样。 */
         float acc_delta = 0.0f;
+        /* 第二点起计算相邻三轴加速度差。 */
         if (i > 0) {
+            /* dx 是 ax 当前值减前值，单位 g。 */
             float dx = window[i][3] - window[i - 1][3];
+            /* dy 是 ay 当前值减前值，单位 g。 */
             float dy = window[i][4] - window[i - 1][4];
+            /* dz 是 az 当前值减前值，单位 g。 */
             float dz = window[i][5] - window[i - 1][5];
+            /* acc_delta 是三轴加速度差欧氏模长。 */
             acc_delta = sqrtf(dx * dx + dy * dy + dz * dz);
         }
+        /* 组合分数超过训练端活动阈值时累计一个活动点。 */
         if (acc_delta + gyro_mag / 200.0f > ACTIVE_POINT_THRESHOLD) active_count++;
     }
+    /* 除以固定窗口长度得到 [0,1] 活动比例。 */
     return (float)active_count / (float)WINDOW_LEN;
 }
 
+/*
+ * 判断窗口是否满足高动态跳跃类候选条件：运动分数至少静止阈值 1.25 倍且活动比例不少于 20%。
+ * 返回一表示保留、零表示过滤；时间 O(N)，不修改输入。
+ */
 static inline int bp_window_is_dynamic_candidate(const float window[WINDOW_LEN][AXIS_NUM]) {
+    /* 两个条件必须同时成立，短路求值可在低运动分数时省去活动比例遍历。 */
     return (
+        /* 第一条件拒绝接近静止的窗口。 */
         bp_window_motion_score(window) >= REST_MOTION_THRESHOLD * 1.25f &&
+        /* 第二条件拒绝只有单点毛刺而没有持续活动的窗口。 */
         bp_window_active_ratio(window) >= HIGH_DYNAMIC_MIN_RATIO
     );
 }
@@ -5561,13 +5941,19 @@ static inline void append_additional_wrist_features(
     feature[(*index)++] = harmonic_ratio;
 }
 
+/*
+ * 把一个 [62,6] 手腕 IMU 窗口变换为固定顺序的 297 维 float 特征。
+ * raw_window 通道依次为 gx、gy、gz、ax、ay、az，前三轴 deg/s、后三轴 g；feature 形状 [FEATURE_DIM]。
+ * 函数先修复单轴孤立毛刺，再生成 112+48+24+48+32+33 六组特征；顺序必须与 Python build_feature_names 完全一致。
+ * DFT、自相关和小数组排序使最坏时间复杂度 O(WINDOW_LEN^2)，静态局部数组占用约 4.8 KiB。
+ */
 static inline void extract_features_from_window(const float raw_window[WINDOW_LEN][AXIS_NUM], float feature[FEATURE_DIM]) {
     /* cleaned_window 保存尖峰修复后的 [WINDOW_LEN,6] 六轴数据，约占 WINDOW_LEN*24 字节 RAM。 */
     float cleaned_window[WINDOW_LEN][AXIS_NUM];
     /* 按 Python 相同阈值和单轴判据清洗输入，保证部署端与训练端特征数值一致。 */
     preprocess_imu_window(raw_window, cleaned_window);
-    /* window 指向清洗后数组；后续全部特征函数无需修改参数形式。 */
-    const float (*window)[AXIS_NUM] = cleaned_window;
+    /* C99 对二维数组添加 const 限定不会隐式转换，因此显式转为只读数组指针供全部特征函数使用。 */
+    const float (*window)[AXIS_NUM] = (const float (*)[AXIS_NUM])cleaned_window;
     /* idx 记录下一个待写入特征位置，最终必须等于 FEATURE_DIM。 */
     int idx = 0;
     /* temp 复用为当前一维序列缓冲区，长度上限为 WINDOW_LEN。 */
@@ -5577,199 +5963,291 @@ static inline void extract_features_from_window(const float raw_window[WINDOW_LE
     /* phase_lengths 标记前三条长度为 WINDOW_LEN，差分加速度长度为 WINDOW_LEN-1。 */
     int phase_lengths[4] = { WINDOW_LEN, WINDOW_LEN, WINDOW_LEN, WINDOW_LEN - 1 };
 
-    /* gx, gy, gz, ax, ay, az */
+    /* 第一组先按 gx、gy、gz、ax、ay、az 顺序为六条原轴序列各追加八项基础统计。 */
     for (int axis = 0; axis < AXIS_NUM; axis++) {
+        /* 当前 axis 的 WINDOW_LEN 个采样依时间顺序复制到复用缓冲。 */
         for (int i = 0; i < WINDOW_LEN; i++) temp[i] = window[i][axis];
+        /* 追加当前轴八项统计，前三轴单位 deg/s、后三轴单位 g。 */
         append_series_features(temp, WINDOW_LEN, feature, &idx);
     }
 
-    /* gyro_mag */
+    /* 构造角速度模长 gyro_mag，并保存为第三条相位源序列。 */
     for (int i = 0; i < WINDOW_LEN; i++) {
+        /* gx 是当前点 x 轴角速度，单位 deg/s。 */
         float gx = window[i][0];
+        /* gy 是当前点 y 轴角速度，单位 deg/s。 */
         float gy = window[i][1];
+        /* gz 是当前点 z 轴角速度，单位 deg/s。 */
         float gz = window[i][2];
+        /* 三轴欧氏模长描述与佩戴轴旋转较稳健的总体转动强度。 */
         temp[i] = sqrtf(gx * gx + gy * gy + gz * gz);
+        /* 相位源索引二固定对应 gyro_mag。 */
         phase_sources[2][i] = temp[i];
     }
+    /* 为角速度模长追加八项基础统计。 */
     append_series_features(temp, WINDOW_LEN, feature, &idx);
 
-    /* acc_mag */
+    /* 构造加速度模长 acc_mag，单位 g。 */
     for (int i = 0; i < WINDOW_LEN; i++) {
+        /* ax 是当前 x 轴加速度。 */
         float ax = window[i][3];
+        /* ay 是当前 y 轴加速度。 */
         float ay = window[i][4];
+        /* az 是当前 z 轴加速度。 */
         float az = window[i][5];
+        /* 三轴欧氏模长保留重力和动态冲击总量。 */
         temp[i] = sqrtf(ax * ax + ay * ay + az * az);
     }
+    /* 为加速度模长追加八项基础统计。 */
     append_series_features(temp, WINDOW_LEN, feature, &idx);
 
-    /* gyro_delta_mag */
+    /* 构造相邻角速度差模长 gyro_delta_mag，共 WINDOW_LEN-1 点。 */
     for (int i = 0; i < WINDOW_LEN - 1; i++) {
+        /* dx 是相邻 gx 差，单位 deg/s 每采样。 */
         float dx = window[i + 1][0] - window[i][0];
+        /* dy 是相邻 gy 差。 */
         float dy = window[i + 1][1] - window[i][1];
+        /* dz 是相邻 gz 差。 */
         float dz = window[i + 1][2] - window[i][2];
+        /* 欧氏模长突出手腕快速换向。 */
         temp[i] = sqrtf(dx * dx + dy * dy + dz * dz);
     }
+    /* 为角速度差模长追加八项统计。 */
     append_series_features(temp, WINDOW_LEN - 1, feature, &idx);
 
-    /* acc_delta_mag */
+    /* 构造相邻加速度差模长 acc_delta_mag，并保存为第四条相位源。 */
     for (int i = 0; i < WINDOW_LEN - 1; i++) {
+        /* dx 是相邻 ax 差，单位 g 每采样。 */
         float dx = window[i + 1][3] - window[i][3];
+        /* dy 是相邻 ay 差。 */
         float dy = window[i + 1][4] - window[i][4];
+        /* dz 是相邻 az 差。 */
         float dz = window[i + 1][5] - window[i][5];
+        /* 欧氏模长突出起跳和落地冲击变化。 */
         temp[i] = sqrtf(dx * dx + dy * dy + dz * dz);
+        /* 相位源索引三固定对应 acc_delta_mag。 */
         phase_sources[3][i] = temp[i];
     }
+    /* 为加速度差模长追加八项统计。 */
     append_series_features(temp, WINDOW_LEN - 1, feature, &idx);
 
-    /* Gravity-aligned vertical and horizontal components. */
+    /* 计算全窗平均加速度方向，用作手腕坐标系中的近似重力轴。 */
     float gravity_x = 0.0f;
+    /* gravity_y 累计 y 轴加速度均值。 */
     float gravity_y = 0.0f;
+    /* gravity_z 累计 z 轴加速度均值。 */
     float gravity_z = 0.0f;
+    /* 遍历 62 点累计三轴加速度。 */
     for (int i = 0; i < WINDOW_LEN; i++) {
+        /* 累加 ax。 */
         gravity_x += window[i][3];
+        /* 累加 ay。 */
         gravity_y += window[i][4];
+        /* 累加 az。 */
         gravity_z += window[i][5];
     }
+    /* 除以窗口长度得到平均 ax。 */
     gravity_x /= (float)WINDOW_LEN;
+    /* 除以窗口长度得到平均 ay。 */
     gravity_y /= (float)WINDOW_LEN;
+    /* 除以窗口长度得到平均 az。 */
     gravity_z /= (float)WINDOW_LEN;
+    /* gravity_norm 是平均加速度向量模长，单位 g。 */
     float gravity_norm = sqrtf(
         gravity_x * gravity_x + gravity_y * gravity_y + gravity_z * gravity_z
     );
+    /* 近零均值属于异常或极端动态窗，回退 z 轴避免除零。 */
     if (gravity_norm < 1e-6f) {
+        /* 回退单位方向 x 分量。 */
         gravity_x = 0.0f;
+        /* 回退单位方向 y 分量。 */
         gravity_y = 0.0f;
+        /* 回退单位方向 z 分量。 */
         gravity_z = 1.0f;
     } else {
+        /* 正常输入把 x 分量归一化。 */
         gravity_x /= gravity_norm;
+        /* 正常输入把 y 分量归一化。 */
         gravity_y /= gravity_norm;
+        /* 正常输入把 z 分量归一化。 */
         gravity_z /= gravity_norm;
     }
 
-    /* acc_vertical */
+    /* 把三轴加速度投影到重力单位方向，得到垂直加速度序列。 */
     for (int i = 0; i < WINDOW_LEN; i++) {
+        /* vertical 是当前加速度与重力方向点积，单位 g。 */
         float vertical =
             window[i][3] * gravity_x +
             window[i][4] * gravity_y +
             window[i][5] * gravity_z;
+        /* 保存到复用缓冲供基础统计。 */
         temp[i] = vertical;
+        /* 相位源索引零固定对应垂直加速度。 */
         phase_sources[0][i] = vertical;
     }
+    /* 为垂直加速度追加八项基础统计。 */
     append_series_features(temp, WINDOW_LEN, feature, &idx);
 
-    /* acc_horizontal_mag */
+    /* 从总加速度平方减去垂直分量平方，得到水平加速度模长。 */
     for (int i = 0; i < WINDOW_LEN; i++) {
+        /* vertical 读取已经计算的垂直加速度。 */
         float vertical = phase_sources[0][i];
+        /* total_squared 是三轴加速度模长平方。 */
         float total_squared =
             window[i][3] * window[i][3] +
             window[i][4] * window[i][4] +
             window[i][5] * window[i][5];
+        /* horizontal_squared 按勾股分解得到水平分量平方。 */
         float horizontal_squared = total_squared - vertical * vertical;
+        /* 浮点误差可能产生微小负数，夹紧后再开方。 */
         if (horizontal_squared < 0.0f) horizontal_squared = 0.0f;
+        /* 水平加速度模长单位 g。 */
         temp[i] = sqrtf(horizontal_squared);
+        /* 相位源索引一固定对应水平加速度模长。 */
         phase_sources[1][i] = temp[i];
     }
+    /* 为水平加速度模长追加八项基础统计。 */
     append_series_features(temp, WINDOW_LEN, feature, &idx);
 
-    /* gyro_vertical */
+    /* 把三轴角速度投影到重力方向，得到垂直轴角速度。 */
     for (int i = 0; i < WINDOW_LEN; i++) {
+        /* 点积结果单位 deg/s。 */
         temp[i] =
             window[i][0] * gravity_x +
             window[i][1] * gravity_y +
             window[i][2] * gravity_z;
     }
+    /* 为垂直角速度追加八项基础统计。 */
     append_series_features(temp, WINDOW_LEN, feature, &idx);
 
-    /* gyro_horizontal_mag */
+    /* 从角速度总模长中移除垂直投影，得到水平角速度模长。 */
     for (int i = 0; i < WINDOW_LEN; i++) {
+        /* vertical 是角速度在重力方向投影，单位 deg/s。 */
         float vertical =
             window[i][0] * gravity_x +
             window[i][1] * gravity_y +
             window[i][2] * gravity_z;
+        /* total_squared 是三轴角速度模长平方。 */
         float total_squared =
             window[i][0] * window[i][0] +
             window[i][1] * window[i][1] +
             window[i][2] * window[i][2];
+        /* horizontal_squared 是正交平面角速度模长平方。 */
         float horizontal_squared = total_squared - vertical * vertical;
+        /* 夹紧微小负值保护平方根。 */
         if (horizontal_squared < 0.0f) horizontal_squared = 0.0f;
+        /* 水平角速度模长单位 deg/s。 */
         temp[i] = sqrtf(horizontal_squared);
     }
+    /* 为水平角速度模长追加八项基础统计，至此完成前 112 项。 */
     append_series_features(temp, WINDOW_LEN, feature, &idx);
 
+    /* 依次为四条关键源追加每源 12 项原始四阶段统计，共 48 项。 */
     for (int source = 0; source < 4; source++) {
+        /* 当前源长度由 phase_lengths 指定，差分源少一个采样点。 */
         append_phase_features(
             phase_sources[source], phase_lengths[source], feature, &idx
         );
     }
+    /* 依次为四条关键源追加每源六项时序/频谱统计，共 24 项。 */
     for (int source = 0; source < 4; source++) {
+        /* 函数内部使用 25 Hz 采样率把频点和延迟换算为物理时间。 */
         append_temporal_features(
             phase_sources[source], phase_lengths[source], feature, &idx
         );
     }
+    /* 依次为四条关键源追加每源 12 项标准化四阶段统计，共 48 项。 */
     for (int source = 0; source < 4; source++) {
+        /* 标准差近零的源将追加全零形态特征。 */
         append_normalized_phase_features(
             phase_sources[source], phase_lengths[source], feature, &idx
         );
     }
+    /* 依次为四条关键源追加每源八项冲击分布统计，共 32 项。 */
     for (int source = 0; source < 4; source++) {
+        /* 输出包含五个百分位、偏度、峰度和最大相邻跳变。 */
         append_impact_distribution_features(
             phase_sources[source], phase_lengths[source], feature, &idx
         );
     }
 
+    /* 以下五个变量复用为频带比例、谱质心和主峰占比输出。 */
     float low_ratio = 0.0f;
+    /* mid_ratio 保存 1.20-2.40 Hz 中频功率比例。 */
     float mid_ratio = 0.0f;
+    /* high_ratio 保存 2.40-5.00 Hz 高频功率比例。 */
     float high_ratio = 0.0f;
+    /* centroid_hz 保存谱质心，单位 Hz。 */
     float centroid_hz = 0.0f;
+    /* peak_power_ratio 保存最大非直流频点占总功率比例。 */
     float peak_power_ratio = 0.0f;
+    /* 对加速度差模长计算频谱并追加中频功率比例。 */
     selected_spectral_features(
         phase_sources[3], phase_lengths[3], &low_ratio, &mid_ratio, &high_ratio,
         &centroid_hz, &peak_power_ratio
     );
+    /* 弱类机制组第 1 项：加速度差中频比例。 */
     feature[idx++] = mid_ratio;
+    /* 对垂直加速度计算频谱并追加高频比例。 */
     selected_spectral_features(
         phase_sources[0], phase_lengths[0], &low_ratio, &mid_ratio, &high_ratio,
         &centroid_hz, &peak_power_ratio
     );
+    /* 弱类机制组第 2 项：垂直加速度高频比例。 */
     feature[idx++] = high_ratio;
+    /* 对角速度模长计算频谱并追加谱质心。 */
     selected_spectral_features(
         phase_sources[2], phase_lengths[2], &low_ratio, &mid_ratio, &high_ratio,
         &centroid_hz, &peak_power_ratio
     );
+    /* 弱类机制组第 3 项：角速度模长谱质心 Hz。 */
     feature[idx++] = centroid_hz;
+    /* 对水平加速度模长计算频谱并追加谱质心。 */
     selected_spectral_features(
         phase_sources[1], phase_lengths[1], &low_ratio, &mid_ratio, &high_ratio,
         &centroid_hz, &peak_power_ratio
     );
+    /* 弱类机制组第 4 项：水平加速度谱质心 Hz。 */
     feature[idx++] = centroid_hz;
+    /* 第 5 项记录垂直加速度自相关首次非正延迟秒数。 */
     feature[idx++] = autocorr_first_zero_seconds(
         phase_sources[0], phase_lengths[0]
     );
+    /* 第 6 项记录角速度模长与垂直加速度零延迟 Pearson 相关。 */
     feature[idx++] = series_correlation(
         phase_sources[2], phase_sources[0], WINDOW_LEN
     );
+    /* 第 7 项记录水平加速度模长最强自相关次峰。 */
     feature[idx++] = autocorr_secondary_peak(
         phase_sources[1], phase_lengths[1]
     );
+    /* 重新计算角速度模长频谱并追加高频比例。 */
     selected_spectral_features(
         phase_sources[2], phase_lengths[2], &low_ratio, &mid_ratio, &high_ratio,
         &centroid_hz, &peak_power_ratio
     );
+    /* 弱类机制组第 8 项：角速度模长高频比例。 */
     feature[idx++] = high_ratio;
+    /* 重新计算垂直加速度频谱并追加主峰占比。 */
     selected_spectral_features(
         phase_sources[0], phase_lengths[0], &low_ratio, &mid_ratio, &high_ratio,
         &centroid_hz, &peak_power_ratio
     );
+    /* 弱类机制组第 9 项：垂直加速度主峰功率比例。 */
     feature[idx++] = peak_power_ratio;
+    /* 重新计算加速度差模长频谱并追加高频比例。 */
     selected_spectral_features(
         phase_sources[3], phase_lengths[3], &low_ratio, &mid_ratio, &high_ratio,
         &centroid_hz, &peak_power_ratio
     );
+    /* 弱类机制组第 10 项：加速度差高频比例。 */
     feature[idx++] = high_ratio;
+    /* 重新计算水平加速度频谱并追加中频比例。 */
     selected_spectral_features(
         phase_sources[1], phase_lengths[1], &low_ratio, &mid_ratio, &high_ratio,
         &centroid_hz, &peak_power_ratio
     );
+    /* 弱类机制组第 11 项：水平加速度中频比例。 */
     feature[idx++] = mid_ratio;
     /* 写入陀螺模长主谱峰功率占比，输出无量纲且范围为 [0,1]。 */
     selected_spectral_features(

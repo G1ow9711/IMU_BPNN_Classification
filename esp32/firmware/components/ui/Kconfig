@@ -1,0 +1,17 @@
+menu "健身手柄界面配置"
+
+    config UI_IDLE_DIM_TIMEOUT_SECONDS
+        int "无操作后调暗时间（秒）"
+        range 5 120
+        default 10
+        help
+            均衡模式在 10 秒无触摸后把 AMOLED 从 35% 降到 15%。
+
+    config UI_IDLE_SCREEN_OFF_SECONDS
+        int "无操作后熄屏时间（秒）"
+        range 10 600
+        default 30
+        help
+            熄屏不停止训练、计数、振动或 BLE；触摸和电源键可重新点亮。
+
+endmenu

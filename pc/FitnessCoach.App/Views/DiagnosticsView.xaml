@@ -1,0 +1,163 @@
+<UserControl x:Class="FitnessCoach.App.Views.DiagnosticsView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:controls="clr-namespace:FitnessCoach.App.Controls">
+    <!-- 诊断页显示实时链路指标、协议错误和产品合同。 -->
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <!-- 诊断卡片纵向排列。 -->
+        <StackPanel MaxWidth="900" HorizontalAlignment="Left">
+            <!-- 真机或模拟状态必须高亮，防止把模拟结果当成硬件实测。 -->
+            <Border Background="#1A0D09" BorderBrush="{StaticResource WarningBrush}" BorderThickness="1" CornerRadius="12" Padding="16" Margin="0,0,0,12">
+                <!-- 显示设备实现状态。 -->
+                <TextBlock Text="{Binding DeviceImplementationText}" Foreground="{StaticResource WarningBrush}" TextWrapping="Wrap" />
+            </Border>
+
+            <!-- 动态蓝牙诊断卡。 -->
+            <Border Background="{StaticResource CardBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="12" Padding="20" Margin="0,0,0,12">
+                <!-- 标题和两列指标纵向排列。 -->
+                <StackPanel>
+                    <!-- 动态诊断标题。 -->
+                    <TextBlock Text="实时链路诊断" FontSize="20" FontWeight="SemiBold" Margin="0,0,0,12" />
+                    <!-- 使用两列 Grid 对齐指标名称和值。 -->
+                    <Grid>
+                        <!-- 标签和值两列。 -->
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="155" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <!-- 六项诊断逐行排列。 -->
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <!-- 蓝牙信号强度标签。 -->
+                        <TextBlock Grid.Row="0" Grid.Column="0" Text="蓝牙信号强度" Foreground="{StaticResource SecondaryTextBrush}" Margin="0,4" />
+                        <!-- 蓝牙信号强度值，单位分贝毫瓦。 -->
+                        <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding RssiText}" Margin="0,4" />
+                        <!-- 蓝牙最大传输单元标签。 -->
+                        <TextBlock Grid.Row="1" Grid.Column="0" Text="最大传输单元" Foreground="{StaticResource SecondaryTextBrush}" Margin="0,4" />
+                        <!-- 最大传输单元值，单位字节。 -->
+                        <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding AttMtuText}" Margin="0,4" />
+                        <!-- 版本标签。 -->
+                        <TextBlock Grid.Row="2" Grid.Column="0" Text="设备版本" Foreground="{StaticResource SecondaryTextBrush}" Margin="0,4" />
+                        <!-- 型号、硬件、固件修订。 -->
+                        <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding DeviceVersionText}" Margin="0,4" TextWrapping="Wrap" />
+                        <!-- 电池标签。 -->
+                        <TextBlock Grid.Row="3" Grid.Column="0" Text="设备电量" Foreground="{StaticResource SecondaryTextBrush}" Margin="0,4" />
+                        <!-- 权威 LiveState 电量。 -->
+                        <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding BatteryText}" Foreground="{StaticResource AccentBrush}" Margin="0,4" />
+                        <!-- 状态修订号标签。 -->
+                        <TextBlock Grid.Row="4" Grid.Column="0" Text="状态修订号" Foreground="{StaticResource SecondaryTextBrush}" Margin="0,4" />
+                        <!-- 最近权威状态修订号。 -->
+                        <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding StateRevisionText}" Margin="0,4" />
+                        <!-- 重连标签。 -->
+                        <TextBlock Grid.Row="5" Grid.Column="0" Text="自动重连尝试" Foreground="{StaticResource SecondaryTextBrush}" Margin="0,4" />
+                        <!-- 当前 PC 进程累计重连次数。 -->
+                        <TextBlock Grid.Row="5" Grid.Column="1" Text="{Binding ReconnectCountText}" Margin="0,4" />
+                        <!-- 协议错误标签。 -->
+                        <TextBlock Grid.Row="6" Grid.Column="0" Text="协议错误" Foreground="{StaticResource SecondaryTextBrush}" Margin="0,4" />
+                        <!-- 校验和分片错误分别显示。 -->
+                        <TextBlock Grid.Row="6" Grid.Column="1" Text="{Binding ProtocolErrorText}" Margin="0,4" />
+                        <!-- 设备能力清单摘要标签。 -->
+                        <TextBlock Grid.Row="7" Grid.Column="0" Text="设备能力清单" Foreground="{StaticResource SecondaryTextBrush}" Margin="0,4" />
+                        <!-- 显示双模型短摘要、能力位和内部文件系统当前可用字节数。 -->
+                        <TextBlock Grid.Row="7" Grid.Column="1" Text="{Binding ManifestSummaryText}" Margin="0,4" TextWrapping="Wrap" />
+                    </Grid>
+                </StackPanel>
+            </Border>
+
+            <!-- 开发者诊断六轴流卡片；普通产品模式默认关闭，且页面不提供保存入口。 -->
+            <Border Background="{StaticResource CardBrush}" BorderBrush="{StaticResource WarningBrush}" BorderThickness="1" CornerRadius="12" Padding="20" Margin="0,0,0,12">
+                <!-- 诊断六轴流状态、控制、物理值和两张实时曲线纵向排列。 -->
+                <StackPanel>
+                    <!-- 明确标记开发者功能，防止普通用户误开高带宽数据流。 -->
+                    <TextBlock Text="开发者诊断六轴流" FontSize="20" FontWeight="SemiBold" Margin="0,0,0,8" />
+                    <!-- 说明隐私、带宽和持久化边界。 -->
+                    <TextBlock Text="仅用于现场诊断。开启后只在内存显示最近样本；关闭、断线或退出后不保存到历史、日志或磁盘。设备设置中必须先启用开发者模式。" Foreground="{StaticResource WarningBrush}" TextWrapping="Wrap" Margin="0,0,0,12" />
+                    <!-- 三个按钮横向排列：设备流开关、曲线冻结和内存窗口清空。 -->
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                        <!-- 开关按钮只调用显式设备命令，不使用本地假状态。 -->
+                        <Button Content="{Binding RawStreamButtonText}" Command="{Binding ToggleRawStreamCommand}" Width="150" Margin="0,0,10,0" />
+                        <!-- 暂停按钮只冻结图形，设备样本计数和质量检查继续运行。 -->
+                        <Button Content="{Binding RawChartPauseButtonText}" Command="{Binding PauseRawChartCommand}" Width="100" Margin="0,0,10,0" />
+                        <!-- 清空按钮只清除进程内十秒窗口，不发送设备命令。 -->
+                        <Button Content="清空曲线" Command="{Binding ClearRawChartCommand}" Width="100" />
+                    </StackPanel>
+                    <!-- 显示设备确认结果或明确失败原因。 -->
+                    <TextBlock Text="{Binding RawStreamStatus}" TextWrapping="Wrap" Margin="0,0,0,8" />
+                    <!-- 显示本次开启后收到的合法固定记录数量。 -->
+                    <TextBlock Text="{Binding RawSampleCountText, StringFormat=合法样本数：{0}}" Foreground="{StaticResource SecondaryTextBrush}" Margin="0,0,0,6" />
+                    <!-- 显示按设备单调时间计算的实际采样率。 -->
+                    <TextBlock Text="{Binding RawSampleRateText}" Foreground="{StaticResource AccentBrush}" Margin="0,0,0,6" />
+                    <!-- 显示样本序号、时间戳和设备质量位的综合结果。 -->
+                    <TextBlock Text="{Binding RawQualityText}" Foreground="{StaticResource WarningBrush}" TextWrapping="Wrap" Margin="0,0,0,6" />
+                    <!-- 显示换算后的六轴物理量，便于静止和转动现场核对。 -->
+                    <TextBlock Text="{Binding LatestPhysicalValuesText}" FontFamily="Consolas" TextWrapping="Wrap" Margin="0,0,0,6" />
+                    <!-- 显示最近六轴 25 赫兹同步诊断码；不自动转换量程，便于核对协议字节。 -->
+                    <TextBlock Text="{Binding LatestRawSampleText}" FontFamily="Consolas" Foreground="{StaticResource SecondaryTextBrush}" TextWrapping="Wrap" Margin="0,0,0,16" />
+
+                    <!-- 加速度曲线标题和固定颜色图例。 -->
+                    <TextBlock Margin="0,0,0,6">
+                        <!-- 标题说明纵轴单位和范围。 -->
+                        <Run Text="三轴加速度（±2 倍重力加速度，最近 10 秒）  " FontSize="16" FontWeight="SemiBold" />
+                        <!-- X 轴图例使用青色。 -->
+                        <Run Text="横向" Foreground="#31D7FF" FontWeight="Bold" />
+                        <!-- 图例分隔符。 -->
+                        <Run Text="  " />
+                        <!-- Y 轴图例使用橙色。 -->
+                        <Run Text="纵向" Foreground="#FFA43A" FontWeight="Bold" />
+                        <!-- 图例分隔符。 -->
+                        <Run Text="  " />
+                        <!-- Z 轴图例使用绿色。 -->
+                        <Run Text="垂直" Foreground="#65E572" FontWeight="Bold" />
+                    </TextBlock>
+                    <!-- 绘制加速度 X/Y/Z 曲线；点值单位固定为 g。 -->
+                    <controls:ImuLineChart Points="{Binding AccelerationPoints}" VerticalLimit="2" Height="210" Margin="0,0,0,16" />
+
+                    <!-- 角速度曲线标题和固定颜色图例。 -->
+                    <TextBlock Margin="0,0,0,6">
+                        <!-- 标题说明纵轴单位和范围。 -->
+                        <Run Text="三轴角速度（±250 度每秒，最近 10 秒）  " FontSize="16" FontWeight="SemiBold" />
+                        <!-- X 轴图例使用青色。 -->
+                        <Run Text="横向" Foreground="#31D7FF" FontWeight="Bold" />
+                        <!-- 图例分隔符。 -->
+                        <Run Text="  " />
+                        <!-- Y 轴图例使用橙色。 -->
+                        <Run Text="纵向" Foreground="#FFA43A" FontWeight="Bold" />
+                        <!-- 图例分隔符。 -->
+                        <Run Text="  " />
+                        <!-- Z 轴图例使用绿色。 -->
+                        <Run Text="垂直" Foreground="#65E572" FontWeight="Bold" />
+                    </TextBlock>
+                    <!-- 绘制角速度 X/Y/Z 曲线；点值单位固定为度每秒。 -->
+                    <controls:ImuLineChart Points="{Binding GyroscopePoints}" VerticalLimit="250" Height="210" />
+                </StackPanel>
+            </Border>
+
+            <!-- 固定产品合同卡。 -->
+            <Border Background="{StaticResource CardBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="12" Padding="20">
+                <!-- 各合同项纵向排列。 -->
+                <StackPanel>
+                    <!-- 蓝牙协议。 -->
+                    <TextBlock Text="{Binding ProtocolText}" TextWrapping="Wrap" Margin="0,0,0,12" />
+                    <!-- 模型职责。 -->
+                    <TextBlock Text="{Binding ModelText}" TextWrapping="Wrap" Margin="0,0,0,12" />
+                    <!-- 电源合同。 -->
+                    <TextBlock Text="{Binding PowerPolicyText}" Foreground="{StaticResource AccentBrush}" TextWrapping="Wrap" Margin="0,0,0,12" />
+                    <!-- 振动合同。 -->
+                    <TextBlock Text="{Binding HapticPolicyText}" TextWrapping="Wrap" Margin="0,0,0,12" />
+                    <!-- 动画接口。 -->
+                    <TextBlock Text="{Binding AnimationText}" Foreground="{StaticResource SecondaryTextBrush}" TextWrapping="Wrap" Margin="0,0,0,18" />
+                    <!-- 当前可复制诊断日志。 -->
+                    <TextBlock Text="{Binding DiagnosticLog}" FontFamily="Consolas" Foreground="{StaticResource SecondaryTextBrush}" TextWrapping="Wrap" />
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

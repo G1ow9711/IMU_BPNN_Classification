@@ -1,0 +1,17 @@
+# Name,     Type, SubType,  Offset,   Size,       Flags
+# NVS 保存 NimBLE 绑定键、设备设置和 LittleFS 挂载元数据；24 KiB 足够首版键值规模。
+nvs,        data, nvs,      0x9000,   0x6000,
+# PHY 校准数据保持 ESP-IDF 标准位置和 4 KiB 大小。
+phy_init,   data, phy,      0xF000,   0x1000,
+# OTA 选择数据记录当前/回滚应用槽，大小遵循 ESP-IDF 双 OTA 合同。
+otadata,    data, ota,      0x10000,  0x2000,
+# 故障转储保存无硬件调试时无法复现的现场崩溃；64 KiB 只用于紧凑 ELF core dump。
+coredump,   data, coredump, 0x12000,  0x10000,
+# 工厂槽允许首次 USB 烧录后可靠启动；4 MiB 容纳 LVGL、NimBLE、双 M0 和字体资源。
+factory,    app,  factory,  0x30000,  0x400000,
+# OTA A 槽接收第一次无线/有线更新，尺寸与工厂槽一致以保证镜像可互换。
+ota_0,      app,  ota_0,    0x430000, 0x400000,
+# OTA B 槽允许下一次更新和自动回滚，避免运动记录设备因更新中断变砖。
+ota_1,      app,  ota_1,    0x830000, 0x400000,
+# 16 MiB LittleFS 保存摘要、设置、协议去重水位和诊断日志；其余 Flash 留作对齐与未来扩展。
+littlefs,   data, littlefs, 0xC30000, 0x1000000,

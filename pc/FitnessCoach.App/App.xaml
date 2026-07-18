@@ -1,0 +1,202 @@
+<Application x:Class="FitnessCoach.App.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:viewModels="clr-namespace:FitnessCoach.App.ViewModels"
+             xmlns:views="clr-namespace:FitnessCoach.App.Views">
+    <!-- 全局资源使用纯黑 AMOLED 风格，并注册 ViewModel 到页面的映射。 -->
+    <Application.Resources>
+        <!-- 主背景为真正的 #000000。 -->
+        <SolidColorBrush x:Key="AppBackgroundBrush" Color="#000000" />
+        <!-- 卡片背景略高于纯黑，提供层级。 -->
+        <SolidColorBrush x:Key="CardBrush" Color="#101010" />
+        <!-- 边框使用低亮度灰色。 -->
+        <SolidColorBrush x:Key="BorderBrush" Color="#2A2A2A" />
+        <!-- 主文字使用高对比白色。 -->
+        <SolidColorBrush x:Key="PrimaryTextBrush" Color="#F5F5F5" />
+        <!-- 次文字使用中灰色。 -->
+        <SolidColorBrush x:Key="SecondaryTextBrush" Color="#A0A0A0" />
+        <!-- 主操作使用青绿色。 -->
+        <SolidColorBrush x:Key="AccentBrush" Color="#00D6A0" />
+        <!-- 低电和错误使用橙红色。 -->
+        <SolidColorBrush x:Key="WarningBrush" Color="#FF6B45" />
+
+        <!-- 所有 Window 默认纯黑背景和白色文字。 -->
+        <Style TargetType="Window">
+            <!-- 设置主背景。 -->
+            <Setter Property="Background" Value="{StaticResource AppBackgroundBrush}" />
+            <!-- 设置默认前景。 -->
+            <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}" />
+            <!-- 使用现代中文字体回退链。 -->
+            <Setter Property="FontFamily" Value="Microsoft YaHei UI, Segoe UI" />
+        </Style>
+
+        <!-- 默认文本颜色继承主文字。 -->
+        <Style TargetType="TextBlock">
+            <!-- 设置前景颜色。 -->
+            <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}" />
+            <!-- 提升文字抗锯齿质量。 -->
+            <Setter Property="TextOptions.TextFormattingMode" Value="Display" />
+        </Style>
+
+        <!-- 默认按钮提供统一尺寸、圆角和焦点反馈。 -->
+        <Style x:Key="BaseButtonStyle" TargetType="Button">
+            <!-- 设置最小高度，便于触控操作。 -->
+            <Setter Property="MinHeight" Value="42" />
+            <!-- 设置内边距。 -->
+            <Setter Property="Padding" Value="18,8" />
+            <!-- 设置外边距。 -->
+            <Setter Property="Margin" Value="4" />
+            <!-- 使用卡片背景。 -->
+            <Setter Property="Background" Value="{StaticResource CardBrush}" />
+            <!-- 设置主文字颜色。 -->
+            <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}" />
+            <!-- 设置边框颜色。 -->
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
+            <!-- 设置细边框。 -->
+            <Setter Property="BorderThickness" Value="1" />
+            <!-- 设置手型光标。 -->
+            <Setter Property="Cursor" Value="Hand" />
+            <!-- 自定义圆角按钮模板。 -->
+            <Setter Property="Template">
+                <Setter.Value>
+                    <!-- 模板绑定按钮颜色和边框。 -->
+                    <ControlTemplate TargetType="Button">
+                        <!-- 圆角外框承载按钮内容。 -->
+                        <Border x:Name="ButtonBorder"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="9"
+                                Padding="{TemplateBinding Padding}">
+                            <!-- 内容居中显示。 -->
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <!-- 触发器提供悬停、按下和禁用状态。 -->
+                        <ControlTemplate.Triggers>
+                            <!-- 悬停时提高边框亮度。 -->
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <!-- 使用主色边框。 -->
+                                <Setter TargetName="ButtonBorder" Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+                            </Trigger>
+                            <!-- 按下时降低透明度。 -->
+                            <Trigger Property="IsPressed" Value="True">
+                                <!-- 提供即时按键反馈。 -->
+                                <Setter TargetName="ButtonBorder" Property="Opacity" Value="0.72" />
+                            </Trigger>
+                            <!-- 禁用时降低可见度。 -->
+                            <Trigger Property="IsEnabled" Value="False">
+                                <!-- 显示不可执行状态。 -->
+                                <Setter TargetName="ButtonBorder" Property="Opacity" Value="0.35" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- 主操作按钮使用青绿色填充。 -->
+        <Style x:Key="PrimaryButtonStyle" TargetType="Button" BasedOn="{StaticResource BaseButtonStyle}">
+            <!-- 设置主色背景。 -->
+            <Setter Property="Background" Value="{StaticResource AccentBrush}" />
+            <!-- 黑色文字保证主色背景对比度。 -->
+            <Setter Property="Foreground" Value="#000000" />
+            <!-- 主色边框。 -->
+            <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+            <!-- 使用半粗字体。 -->
+            <Setter Property="FontWeight" Value="SemiBold" />
+        </Style>
+
+        <!-- 危险停止按钮使用橙红边框。 -->
+        <Style x:Key="DangerButtonStyle" TargetType="Button" BasedOn="{StaticResource BaseButtonStyle}">
+            <!-- 透明黑背景减少视觉压迫。 -->
+            <Setter Property="Background" Value="#180C09" />
+            <!-- 橙红文字。 -->
+            <Setter Property="Foreground" Value="{StaticResource WarningBrush}" />
+            <!-- 橙红边框。 -->
+            <Setter Property="BorderBrush" Value="{StaticResource WarningBrush}" />
+        </Style>
+
+        <!-- 侧栏导航按钮使用左对齐文本。 -->
+        <Style x:Key="NavButtonStyle" TargetType="Button" BasedOn="{StaticResource BaseButtonStyle}">
+            <!-- 内容左对齐。 -->
+            <Setter Property="HorizontalContentAlignment" Value="Left" />
+            <!-- 导航按钮拉满侧栏宽度。 -->
+            <Setter Property="HorizontalAlignment" Value="Stretch" />
+            <!-- 导航按钮使用透明背景。 -->
+            <Setter Property="Background" Value="Transparent" />
+        </Style>
+
+        <!-- 输入框使用深色背景。 -->
+        <Style TargetType="TextBox">
+            <!-- 输入区背景。 -->
+            <Setter Property="Background" Value="#151515" />
+            <!-- 输入文字颜色。 -->
+            <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}" />
+            <!-- 输入边框。 -->
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
+            <!-- 输入内边距。 -->
+            <Setter Property="Padding" Value="10,7" />
+            <!-- 输入最小高度。 -->
+            <Setter Property="MinHeight" Value="36" />
+        </Style>
+
+        <!-- 复选框统一文字和间距。 -->
+        <Style TargetType="CheckBox">
+            <!-- 设置文字颜色。 -->
+            <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}" />
+            <!-- 设置外边距。 -->
+            <Setter Property="Margin" Value="0,8" />
+        </Style>
+
+        <!-- DataGrid 采用只读深色视觉。 -->
+        <Style TargetType="DataGrid">
+            <!-- 表格背景。 -->
+            <Setter Property="Background" Value="#080808" />
+            <!-- 表格前景。 -->
+            <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}" />
+            <!-- 表格边框。 -->
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
+            <!-- 网格线颜色。 -->
+            <Setter Property="HorizontalGridLinesBrush" Value="#202020" />
+            <!-- 行头宽度置零。 -->
+            <Setter Property="HeadersVisibility" Value="Column" />
+            <!-- 禁止新增行。 -->
+            <Setter Property="CanUserAddRows" Value="False" />
+            <!-- 表格只读。 -->
+            <Setter Property="IsReadOnly" Value="True" />
+            <!-- 自动生成列由页面关闭。 -->
+            <Setter Property="AutoGenerateColumns" Value="False" />
+        </Style>
+
+        <!-- 设备 ViewModel 映射到设备页。 -->
+        <DataTemplate DataType="{x:Type viewModels:DeviceViewModel}">
+            <!-- 实例化设备页视图。 -->
+            <views:DeviceView />
+        </DataTemplate>
+        <!-- 实时 ViewModel 映射到训练页。 -->
+        <DataTemplate DataType="{x:Type viewModels:LiveTrainingViewModel}">
+            <!-- 实例化实时训练页。 -->
+            <views:LiveTrainingView />
+        </DataTemplate>
+        <!-- 总结 ViewModel 映射到总结页。 -->
+        <DataTemplate DataType="{x:Type viewModels:SummaryViewModel}">
+            <!-- 实例化总结页。 -->
+            <views:SummaryView />
+        </DataTemplate>
+        <!-- 历史 ViewModel 映射到历史页。 -->
+        <DataTemplate DataType="{x:Type viewModels:HistoryViewModel}">
+            <!-- 实例化历史页。 -->
+            <views:HistoryView />
+        </DataTemplate>
+        <!-- 设置 ViewModel 映射到设置页。 -->
+        <DataTemplate DataType="{x:Type viewModels:SettingsViewModel}">
+            <!-- 实例化设置页。 -->
+            <views:SettingsView />
+        </DataTemplate>
+        <!-- 诊断 ViewModel 映射到诊断页。 -->
+        <DataTemplate DataType="{x:Type viewModels:DiagnosticsViewModel}">
+            <!-- 实例化诊断页。 -->
+            <views:DiagnosticsView />
+        </DataTemplate>
+    </Application.Resources>
+</Application>

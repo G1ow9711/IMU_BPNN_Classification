@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Windows 专用适配器封装 WinRT，不把 Windows.Devices.* 类型泄漏到协议和主机 fake 测试。 -->
+  <PropertyGroup>
+    <!-- 编译使用 Windows 11 26100 合同，最低支持 Windows 10 19041。 -->
+    <TargetFramework>net8.0-windows10.0.26100.0</TargetFramework>
+    <!-- 运行时 API 检查的最低 Windows 版本固定为 10.0.19041。 -->
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+    <!-- 开启可空引用检查，明确设备、服务和特征发现失败路径。 -->
+    <Nullable>enable</Nullable>
+    <!-- 自动导入 System、集合和线程基础命名空间。 -->
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- 所有警告视为错误，防止遗漏 WinRT 资源释放或可空状态。 -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- 引用无平台协议层及 Windows transport 接口。 -->
+    <ProjectReference Include="..\FitnessCoach.Bluetooth\FitnessCoach.Bluetooth.csproj" />
+  </ItemGroup>
+</Project>

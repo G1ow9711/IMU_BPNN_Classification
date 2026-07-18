@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- 基础设施层提供离线仓储和设置文件实现，不依赖 WPF 或 BLE API。 -->
+  <PropertyGroup>
+    <!-- 正式目标固定为 .NET 8。 -->
+    <TargetFramework>net8.0</TargetFramework>
+    <!-- 开启可空引用分析，明确不存在会话或配置文件的情况。 -->
+    <Nullable>enable</Nullable>
+    <!-- 自动导入 System、IO、集合和 LINQ。 -->
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- 警告全部视为错误，避免仓储序列化问题被忽略。 -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- 仓储只依赖领域摘要和用户偏好。 -->
+    <ProjectReference Include="..\FitnessCoach.Domain\FitnessCoach.Domain.csproj" />
+  </ItemGroup>
+</Project>

@@ -5,6 +5,9 @@
 主要文件：
 
 - `train_export.py`：完整训练与导出入口；
+- `dual_m0_export.py`：把 Round29/Round37 两个六分支 M0、两套标准化参数、掩码和固定融合导出为便携包与 C 头文件；
+- `verify_dual_m0_c.py`：编译实际 C99 头并逐值核对 297 项特征、两个 M0、融合、动作段累计和类别索引；
+- `test_dual_m0_export.py`：双模型工件、维度、哈希、生成 C 合同和异常输入测试；
 - `evaluate_fixed_ensemble.py`：固定双 M0 融合、动作段累计和最终测试/外部留出复现入口，不提供测试集调参开关；
 - `test_train_export.py`：核心行为和导出合同测试；
 - `prepare_finals_dataset.py`：按清单校验并准备决赛新增会话；
@@ -14,6 +17,21 @@
 - `requirements.txt`：Python 依赖版本。
 
 当前提取器输出 297 项手工特征，通道顺序固定为 `gx、gy、gz、ax、ay、az`。Round29 在窗口提特征前修复单轴孤立尖峰并裁剪文件首尾静止段；新增 `wrist_acf_first_peak` 后形成当前合同。Round36 的依赖审计只让第二 M0 把标准化索引 `184:232` 的 48 项归一化阶段特征固定为零，原始数据和其余特征不删除。`--enable-family-specialist` 仅保留为历史消融开关，默认不启用。
+
+## 当前生产配置
+
+当前最终固定配置使用 Round29 未掩码 M0 和 Round37 掩码 M0，六组输入维度为 `(112,48,24,48,32,33)`，分支输出维度为 `(24,12,8,12,8,16)`。两个模型 logits 按 `0.85/0.15` 融合，再在同一动作活动段内累计当前及全部历史 logits。基础测试 `jumping_squat/squat/tuck_jump` 召回为 `89.12%/99.80%/100%`，总准确率 `99.29%`；外部 `scy3` 三个跳跃类均为 `100%`。
+
+最终部署包已经生成：
+
+- `esp32/include/dual_m0_bundle.npz`；
+- `esp32/include/dual_m0_manifest.json`；
+- `esp32/include/esp32_bp_features.h`；
+- `esp32/include/esp32_dual_m0_model.h`。
+
+生成 C 已提供两个六分支 M0 前向、各自标准化、第二模型 `184:232` 掩码、`bp_combine_ensemble_logits`、`BpBoutAccumulator`、`bp_bout_accumulator_reset` 和 `bp_bout_accumulator_update`。静止、动作切换、断连或用户切换时必须重置累计器。C99/Python 验证覆盖 297 项特征、两个 M0、融合、累计和最终类别，不得用旧 `esp32_bp_model.h` 替代正式双模型。
+
+## 训练、隔离与消融接口
 
 `--validation-only` 用于测试隔离的消融训练：保留逐 epoch 日志和验证指标，但不构建测试窗口、不输出测试指标、不触发 ESP32 头文件导出。验证结果保存在 `validation_report.json`。
 
@@ -29,15 +47,13 @@
 
 Round24 新增三个联合弱类优化开关：
 
-- `--multi-branch`：按 `(112,48,24,48,32,30)` 六组连续特征独立编码，再融合到 32 维主嵌入；
+- `--multi-branch`：按当前 `(112,48,24,48,32,33)` 六组连续特征独立编码，再融合到 32 维主嵌入；
 - `--pk-batches`：每批从全部存在类别各取 6 个窗口，并优先让同类窗口来自不同采集文件；
 - `--auxiliary-heads`：训练是否跳跃、强腾空、左右交替、弓步/深蹲和跳跃深蹲/收腹跳五个二分类属性，部署主路径不使用这些头。
 
-当前最接近固定验证门槛的组合是 4 秒窗口加 `0.05` 标签平滑：最佳 epoch 54 的验证准确率、宏平均 F1、最小类别召回分别为 `92.31%/91.81%/79.81%`。由于最小召回仍低于 `79.92%` 基线，该轮未读取测试集或 `scy3`，也未导出正式 C 头文件。
+历史上最接近当时固定验证门槛的组合是 4 秒窗口加 `0.05` 标签平滑：最佳 epoch 54 的验证准确率、宏平均 F1、最小类别召回分别为 `92.31%/91.81%/79.81%`。由于最小召回仍低于 `79.92%` 基线，该轮未读取测试集或 `scy3`，也未导出诊断头文件；该结论属于最终双 M0 形成前的消融记录。
 
-当前最终固定配置使用 Round29 未掩码 M0 和 Round37 掩码 M0，logits 权重为 `0.85/0.15`。活动段内累计当前及全部历史 logits，基础测试 `jumping_squat/squat/tuck_jump` 召回为 `89.12%/99.80%/100%`，总准确率 `99.29%`；外部 `scy3` 三个跳跃类均为 `100%`。固定复现命令见根目录 README。
-
-生成 C 已提供 `bp_combine_ensemble_logits`、`BpBoutAccumulator`、`bp_bout_accumulator_reset` 和 `bp_bout_accumulator_update`。静止、动作切换、断连或用户切换时必须重置。当前 `export_esp32_header` 仍只自动导出单个平铺 `BPNet`，尚未自动打包两个六分支 M0 权重；不要把旧单模型头文件当作最终双模型。
+最终固定评估复现命令见根目录 README；双 M0 生成和逐值验证命令见 `dual_m0_export.py --help` 与 `verify_dual_m0_c.py --help`。
 
 Round21 的 288 维可视验证结果为准确率 `91.88%`、宏平均 F1 `91.56%`、最低类别召回 `81.47%`。仍未达标的类别为 `jumping_lunge`、`jumping_squat`、`tuck_jump` 和 `lunge`，因此后续先执行误分类窗口子集特征分析，不直接继续训练。
 

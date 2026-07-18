@@ -1,0 +1,12 @@
+# 固定第三方组件版本，避免用户以后烧录时自动升级造成驱动或界面行为漂移。
+dependencies:
+  # 使用真板已连续稳定验证的厂家 BSP 2.0.0；其内部采用 SH8601/FT5x06 兼容驱动路径。
+  waveshare/esp32_s3_touch_amoled_2_06:
+    version: "2.0.0"
+  # UI 使用厂家 ESP-IDF 示例同代的 LVGL 9.5.0，避免 8/9 API 混用。
+  lvgl/lvgl:
+    version: "9.5.0"
+    public: true
+  # LittleFS 保存最多 200 条会话摘要、设置和同步水位；原始 IMU 默认写外部 TF 卡。
+  joltwallet/littlefs:
+    version: "1.22.2"

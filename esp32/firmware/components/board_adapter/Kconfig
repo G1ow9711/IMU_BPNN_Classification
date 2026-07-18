@@ -1,0 +1,34 @@
+menu "Waveshare 2.06 英寸板级配置"
+
+    config BOARD_PANEL_SH8601
+        bool
+        default y
+        help
+            固定使用厂家受管 BSP 的 SH8601 兼容显示路径；产品页物料名 CO5300 由厂家 BSP 内部适配，不向应用暴露未实现的原生选项。
+
+    config BOARD_PANEL_CO5300
+        bool
+        default n
+        help
+            保留旧配置符号兼容现有源码；当前不得由 menuconfig 选择未实现的原生 CO5300 路径。
+
+    config BOARD_TOUCH_FT3168
+        bool
+        default y
+        help
+            固定使用厂家受管 BSP 的 FT5x06 兼容触摸路径，覆盖本地原理图标注的 FT3168。
+
+    config BOARD_TOUCH_CST9220
+        bool
+        default n
+        help
+            保留旧配置符号兼容现有源码；当前不得由 menuconfig 选择未实现的原生 CST9220 路径。
+
+    config BOARD_ENABLE_QMI_DEEP_WAKE
+        bool "允许 QMI8658 GPIO21 从 Deep-sleep 唤醒"
+        default y
+        help
+            默认启用 GPIO21 EXT1 运动唤醒；QMI8658 初始使用 40 mg 门限和 4 个 21 Hz 样本消隐。
+            量产前必须在原配电池、外壳、手持和携带条件下实测误唤醒率，并按真机数据校准门限。
+
+endmenu

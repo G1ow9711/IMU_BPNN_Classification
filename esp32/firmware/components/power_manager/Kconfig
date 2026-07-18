@@ -1,0 +1,20 @@
+menu "健身手柄低功耗配置"
+
+    config POWER_BATTERY_CAPACITY_MAH
+        int "电池额定容量（mAh）"
+        range 100 5000
+        default 400
+        help
+            当前产品预算使用 400 mAh 电池；更换电池后必须同步修改并重新实测。
+
+    config POWER_ACTIVE_RUNTIME_TARGET_HOURS
+        int "训练续航目标（小时）"
+        range 1 24
+        default 6
+
+    config POWER_DEEP_STANDBY_TARGET_DAYS
+        int "深待机目标（天）"
+        range 1 30
+        default 7
+
+endmenu
