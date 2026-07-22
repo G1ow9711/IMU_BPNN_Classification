@@ -24,6 +24,8 @@ extern "C" {
 #define BLE_SERVICE_LIVE_STATE_V1_SIZE ((size_t)30U)
 // EventV1 payload 固定为 36 字节，供 PC 立即播放动画但不取代 LiveState 权威累计值。
 #define BLE_SERVICE_EVENT_V1_SIZE ((size_t)36U)
+// InferenceDiagnosticV1 payload 固定为 28 字节，传输双 M0 与融合分类的真机诊断证据。
+#define BLE_SERVICE_INFERENCE_DIAGNOSTIC_V1_SIZE ((size_t)28U)
 // 未知动作使用 255，避免把预热或低置信度状态错误映射成任一真实动作。
 #define BLE_SERVICE_ACTION_UNKNOWN UINT8_C(255)
 // 未知电量使用 255，区别于真实的 0% 电量。
@@ -31,7 +33,7 @@ extern "C" {
 // 未设置训练目标使用 255，区别于已设置但完成度为 0%。
 #define BLE_SERVICE_GOAL_NOT_SET UINT8_C(255)
 
-// v1 定义的八种逻辑消息类型；数值直接写入逻辑帧偏移 4。
+// v1 定义的九种逻辑消息类型；数值直接写入逻辑帧偏移 4。
 typedef enum ble_service_message_type {
     // PC 写入控制点的启停、暂停、配置或快照请求。
     BLE_SERVICE_MESSAGE_CONTROL_REQUEST = 1,
@@ -48,7 +50,9 @@ typedef enum ble_service_message_type {
     // ESP32 通过传输数据 notification 发布的摘要或日志块。
     BLE_SERVICE_MESSAGE_TRANSFER_DATA = 7,
     // ESP32 通过原始流 notification 发布的开发者六轴样本。
-    BLE_SERVICE_MESSAGE_RAW_STREAM = 8
+    BLE_SERVICE_MESSAGE_RAW_STREAM = 8,
+    // ESP32 通过原始流 notification 发布的双 M0 与融合分类诊断。
+    BLE_SERVICE_MESSAGE_INFERENCE_DIAGNOSTIC = 9
 } ble_service_message_type_t;
 
 // v1 控制命令编号与 docs/BLE通信协议.md 第 9.3 节保持逐项一致。
@@ -167,7 +171,7 @@ typedef struct ble_service_live_state_v1 {
     uint32_t state_revision;
     // 当前会话单调时长，单位毫秒，不受 UTC 校时影响。
     uint32_t elapsed_ms;
-    // 设备状态取值 0～7，对应 Booting、Idle、Running 等状态。
+    // 设备状态固定为 0 Booting、1 Idle、2 Preparing、3 Running、4 Paused、5 Summary、6 Error、7 Shutdown。
     uint8_t device_state;
     // 动作索引取值 0～10，或 255 表示未知。
     uint8_t action_id;
@@ -195,7 +199,7 @@ typedef struct ble_service_event_v1 {
     uint8_t event_version;
     // 事件类型取值 1～11，对应 ble_service_event_type_t。
     uint8_t event_type;
-    // 设备状态取值 0～7，表示事件提交后的权威状态。
+    // 设备状态固定为 0 Booting、1 Idle、2 Preparing、3 Running、4 Paused、5 Summary、6 Error、7 Shutdown。
     uint8_t device_state;
     // 动作索引 0～10，或 255 表示该事件不关联具体动作。
     uint8_t action_id;
@@ -222,6 +226,34 @@ typedef struct ble_service_event_v1 {
     // 事件专用原因码，例如低电量门槛或故障子码；普通事件为 0。
     uint16_t detail_code;
 } ble_service_event_v1_t;
+
+// InferenceDiagnosticV1 使用固定 28 字节小端布局，只用于阶段一真板分类诊断，不替代权威训练状态。
+typedef struct ble_service_inference_diagnostic_v1 {
+    // 诊断 payload 版本，当前固定为 1，允许后续独立扩展字段。
+    uint8_t diagnostic_version;
+    // 0.85/0.15 融合 logits 的 Top-1 动作索引，取值 0～10 或 255 未知。
+    uint8_t fused_action_id;
+    // 基础 M0 的 Top-1 动作索引，取值 0～10 或 255 未知。
+    uint8_t base_action_id;
+    // 掩码 M0 的 Top-1 动作索引，取值 0～10 或 255 未知。
+    uint8_t masked_action_id;
+    // 融合 logits 经稳定 softmax 得到的 Q15 置信度，0～65535 对应 0～1。
+    uint16_t fused_confidence_q15;
+    // 基础 M0 经稳定 softmax 得到的 Q15 置信度，0～65535 对应 0～1。
+    uint16_t base_confidence_q15;
+    // 掩码 M0 经稳定 softmax 得到的 Q15 置信度，0～65535 对应 0～1。
+    uint16_t masked_confidence_q15;
+    // 当前推理窗口的数据质量位集合，与 IMU pipeline 质量定义一致。
+    uint16_t quality_flags;
+    // 完成推理的窗口序号，从设备启动后按成功触发顺序单调递增并允许自然回绕。
+    uint32_t window_sequence;
+    // 当前窗口最后一个重采样点的设备单调时间，单位毫秒。
+    uint32_t window_end_ms;
+    // 297 维特征提取与双 M0 前向的总耗时，单位微秒。
+    uint32_t inference_time_us;
+    // pipeline 启动后累计失败窗口数，用于发现传感器或数值异常。
+    uint32_t failure_count;
+} ble_service_inference_diagnostic_v1_t;
 
 // 控制请求视图只借用已解码帧 payload；回调返回后不得继续保存 tlv 指针。
 typedef struct ble_service_control_request {
@@ -292,7 +324,7 @@ typedef struct ble_service_connection {
 // 清空连接重组器、幂等缓存和发送序号；建立连接和断连时都必须调用。
 void ble_service_connection_reset(ble_service_connection_t *connection);
 
-// 验证消息类型是否属于 v1 的 1～8 范围。
+// 验证消息类型是否属于 v1 的 1～9 范围。
 ble_service_status_t ble_service_validate_message_type(uint8_t message_type);
 
 // 把 LiveStateV1 编码为固定 30 字节小端 payload，并校验动作、电量和目标范围。
@@ -309,9 +341,16 @@ ble_service_status_t ble_service_encode_event_v1(
     size_t output_capacity,
     size_t *output_length);
 
+// 把 InferenceDiagnosticV1 编码为固定 28 字节小端 payload，并校验版本和三组动作索引。
+ble_service_status_t ble_service_encode_inference_diagnostic_v1(
+    const ble_service_inference_diagnostic_v1_t *diagnostic,
+    uint8_t *output,
+    size_t output_capacity,
+    size_t *output_length);
+
 // 构造任一 v1 逻辑消息，实际帧格式和 CRC 由 shared/protocol 统一编码。
 ble_service_status_t ble_service_encode_message(
-    // v1 消息类型，合法范围 1～8；超界返回 BLE_SERVICE_STATUS_PROTOCOL_ERROR。
+    // v1 消息类型，合法范围 1～9；超界返回 BLE_SERVICE_STATUS_PROTOCOL_ERROR。
     uint8_t message_type,
     // 协议标志位；未知位按 shared/protocol 合同保留或拒绝。
     uint8_t flags,

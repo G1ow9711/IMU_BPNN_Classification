@@ -33,7 +33,7 @@ extern "C" {
 #define MOTION_PHASE_REST_GYRO_DPS (22.0F)
 /* 静止判定加速度模长相对 1 g 的允许偏差，单位 g。 */
 #define MOTION_PHASE_REST_ACCEL_TOLERANCE_G (0.24F)
-/* 跳跃腾空判定加速度模长上限，单位 g。 */
+/* 三个高动态跳跃类的腾空判定加速度模长上限，单位 g；开合跳不使用。 */
 #define MOTION_PHASE_FLIGHT_MAX_G (0.78F)
 /* 起跳推进判定加速度模长门槛，单位 g。 */
 #define MOTION_PHASE_TAKEOFF_MIN_G (1.18F)
@@ -43,6 +43,20 @@ extern "C" {
 #define MOTION_PHASE_STEP_PEAK_DELTA_G (0.16F)
 /* 每个离散事件至少保持两个 25 Hz 点，满足下游计数器稳定相位合同。 */
 #define MOTION_PHASE_EVENT_HOLD_SAMPLES (2U)
+/* 开合跳参考算法第一级均值窗口为 11 点，25 Hz 下覆盖 0.44 秒。 */
+#define MOTION_PERIODIC_MEAN_LONG_LENGTH (11U)
+/* 开合跳参考算法第二级均值窗口为 5 点，25 Hz 下覆盖 0.20 秒。 */
+#define MOTION_PERIODIC_MEAN_SHORT_LENGTH (5U)
+/* 峰谷间至少相隔 4 个滤波输出点，即至少 0.16 秒，过近变化视为毛刺。 */
+#define MOTION_PERIODIC_MIN_HALF_CYCLE_SAMPLES (4U)
+/* 峰谷间至多相隔 40 个滤波输出点，即至多 1.60 秒，过慢变化视为姿态漂移。 */
+#define MOTION_PERIODIC_MAX_HALF_CYCLE_SAMPLES (40U)
+/* 相邻峰谷幅值至少为 1/14 g，与用户 StepCounter 的 4096/14 raw 阈值一致。 */
+#define MOTION_PERIODIC_MIN_AMPLITUDE_G (1.0F / 14.0F)
+/* 同一轴两次有效峰谷至少相隔 13 点，即 0.52 秒，抑制一个动作内部的次级波纹。 */
+#define MOTION_PERIODIC_AXIS_REFRACTORY_SAMPLES (13U)
+/* 单次振动保护窗最多允许连续跳过 4 个 25 Hz 点，即 160 ms；更长污染按断流重置。 */
+#define MOTION_PERIODIC_MAX_TRANSIENT_SKIP_SAMPLES (4U)
 
 /* 统一结果码；时间间断会重置内部周期并显式返回 GAP。 */
 typedef enum {
@@ -68,7 +82,7 @@ typedef struct {
 typedef struct {
     /* 当前相位；sit、walk、trot 没有重复相位时为 REST。 */
     fitness_motion_phase_t phase;
-    /* true 表示 phase 来自完整阈值事件或稳定静止，可送入重复计数器。 */
+    /* true 表示 phase 来自方向迟滞端点、跳跃阶段或稳定静止，可送入重复计数器。 */
     bool phase_valid;
     /* true 表示 walk/trot 出现一个局部冲击峰，可送入步峰去重器。 */
     bool step_peak;
@@ -77,6 +91,58 @@ typedef struct {
     /* 当前角速度模长，单位 deg/s，供诊断页显示。 */
     float gyro_magnitude_dps;
 } motion_phase_observation_t;
+
+/* 保存一级流式均值滤波器；最大 11 点静态数组避免 ESP32 堆分配。 */
+typedef struct {
+    /* buffer 按时间循环保存最多 11 个加速度样本，单位 g，内存 44 字节。 */
+    float buffer[MOTION_PERIODIC_MEAN_LONG_LENGTH];
+    /* sum_g 保存当前有效窗口总和，单位 g，用于 O(1) 更新均值。 */
+    float sum_g;
+    /* length 保存本级真实窗口长度，只允许 5 或 11。 */
+    uint8_t length;
+    /* write_index 指向下一次覆盖位置，范围 0..length-1。 */
+    uint8_t write_index;
+    /* count 保存已写入有效点数，达到 length 后保持不变。 */
+    uint8_t count;
+} motion_periodic_mean_filter_t;
+
+/* 保存一个加速度轴的在线相邻峰谷计数状态；无动态内存。 */
+typedef struct {
+    /* initialized 表示两个均值滤波器和计数状态已经建立。 */
+    bool initialized;
+    /* has_timestamp 表示 last_timestamp_ms 可用于检查单调性和采样间断。 */
+    bool has_timestamp;
+    /* last_timestamp_ms 保存最近输入时间，单位 ms，必须严格递增。 */
+    uint64_t last_timestamp_ms;
+    /* transient_skip_count 保存连续只占时间、不写幅值的马达污染点数，范围 0..4。 */
+    uint8_t transient_skip_count;
+    /* long_filter 先执行 11 点均值，压制腕部高频抖动。 */
+    motion_periodic_mean_filter_t long_filter;
+    /* short_filter 再执行 5 点均值，复现 StepCounter 的 11+5 双均值链。 */
+    motion_periodic_mean_filter_t short_filter;
+    /* previous_previous_g 保存上上个有效滤波点，单位 g，用于三点极值判定。 */
+    float previous_previous_g;
+    /* previous_g 保存上个有效滤波点，单位 g；当前点到来时判断它是否为峰或谷。 */
+    float previous_g;
+    /* filtered_history_count 保存已有历史点数，达到 2 后才检测局部极值。 */
+    uint8_t filtered_history_count;
+    /* filtered_sequence 保存有效滤波输出序号，单位点，宽度 32 位足够连续运行约 5.4 年。 */
+    uint32_t filtered_sequence;
+    /* pending_valid 表示已经保存一个尚未配对的峰或谷。 */
+    bool pending_valid;
+    /* pending_kind 保存 1=峰、2=谷；0 仅为空状态哨兵。 */
+    uint8_t pending_kind;
+    /* pending_sequence 保存待配极值在滤波输出中的序号。 */
+    uint32_t pending_sequence;
+    /* pending_value_g 保存待配极值，单位 g。 */
+    float pending_value_g;
+    /* has_last_pair 表示 last_pair_sequence 可用于单轴 13 点不应期。 */
+    bool has_last_pair;
+    /* last_pair_sequence 保存上一有效峰谷完成时的输出序号。 */
+    uint32_t last_pair_sequence;
+    /* total_pairs 保存本会话该轴累计峰谷对；每对直接代表一次动作，不乘二。 */
+    uint64_t total_pairs;
+} motion_periodic_pair_detector_t;
 
 /* 保存检测器静态状态；无动态内存，单会话约百字节。 */
 typedef struct {
@@ -88,10 +154,14 @@ typedef struct {
     bool has_timestamp;
     /* 上一个已接受样本的单调毫秒。 */
     uint64_t last_timestamp_ms;
-    /* 两相位动作学习到的三轴单位旋转方向。 */
+    /* 两相位动作学习到的三轴单位旋转方向；开合跳在本次会话内固定使用。 */
     float learned_gyro_direction[3];
-    /* true 表示 learned_gyro_direction 已归一化且可用于投影。 */
+    /* true 表示 learned_gyro_direction 已归一化且可用于投影；开合跳周期闭合后不清除。 */
     bool direction_valid;
+    /* 开合跳首窗选出的主周期角速度轴，0/1/2 分别表示 gx/gy/gz；其它动作不读取。 */
+    uint8_t fixed_gyro_axis;
+    /* true 表示开合跳改用 fixed_gyro_axis 的有符号单轴值，禁止三轴点积互相抵消。 */
+    bool fixed_gyro_axis_valid;
     /* 内部阶段；两相位和跳跃模式使用不同编号，外部不得改写。 */
     uint8_t stage;
     /* 当前需要继续输出的离散事件相位。 */
@@ -114,6 +184,13 @@ typedef struct {
 motion_phase_status_t motion_phase_init(
     motion_phase_detector_t *detector,
     fitness_action_t action);
+/*
+ * 在开合跳检测器首个样本前固定其角速度轴；gyro_axis 仅允许 0..2。
+ * 训练引擎创建三个检测器并分别配置 gx、gy、gz，使主周期迁移时任一轴都能提出候选。
+ */
+motion_phase_status_t motion_phase_configure_jumping_jack_axis(
+    motion_phase_detector_t *detector,
+    uint8_t gyro_axis);
 /* 保留锁定动作并清空不完整周期、方向、步峰和时间历史。 */
 void motion_phase_reset(motion_phase_detector_t *detector);
 /* 输入一个严格 25 Hz 六轴点，输出相位或步峰；时间复杂度 O(1)。 */
@@ -121,6 +198,25 @@ motion_phase_status_t motion_phase_push(
     motion_phase_detector_t *detector,
     const motion_phase_sample_t *sample,
     motion_phase_observation_t *observation);
+/* 初始化单轴 11+5 均值和相邻峰谷检测器；累计从零开始。 */
+motion_phase_status_t motion_periodic_pair_init(
+    motion_periodic_pair_detector_t *detector);
+/* 清空滤波、未完成峰谷和时间线，但保留 total_pairs 权威轴累计。 */
+void motion_periodic_pair_reset_cycle(
+    motion_periodic_pair_detector_t *detector);
+/*
+ * 短暂污染点只推进严格单调时间线，不把受污染加速度写入 11+5 均值或峰谷状态。
+ * 连续调用可跨过马达保护窗；单次间隔超过 120 ms 时仍清空未完成周期并返回 GAP_RESET。
+ */
+motion_phase_status_t motion_periodic_pair_skip_transient(
+    motion_periodic_pair_detector_t *detector,
+    uint64_t monotonic_ms);
+/* 输入一个 25 Hz 单轴加速度点，输出当前点是否完成一个不复用的相邻峰谷对。 */
+motion_phase_status_t motion_periodic_pair_push(
+    motion_periodic_pair_detector_t *detector,
+    uint64_t monotonic_ms,
+    float acceleration_g,
+    bool *pair_accepted);
 
 #ifdef __cplusplus
 /* 结束 C ABI 声明区。 */

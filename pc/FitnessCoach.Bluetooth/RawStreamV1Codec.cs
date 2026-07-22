@@ -47,6 +47,9 @@ public interface IRawStreamSource
     /// <summary>收到完整且合法的 22 字节样本时触发。</summary>
     event EventHandler<RawImuSampleReceivedEventArgs>? RawSampleReceived;
 
+    /// <summary>收到完整且合法的 28 字节双 M0 分类诊断时触发；回调线程不保证为 WPF UI 线程。</summary>
+    event EventHandler<InferenceDiagnosticReceivedEventArgs>? InferenceDiagnosticReceived;
+
     /// <summary>表示当前会话已成功要求设备发布 RawStream。</summary>
     bool IsRawStreamEnabled { get; }
 

@@ -195,6 +195,10 @@ static void test_ui_presenter_pages(void)
     ui_context_init(&context, 0U);
     /* 填充展示数据。 */
     context.view.action_id = 3U;
+    /* 实时分类与本轮跳跃深蹲一致，正常显示训练中。 */
+    context.view.inferred_action_id = 3U;
+    /* 打开计数门，使既有训练页合同走正常分支。 */
+    context.view.counting_enabled = true;
     context.view.count = 12U;
     context.view.calories_milli_kcal = 3456U;
     context.view.elapsed_seconds = 125U;
@@ -227,20 +231,34 @@ static void test_ui_presenter_pages(void)
     CHECK_TRUE(strstr(page.secondary, "3.456 千卡") != NULL);
     CHECK_TRUE(strstr(page.status, "电量 64%") != NULL);
     CHECK_TRUE(strstr(page.status, "蓝牙 已连") != NULL);
-    /* 准备倒计时纯函数按单调毫秒生成 3、2、1、0，避免 UI 线程依赖 RTC。 */
-    CHECK_EQ(3U, ui_prepare_countdown_seconds(1000U, 1000U));
-    CHECK_EQ(2U, ui_prepare_countdown_seconds(1000U, 2000U));
-    CHECK_EQ(1U, ui_prepare_countdown_seconds(1000U, 3000U));
-    CHECK_EQ(0U, ui_prepare_countdown_seconds(1000U, 4000U));
-    /* PREPARE 页面显示当前单个倒计时数字，而不是静态“3 2 1”。 */
+    /* 模拟训练中静坐休息：主动作仍为跳跃深蹲，但实时类别变成静坐并冻结计数。 */
+    context.view.inferred_action_id = 5U;
+    /* 关闭计数门，禁止把休息期间腕部噪声送入主动作计数器。 */
+    context.view.counting_enabled = false;
+    /* 重新构建同一训练页，不切换会话或计数器。 */
+    CHECK_TRUE(ui_presenter_build(&context, &page));
+    /* 标题必须明确当前不计数。 */
+    CHECK_TRUE(strcmp(page.title, "计数已暂停") == 0);
+    /* 主区域必须显示实时静坐，不能继续伪装为跳跃深蹲。 */
+    CHECK_TRUE(strcmp(page.primary, "静坐") == 0);
+    /* 权威累计保持 12 次，不因休息清零。 */
+    CHECK_TRUE(strstr(page.secondary, "12 次") != NULL);
+    /* 页脚说明恢复本轮主动作后自动继续。 */
+    CHECK_TRUE(strcmp(page.footer, "继续跳跃深蹲后自动记录") == 0);
+    /* 恢复正常状态，后续页面遍历继续使用一致快照。 */
+    context.view.inferred_action_id = 3U;
+    /* 同类干净窗口重新允许计数。 */
+    context.view.counting_enabled = true;
+    /* PREPARE 页面必须立即要求用户做动作，不能再显示会延后动作的 2 秒倒计时。 */
     context.state = UI_STATE_PREPARE;
-    context.view.prepare_countdown_seconds = 2U;
     CHECK_TRUE(ui_presenter_build(&context, &page));
-    CHECK_TRUE(strcmp(page.primary, "2") == 0);
-    /* 三秒结束后显示“开始动作”，直到模型累计证据锁定动作。 */
-    context.view.prepare_countdown_seconds = 0U;
-    CHECK_TRUE(ui_presenter_build(&context, &page));
-    CHECK_TRUE(strcmp(page.primary, "开始动作") == 0);
+    CHECK_TRUE(strcmp(page.title, "正在识别") == 0);
+    /* 主文案明确点击开始后立即开始动作。 */
+    CHECK_TRUE(strcmp(page.primary, "开始运动") == 0);
+    /* 次文案明确当前产品固定使用右手腕佩戴域。 */
+    CHECK_TRUE(strcmp(page.secondary, "保持右手佩戴") == 0);
+    /* 页脚必须说明锁类后的自动记录行为，不能暴露内部窗口术语。 */
+    CHECK_TRUE(strcmp(page.footer, "识别后自动记录") == 0);
     /* 停止确认页必须同时提供确认和取消，防止训练中误触直接结束。 */
     context.state = UI_STATE_STOP_CONFIRM;
     CHECK_TRUE(ui_presenter_build(&context, &page));

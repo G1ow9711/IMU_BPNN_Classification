@@ -7,7 +7,7 @@ namespace FitnessCoach.Bluetooth;
 /// <summary>
 /// 模拟独立运行的 ESP32：PC 断线后训练继续，重连时发布最新权威快照。
 /// </summary>
-public sealed class MockDeviceSession : IDeviceSession, IDevicePairingSession, IDeviceDiagnosticsSource, IDeviceConfigurationSession, IRawStreamSource, ISessionHistorySyncSource
+public sealed class MockDeviceSession : IDeviceSession, IDevicePairingSession, IDeviceDiagnosticsSource, IDeviceConfigurationSession, IRawStreamSource, ISessionHistorySyncSource, IDeviceProtocolEventSource
 {
     // 默认模拟动作按 11 类固定顺序循环，便于逐页验证动画和单位。
     private static readonly ActionId[] DefaultScript =
@@ -47,6 +47,8 @@ public sealed class MockDeviceSession : IDeviceSession, IDevicePairingSession, I
     private uint _sessionSequence;
     // 权威状态修订号；每次状态或累计变化递增。
     private uint _stateRevision;
+    // 会话内低延迟事件序号；每次新会话从零重新开始，模拟固件 MetricEvent 幂等合同。
+    private uint _eventSequence;
     // 当前会话单调时长，单位毫秒。
     private uint _elapsedMilliseconds;
     // 当前会话总卡路里，单位千分之一千卡。
@@ -130,6 +132,12 @@ public sealed class MockDeviceSession : IDeviceSession, IDevicePairingSession, I
 
     /// <inheritdoc />
     public event EventHandler<RawImuSampleReceivedEventArgs>? RawSampleReceived;
+
+    /// <inheritdoc />
+    public event EventHandler<InferenceDiagnosticReceivedEventArgs>? InferenceDiagnosticReceived;
+
+    /// <inheritdoc />
+    public event EventHandler<DeviceProtocolEventEventArgs>? ProtocolEventReceived;
 
     /// <inheritdoc />
     public string DeviceId => "MOCK-ESP32S3-0001";
@@ -559,6 +567,8 @@ public sealed class MockDeviceSession : IDeviceSession, IDevicePairingSession, I
                     _caloriesMilliKcal = 0;
                     // 清零模拟 tick 序号。
                     _tickIndex = 0;
+                    // 新会话的低延迟事件序号从零重新开始。
+                    _eventSequence = 0U;
                     // 清空各动作历史指标。
                     _metrics.Clear();
                     // 首个动作取脚本第一项。
@@ -836,6 +846,10 @@ public sealed class MockDeviceSession : IDeviceSession, IDevicePairingSession, I
                 LiveState? snapshot;
                 // 保存可选 RawStream 样本；关闭状态保持 null。
                 RawImuSampleV1? rawSample;
+                // 保存可选双 M0 分类诊断；每十二个模拟点形成一个窗口事实。
+                InferenceDiagnosticV1? inferenceDiagnostic;
+                // 保存可选权威计数事件；只有次或步真实增加时才创建。
+                DeviceProtocolEventEventArgs? metricEvent;
 
                 // 推进设备内部状态时持有锁。
                 lock (_sync)
@@ -847,6 +861,8 @@ public sealed class MockDeviceSession : IDeviceSession, IDevicePairingSession, I
                         continue;
                     }
 
+                    // 保存推进前 tick 序号，用于判断本轮是否满足步数或次数边界。
+                    uint tickIndexBeforeAdvance = _tickIndex;
                     // 推进一个确定性模拟 tick。
                     AdvanceTickLocked();
                     // PC 连接时才发布通知，断线期间只保留内部状态。
@@ -856,6 +872,14 @@ public sealed class MockDeviceSession : IDeviceSession, IDevicePairingSession, I
                     // 只有显式启用且 PC 链路连接时才创建开发者原始样本。
                     rawSample = _rawStreamEnabled && _isConnected
                         ? CreateRawSampleLocked()
+                        : null;
+                    // Mock 只在显式 RawStream 会话且到达固定窗口边界时创建分类诊断。
+                    inferenceDiagnostic = _rawStreamEnabled && _isConnected && ((_tickIndex % 12U) == 0U)
+                        ? CreateInferenceDiagnosticLocked()
+                        : null;
+                    // 次数或步数在本轮增加时创建精确设备时间的 EventV1；持续秒数不作为计数标记。
+                    metricEvent = _rawStreamEnabled && _isConnected && DidMetricIncreaseOnTickLocked(tickIndexBeforeAdvance)
+                        ? CreateMetricEventLocked()
                         : null;
                 }
 
@@ -871,6 +895,20 @@ public sealed class MockDeviceSession : IDeviceSession, IDevicePairingSession, I
                 {
                     // 发布确定性原始六轴样本供诊断页显示。
                     RawSampleReceived?.Invoke(this, new RawImuSampleReceivedEventArgs(rawSample));
+                }
+                // 分类诊断独立发布且不修改权威 LiveState 或训练计数。
+                if (inferenceDiagnostic is not null)
+                {
+                    // 发布确定性三路模型结果供界面离线展示和协议测试。
+                    InferenceDiagnosticReceived?.Invoke(
+                        this,
+                        new InferenceDiagnosticReceivedEventArgs(inferenceDiagnostic));
+                }
+                // 权威计数事件独立发布；上位机只把它标到 CSV，不据此修改累计值。
+                if (metricEvent is not null)
+                {
+                    // 发布含设备单调毫秒和 EventV1 的不可变事件。
+                    ProtocolEventReceived?.Invoke(this, metricEvent);
                 }
             }
         }
@@ -995,6 +1033,97 @@ public sealed class MockDeviceSession : IDeviceSession, IDevicePairingSession, I
             checked((short)(-128 - phase)),
             checked((short)(2048 + phase)),
             0);
+    }
+
+    // 创建确定性 Mock 双 M0 分类诊断；调用者必须持有 _sync。
+    private InferenceDiagnosticV1 CreateInferenceDiagnosticLocked()
+    {
+        // 复用当前脚本动作作为融合 Top-1，保证模拟页面动作随设备时钟变化。
+        ActionId fusedAction = _actionScript[checked((int)((_tickIndex / 10U) % (uint)_actionScript.Length))];
+        // 基础模型在 Mock 中与融合结果一致，表示当前窗口没有模型分歧。
+        ActionId baseAction = fusedAction;
+        // 每隔二十四个点让掩码模型显示相邻类别，用于验证分歧状态的 UI 呈现。
+        ActionId maskedAction = ((_tickIndex / 12U) % 2U) == 0U
+            ? fusedAction
+            : (ActionId)(((byte)fusedAction + 1U) % 11U);
+        // 返回固定可重复诊断；概率在 0～1，时间单位微秒，质量和失败累计均为零。
+        return new InferenceDiagnosticV1(
+            1,
+            fusedAction,
+            baseAction,
+            maskedAction,
+            0.86,
+            0.82,
+            0.74,
+            0,
+            _tickIndex / 12U,
+            _elapsedMilliseconds,
+            18350,
+            0);
+    }
+
+    // 判断刚完成的 Mock tick 是否使重复次数或步数增加；调用者必须持有 _sync。
+    private bool DidMetricIncreaseOnTickLocked(uint tickIndexBeforeAdvance)
+    {
+        // 行走与小跑在推进前 tick 为奇数时增加一步，与 AdvanceTickLocked 完全一致。
+        if (_currentMetricKind == MetricKind.Step)
+        {
+            // 返回本轮是否命中每两个 tick 一步的确定性边界。
+            return (tickIndexBeforeAdvance % 2U) == 1U;
+        }
+        // 其它重复动作在推进前 tick 模四等于三时增加一次。
+        if (_currentMetricKind == MetricKind.Repetition)
+        {
+            // 返回本轮是否命中每四个 tick 一次的确定性边界。
+            return (tickIndexBeforeAdvance % 4U) == 3U;
+        }
+        // 持续秒与无指标动作不产生计数标记。
+        return false;
+    }
+
+    // 创建与最近一次累计增加对应的 EventV1；调用者必须持有 _sync。
+    private DeviceProtocolEventEventArgs CreateMetricEventLocked()
+    {
+        // 会话内事件序号严格递增；uint32 自然回绕与固件合同一致。
+        _eventSequence = unchecked(_eventSequence + 1U);
+        // 组装只用于低延迟标记的协议事件；权威累计仍由相邻 LiveState 提供。
+        DeviceEventV1 deviceEvent = new(
+            // EventV1 payload 版本固定为一。
+            1,
+            // 次数和步数都复用 RepetitionCounted，MetricKind 区分单位。
+            DeviceEventType.RepetitionCounted,
+            // 事件发生后设备仍处于训练中。
+            _deviceState,
+            // 保存本轮稳定动作。
+            _currentAction,
+            // 保存次数或步数单位。
+            _currentMetricKind,
+            // 保存当前电量。
+            _batteryPercent,
+            // Mock 没有传感器污染或丢样质量位。
+            0,
+            // 保存当前持久化会话序号。
+            _sessionSequence,
+            // 保存会话内幂等事件序号。
+            _eventSequence,
+            // 保存事件对应的权威状态修订号。
+            _stateRevision,
+            // 每个 Mock 计数事件固定增加一。
+            1U,
+            // 保存事件发生后的当前权威累计值。
+            _currentMetricValue,
+            // 保存事件时刻累计热量，单位千分之一千卡。
+            _caloriesMilliKcal,
+            // Mock 运行态使用固定 Q15 分类置信度。
+            57_500,
+            // 普通计数没有额外原因码。
+            0);
+        // 逻辑帧序号使用事件序号低 16 位，设备单调毫秒与当前 RawStream 点完全一致。
+        return new DeviceProtocolEventEventArgs(
+            unchecked((ushort)_eventSequence),
+            _elapsedMilliseconds,
+            deviceEvent,
+            EventV1Codec.Encode(deviceEvent));
     }
 
     // 从当前可变指标创建不可变摘要；调用者必须持有 _sync。

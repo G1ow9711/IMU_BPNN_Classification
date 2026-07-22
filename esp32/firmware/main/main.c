@@ -79,6 +79,14 @@
 
 /* 固定应用日志标签。 */
 static const char *const APP_TAG = "imu_handheld";
+/*
+ * 阻止编译器把事件边界函数重新内联到 app_event_task。
+ * app_event_task 的 FreeRTOS 栈固定为 20 KiB；协调器事务本身需要约 8.4 KiB 候选副本。
+ * 若 QMI、UI、BLE 三条高层处理链再次内联，Xtensa 会为所有互斥分支一次性预留约 9.5 KiB，
+ * START 或首个采样再嵌套协调器时只剩不足 2.2 KiB，可能触发栈溢出并整机复位。
+ * 该属性只改变调用边界，不改变任务、时序、业务状态、模型或显示链。
+ */
+#define APP_STACK_BOUNDARY __attribute__((noinline))
 /* LittleFS VFS 根目录固定为 /littlefs。 */
 #define APP_LITTLEFS_BASE_PATH "/littlefs"
 /* 双槽摘要文件固定放在内部 Flash LittleFS。 */
@@ -101,6 +109,8 @@ static const char *const APP_TAG = "imu_handheld";
 #define APP_LONG_IDLE_MS UINT32_C(600000)
 /* 当前现场联调固件固定常亮：true 时禁止自动熄屏、自动 Light-sleep 和长空闲 Deep-sleep；用户主动关机仍有效。 */
 #define APP_BENCH_ALWAYS_ON (true)
+/* Cmd11 成功应答后延迟 750 ms 开始通知，避免高频 RawStream 抢占 Control Point indication。 */
+#define APP_RAW_STREAM_ACTIVATION_DELAY_MS UINT32_C(750)
 /* 当前功能联调版恢复 BLE 射频，用于真机配对、RawStream、LiveState 和分类结果验证。 */
 #define APP_BENCH_DISABLE_BLE (false)
 /* 当前功能联调版恢复首个 HOME 电源策略，使 QMI 在开始训练后可切换到 ACTIVE 采样。 */
@@ -231,7 +241,9 @@ typedef enum app_ble_output_kind {
     /* 发布已经编码的 36 字节 EventV1 payload。 */
     APP_BLE_OUTPUT_EVENT,
     /* 发布开发者 25 Hz 六轴原始码诊断流；不重传、不落盘。 */
-    APP_BLE_OUTPUT_RAW_STREAM
+    APP_BLE_OUTPUT_RAW_STREAM,
+    /* 发布阶段一双 M0 与融合分类诊断；复用 Raw Stream 安全通道。 */
+    APP_BLE_OUTPUT_INFERENCE_DIAGNOSTIC
 } app_ble_output_kind_t;
 
 /* BLE 输出队列项。 */
@@ -244,10 +256,16 @@ typedef struct app_ble_output {
     uint8_t event_payload[BLE_SERVICE_EVENT_V1_SIZE];
     /* 保存事件有效长度，当前固定为 36。 */
     uint16_t event_length;
+    /* 保存原始 MetricEvent 单调毫秒低 32 位，禁止用 BLE 任务实际发送时刻替代。 */
+    uint32_t event_monotonic_ms;
     /* 保存 RawStream v1 固定 22 字节 payload。 */
     uint8_t raw_payload[APP_RAW_STREAM_V1_SIZE];
     /* 保存 RawStream 有效长度，当前固定为 22。 */
     uint16_t raw_length;
+    /* 保存 InferenceDiagnosticV1 固定 28 字节 payload。 */
+    uint8_t inference_payload[BLE_SERVICE_INFERENCE_DIAGNOSTIC_V1_SIZE];
+    /* 保存分类诊断有效长度，当前固定为 28。 */
+    uint16_t inference_length;
 } app_ble_output_t;
 
 /* 摘要存储队列项。 */
@@ -264,6 +282,8 @@ typedef struct app_power_request {
     power_policy_t policy;
     /* true 表示摘要已刷盘，允许执行 policy 中的 PMIC 关机。 */
     bool persist_authorized;
+    /* true 表示本请求只覆盖 QMI 等本地外设，禁止重新提交当前 BLE 连接参数。 */
+    bool preserve_ble_link;
 } app_power_request_t;
 
 /* BLE 同步 broker 的单槽状态；NimBLE v1 只有一个 PC 且 GATT 写串行。 */
@@ -308,6 +328,8 @@ static board_runtime_diagnostics_t s_board_diagnostics;
 static app_sensor_hub_t s_sensors;
 /* IMU 流水线约 5.5 KiB，必须位于静态区而不是任务栈。 */
 static imu_pipeline_t s_imu_pipeline;
+/* 保存最近一次同步双 M0 中间诊断；流水线应用任务是唯一写者和发布者。 */
+static imu_pipeline_dual_m0_diagnostics_t s_dual_m0_diagnostics;
 /* 应用协调器含训练引擎和状态机，只有应用任务允许修改。 */
 static device_coordinator_t s_coordinator;
 /* 生产空闲计时器只由应用任务修改，空闲任务只投递查询事件。 */
@@ -318,6 +340,10 @@ static uint32_t s_screen_timeout_ms = APP_DEFAULT_SCREEN_TIMEOUT_MS;
 static device_config_t s_device_config;
 /* RawStream 是断线即关闭的易失诊断开关；volatile 允许 BLE 发布任务快速丢弃关闭后的排队帧。 */
 static volatile bool s_raw_stream_enabled;
+/* true 表示 Cmd11 已通过但仍在等待控制应答离开 GATT 队列；仅应用任务读写。 */
+static bool s_raw_stream_activation_pending;
+/* 保存允许开始发布的单调微秒门槛；与 QMI 帧 timestamp_us 使用同一 esp_timer 时间基准。 */
+static uint64_t s_raw_stream_activation_due_us;
 /* 每个 25 Hz 重采样点递增一次，uint32 溢出按协议自然回绕。 */
 static uint32_t s_raw_sample_index;
 /* 会话仓储含最近 200 条摘要，静态分配避免堆碎片。 */
@@ -403,6 +429,8 @@ static int app_pm_locked_dual_m0_infer(
     const float window[IMU_PIPELINE_WINDOW_SAMPLES][IMU_PIPELINE_AXIS_COUNT],
     float logits[IMU_PIPELINE_CLASS_COUNT])
 {
+    /* 捕获完整特征提取和双模型前向开始时间，单位为设备单调微秒。 */
+    const uint64_t started_us = app_now_us();
     /* 启动阶段必须成功创建锁；空锁表示软件初始化合同被破坏。 */
     if (s_inference_pm_lock == NULL) {
         /* 返回负值，流水线会给窗口增加 INFERENCE_FAILED 质量位。 */
@@ -426,6 +454,18 @@ static int app_pm_locked_dual_m0_infer(
         /* 输出 ESP-IDF 错误。 */
         ESP_LOGE(APP_TAG, "inference PM lock release failed=%s", esp_err_to_name(release_status));
     }
+    /* 非空上下文按适配器合同指向双 M0 诊断对象，应用包装器负责补充端到端耗时。 */
+    if (context != NULL) {
+        /* 恢复长期持有的诊断对象；本次同步调用结束后仍由应用任务独占。 */
+        imu_pipeline_dual_m0_diagnostics_t *const diagnostics =
+            (imu_pipeline_dual_m0_diagnostics_t *)context;
+        /* 计算无符号单调耗时；正常设备运行不会发生 64 位回绕。 */
+        const uint64_t elapsed_us = app_now_us() - started_us;
+        /* 线上字段为 u32 微秒，超过约 71 分钟时饱和而不回绕成小值。 */
+        diagnostics->inference_time_us = elapsed_us > UINT32_MAX
+            ? UINT32_MAX
+            : (uint32_t)elapsed_us;
+    }
     /* 返回双 M0 原始状态；零表示本窗口 11 类 logits 有效。 */
     return inference_status;
 }
@@ -437,6 +477,19 @@ static uint64_t app_coordinator_time_ms(const uint64_t captured_ms)
     return captured_ms < s_coordinator.last_monotonic_ms
                ? s_coordinator.last_monotonic_ms
                : captured_ms;
+}
+
+/* 判断当前状态是否接受完整 62 点训练推理；窗口自身已经保证约 2.48 秒连续样本。 */
+static bool app_training_accepts_inference(void)
+{
+    /* 只有准备或运行状态属于用户主动开始的训练，Idle 诊断不发布动作判断。 */
+    if ((s_coordinator.workout.state != WORKOUT_STATE_PREPARING) &&
+        (s_coordinator.workout.state != WORKOUT_STATE_RUNNING)) {
+        /* 空闲、暂停或总结状态不允许训练分类。 */
+        return false;
+    }
+    /* 首个完整窗口立即进入有界累计确认，不叠加固定倒计时；最多再等待三个重叠窗。 */
+    return true;
 }
 
 /* 饱和 uint64 到 uint32。 */
@@ -715,11 +768,97 @@ static void app_queue_raw_sample(
     (void)xQueueSend(s_ble_queue, &output, 0U);
 }
 
-/* 把唯一 MetricEvent 转成固定 EventV1 并投递。 */
-static void app_queue_metric_event(const device_effects_t *effects)
+/* 编码并排队一个双 M0 分类诊断；只有开发者 RawStream 会话可见。 */
+static void app_queue_inference_diagnostic(const imu_pipeline_inference_result_t *result)
 {
-    /* effect 必须同时含 MetricEvent 和 LiveState，后者提供修订号与电量。 */
-    if ((effects == NULL) || (s_ble_queue == NULL)) {
+    /* 分类诊断沿用开发者、显式 RawStream、安全连接和有效队列四重门槛。 */
+    if ((result == NULL) || !s_device_config.developer_mode ||
+        !s_raw_stream_enabled || !ble_service_nimble_is_connected() ||
+        (s_ble_queue == NULL)) {
+        /* 普通产品运行不计算额外协议帧，也不落盘。 */
+        return;
+    }
+    /* 取得流水线只读统计；对象生命周期覆盖整个应用。 */
+    const imu_pipeline_stats_t *const stats = imu_pipeline_get_stats(&s_imu_pipeline);
+    /* 本窗口成功且适配器诊断有效时发布真实三路结果，否则动作使用未知值。 */
+    const bool model_valid = (result->inference_status == 0) &&
+        (s_dual_m0_diagnostics.valid != UINT8_C(0));
+    /* 组装固定宽度线上对象；所有累计与时间字段使用设备事实。 */
+    const ble_service_inference_diagnostic_v1_t diagnostic = {
+        /* 当前分类诊断布局固定为版本一。 */
+        .diagnostic_version = UINT8_C(1),
+        /* 融合 Top-1 仅在本窗口成功时有效。 */
+        .fused_action_id = model_valid
+            ? s_dual_m0_diagnostics.fused_action_id
+            : BLE_SERVICE_ACTION_UNKNOWN,
+        /* 基础 M0 Top-1 仅在本窗口成功时有效。 */
+        .base_action_id = model_valid
+            ? s_dual_m0_diagnostics.base_action_id
+            : BLE_SERVICE_ACTION_UNKNOWN,
+        /* 掩码 M0 Top-1 仅在本窗口成功时有效。 */
+        .masked_action_id = model_valid
+            ? s_dual_m0_diagnostics.masked_action_id
+            : BLE_SERVICE_ACTION_UNKNOWN,
+        /* 失败窗口不沿用上次融合置信度。 */
+        .fused_confidence_q15 = model_valid
+            ? s_dual_m0_diagnostics.fused_confidence_q15
+            : UINT16_C(0),
+        /* 失败窗口不沿用上次基础模型置信度。 */
+        .base_confidence_q15 = model_valid
+            ? s_dual_m0_diagnostics.base_confidence_q15
+            : UINT16_C(0),
+        /* 失败窗口不沿用上次掩码模型置信度。 */
+        .masked_confidence_q15 = model_valid
+            ? s_dual_m0_diagnostics.masked_confidence_q15
+            : UINT16_C(0),
+        /* 低 16 位保留窗口预热、插值、振动污染和推理失败等质量事实。 */
+        .quality_flags = (uint16_t)(result->quality_flags & UINT16_MAX),
+        /* 窗口序号允许 u32 自然回绕。 */
+        .window_sequence = result->sequence,
+        /* 单调微秒换算毫秒后取低 32 位，与 RawStream 时间合同一致。 */
+        .window_end_ms = (uint32_t)(result->end_timestamp_us / UINT64_C(1000)),
+        /* 耗时由持有 CPU 最高频率锁的包装器现场测量。 */
+        .inference_time_us = s_dual_m0_diagnostics.inference_time_us,
+        /* 统计指针理论上非空；防御分支在异常初始化时返回零而不解引用。 */
+        .failure_count = stats != NULL ? stats->inference_failures : UINT32_C(0),
+    };
+    /* 创建按值 BLE 队列项，避免借用栈上诊断对象。 */
+    app_ble_output_t output;
+    /* 清除 LiveState、Event 和 RawStream 无效字段。 */
+    (void)memset(&output, 0, sizeof(output));
+    /* 标记类型九分类诊断。 */
+    output.kind = APP_BLE_OUTPUT_INFERENCE_DIAGNOSTIC;
+    /* 编码器使用 size_t 返回固定 payload 长度。 */
+    size_t encoded_length = 0U;
+    /* 按固定小端偏移编码三路模型事实。 */
+    const ble_service_status_t encode_status = ble_service_encode_inference_diagnostic_v1(
+        &diagnostic,
+        output.inference_payload,
+        sizeof(output.inference_payload),
+        &encoded_length);
+    /* 编码失败或长度漂移时拒绝发布，避免 PC 错位解析。 */
+    if ((encode_status != BLE_SERVICE_STATUS_OK) ||
+        (encoded_length != BLE_SERVICE_INFERENCE_DIAGNOSTIC_V1_SIZE)) {
+        /* 输出稳定错误码和实际长度供串口定位协议回归。 */
+        ESP_LOGE(APP_TAG, "encode inference diagnostic failed status=%d length=%u",
+                 (int)encode_status,
+                 (unsigned int)encoded_length);
+        /* 不排入坏 payload。 */
+        return;
+    }
+    /* 固定线上长度安全收窄到队列 u16 字段。 */
+    output.inference_length = (uint16_t)encoded_length;
+    /* 分类通知不重传；队列满时丢当前窗口，下一窗口会给出新事实。 */
+    (void)xQueueSend(s_ble_queue, &output, 0U);
+}
+
+/* 把一条领域 MetricEvent 和同修订 LiveState 转成固定 EventV1 并投递。 */
+static void app_queue_one_metric_event(
+    const fitness_metric_event_t *metric_event,
+    const ble_service_live_state_v1_t *live_state)
+{
+    /* 事件、权威状态和 BLE 输出队列都必须有效。 */
+    if ((metric_event == NULL) || (live_state == NULL) || (s_ble_queue == NULL)) {
         /* 安全返回。 */
         return;
     }
@@ -730,29 +869,29 @@ static void app_queue_metric_event(const device_effects_t *effects)
         /* 指标事件统一使用 REPETITION_COUNTED，metric_kind 区分次/步/秒。 */
         .event_type = BLE_SERVICE_EVENT_REPETITION_COUNTED,
         /* 使用效果同修订的设备状态。 */
-        .device_state = effects->live_state.device_state,
+        .device_state = live_state->device_state,
         /* 使用领域事件动作。 */
-        .action_id = (uint8_t)effects->metric_event.action,
+        .action_id = (uint8_t)metric_event->action,
         /* fitness 0~2 映射 BLE 1~3。 */
-        .metric_kind = (uint8_t)effects->metric_event.metric_kind + 1U,
+        .metric_kind = (uint8_t)metric_event->metric_kind + 1U,
         /* 使用同修订电量。 */
-        .battery_percent = effects->live_state.battery_percent,
+        .battery_percent = live_state->battery_percent,
         /* 传播质量位。 */
-        .quality_flags = effects->metric_event.quality_flags,
+        .quality_flags = metric_event->quality_flags,
         /* 使用会话序号。 */
-        .session_sequence = effects->metric_event.session_seq,
+        .session_sequence = metric_event->session_seq,
         /* 使用会话内幂等事件号。 */
-        .event_sequence = effects->metric_event.event_seq,
+        .event_sequence = metric_event->event_seq,
         /* 使用协调器权威修订号。 */
-        .state_revision = effects->live_state.state_revision,
+        .state_revision = live_state->state_revision,
         /* 写入本次增量。 */
-        .metric_delta = effects->metric_event.delta_value,
+        .metric_delta = metric_event->delta_value,
         /* 饱和写入当前累计。 */
-        .metric_total = app_u64_to_u32(effects->metric_event.total_value),
+        .metric_total = app_u64_to_u32(metric_event->total_value),
         /* microkcal 转 mcal。 */
-        .calories_mcal = app_microkcal_to_mcal(effects->metric_event.gross_microkcal),
+        .calories_mcal = app_microkcal_to_mcal(metric_event->gross_microkcal),
         /* 直接携带领域 Q15 稳定度。 */
-        .confidence_q15 = effects->metric_event.stability_q15,
+        .confidence_q15 = metric_event->stability_q15,
         /* 普通指标事件没有额外原因。 */
         .detail_code = 0U,
     };
@@ -779,6 +918,8 @@ static void app_queue_metric_event(const device_effects_t *effects)
     }
     /* 保存线上长度。 */
     output.event_length = (uint16_t)encoded_length;
+    /* 保存领域事件原始时刻；预锁定样本回放产生的计数仍必须指向历史 IMU 点。 */
+    output.event_monotonic_ms = (uint32_t)metric_event->monotonic_ms;
     /* Event 队列满时不重算指标；LiveState 与摘要仍是权威恢复源。 */
     if (xQueueSend(s_ble_queue, &output, 0U) != pdPASS) {
         /* 记录丢失。 */
@@ -786,8 +927,35 @@ static void app_queue_metric_event(const device_effects_t *effects)
     }
 }
 
-/* 把电源策略投递给电源任务。 */
-static void app_queue_power(const power_policy_t *policy, const bool persist_authorized)
+/* 把普通单事件或锁类补算事件序列按 event_seq 顺序投递到 BLE。 */
+static void app_queue_metric_events(const device_effects_t *effects)
+{
+    /* effect 和 BLE 队列必须有效；调用方已检查 BLE_EVENT 标志。 */
+    if ((effects == NULL) || (s_ble_queue == NULL)) {
+        /* 安全返回。 */
+        return;
+    }
+    /* 补算数组非空表示本次锁类回放形成了多条历史计数事件。 */
+    if (effects->replay_metric_event_count > 0U) {
+        /* 按协调器给出的严格递增 event_seq 遍历全部有效事件。 */
+        for (uint8_t index = 0U; index < effects->replay_metric_event_count; ++index) {
+            /* 每条事件使用同一最终锁类修订号，但保留各自原始 IMU 时间和累计值。 */
+            app_queue_one_metric_event(
+                &effects->replay_metric_events[index],
+                &effects->live_state);
+        }
+        /* 补算序列已完整投递，禁止再发送未置位的普通单事件槽。 */
+        return;
+    }
+    /* 普通运行期 effect 只含一个实时 MetricEvent。 */
+    app_queue_one_metric_event(&effects->metric_event, &effects->live_state);
+}
+
+/* 把电源策略投递给电源任务，并显式声明是否保持当前 BLE 链路参数。 */
+static void app_queue_power_internal(
+    const power_policy_t *policy,
+    const bool persist_authorized,
+    const bool preserve_ble_link)
 {
     /* 检查输入与队列。 */
     if ((policy == NULL) || (s_power_queue == NULL)) {
@@ -800,7 +968,20 @@ static void app_queue_power(const power_policy_t *policy, const bool persist_aut
         .policy = *policy,
         /* 写入刷盘授权。 */
         .persist_authorized = persist_authorized,
+        /* 写入 BLE 链路保护位；诊断覆盖不得打断正在等待 ACK 的 GATT 会话。 */
+        .preserve_ble_link = preserve_ble_link,
     };
+    /* 阶段一常亮联调要求每个后续电池、连接和页面事件都保持连续六轴采样。 */
+    if (APP_BENCH_ALWAYS_ON) {
+        /* 强制 QMI 使用 ACTIVE，防止启动电池事件把初始 25 Hz 策略覆盖回 WOM。 */
+        request.policy.imu_mode = POWER_IMU_ACTIVE_25HZ;
+        /* 联调期间关闭自动 Light-sleep，保证传感器时间戳连续。 */
+        request.policy.automatic_light_sleep = false;
+        /* 联调期间拒绝任何领域事件携带 Deep-sleep 请求。 */
+        request.policy.request_deep_sleep = false;
+        /* ACTIVE 采样不安装 QMI Deep-sleep 运动唤醒路径。 */
+        request.policy.enable_imu_deep_wake = false;
+    }
     /* 默认 35% 档由用户偏好完整替换；暂停 15% 档只允许用户再调暗。 */
     if (request.policy.display_on &&
         ((request.policy.display_brightness_percent == UINT8_C(35)) ||
@@ -810,6 +991,36 @@ static void app_queue_power(const power_policy_t *policy, const bool persist_aut
     }
     /* 长度 1 队列只保留最新策略；关机状态不会再被普通状态覆盖。 */
     (void)xQueueOverwrite(s_power_queue, &request);
+}
+
+/* 把普通完整电源策略投递给电源任务；领域状态变化允许同步更新 BLE 射频模式。 */
+static void app_queue_power(const power_policy_t *policy, const bool persist_authorized)
+{
+    /* 普通策略使用 false，确保页面、训练和待机状态仍可按原合同切换 BLE 模式。 */
+    app_queue_power_internal(policy, persist_authorized, false);
+}
+
+/* RawStream 诊断临时覆盖 QMI 模式；不修改 power_manager 领域状态，关闭后恢复当前页面策略。 */
+static void app_queue_raw_stream_power_policy(const bool enabled)
+{
+    /* 常亮阶段一固件从开机起已固定 QMI ACTIVE；Cmd11 不再切寄存器或投递电源请求。 */
+    if (APP_BENCH_ALWAYS_ON) {
+        /* 保持正在运行的 QMI 和 BLE 会话，RawStream 命令只修改发布门控与流水线状态。 */
+        return;
+    }
+    /* 从协调器取得当前 HOME、RUNNING 或 PAUSED 的完整权威功耗策略副本。 */
+    power_policy_t policy = power_manager_policy(&s_coordinator.power);
+    /* 开启诊断时必须产生严格 25 Hz 六轴点，HOME 的 WOM 模式不能满足 RawStream 和 62 点窗口。 */
+    if (enabled) {
+        /* 把 IMU 临时覆盖为活动采样；屏幕、触摸和亮度继续服从当前页面策略。 */
+        policy.imu_mode = POWER_IMU_ACTIVE_25HZ;
+        /* 诊断采样期间不得携带 Deep-sleep 请求，避免尚未完成的窗口被睡眠截断。 */
+        policy.request_deep_sleep = false;
+        /* ACTIVE 模式不使用 QMI GPIO21 深睡唤醒，防止电源任务误按 WOM 检查 EXT1。 */
+        policy.enable_imu_deep_wake = false;
+    }
+    /* 串行切换 QMI，但保持既有 BLE 连接参数，避免 Cmd11 ACK 期间更新 GAP 参数导致取消。 */
+    app_queue_power_internal(&policy, false, true);
 }
 
 /* 投递非阻塞振动序列；污染区只能由马达任务按真实 PWM 启动时刻登记。 */
@@ -850,10 +1061,10 @@ static void app_dispatch_effects(const device_effects_t *effects)
         /* 投递状态。 */
         app_queue_live_state(&effects->live_state);
     }
-    /* Event 从唯一 MetricEvent 编码。 */
+    /* Event 从普通单事件或锁类补算事件序列编码。 */
     if ((effects->flags & DEVICE_EFFECT_BLE_EVENT) != 0U) {
-        /* 投递事件。 */
-        app_queue_metric_event(effects);
+        /* 按 event_seq 顺序投递全部有效事件。 */
+        app_queue_metric_events(effects);
     }
     /* 逐条预登记并投递振动波形。 */
     if ((effects->flags & DEVICE_EFFECT_HAPTIC) != 0U) {
@@ -985,7 +1196,7 @@ static void app_pipeline_on_sample(void *context, const imu_resampled_sample_t *
     }
 }
 
-/* 双 M0 推理回调；失败或关键质量窗不用于锁定动作。 */
+/* 双 M0 推理回调；失败窗拒绝，质量位交给训练引擎按准备态/运行态分别判定。 */
 static void app_pipeline_on_inference(
     void *context,
     const imu_pipeline_inference_result_t *result)
@@ -997,16 +1208,23 @@ static void app_pipeline_on_inference(
         /* 安全返回。 */
         return;
     }
-    /* 任何推理失败或质量告警都不提交动作证据。 */
-    if ((result->inference_status != 0) || (result->quality_flags != IMU_QUALITY_OK)) {
-        /* 只记录推理错误，常规质量位由诊断统计观察。 */
-        if (result->inference_status != 0) {
-            /* 输出错误。 */
-            ESP_LOGE(APP_TAG, "dual M0 inference failed=%d seq=%lu",
-                     result->inference_status,
-                     (unsigned long)result->sequence);
-        }
-        /* 返回。 */
+    /* 把窗口结束时刻换算到协调器唯一单调毫秒时基。 */
+    const uint64_t inference_ms = app_coordinator_time_ms(
+        result->end_timestamp_us / UINT64_C(1000));
+    /* 非训练状态只保留底层采集；训练首个完整窗口必须立即进入锁类。 */
+    if (!app_training_accepts_inference()) {
+        /* 返回后下一窗口继续采集，START/RESUME 已清除旧窗口。 */
+        return;
+    }
+    /* 分类门打开后才发布融合动作、双模型结果和推理耗时到上位机。 */
+    app_queue_inference_diagnostic(result);
+    /* 只有模型推理失败时拒绝；质量告警窗仍需让 RUNNING 识别异类并冻结错误计数。 */
+    if (result->inference_status != 0) {
+        /* 输出错误，下一完整窗口继续推理。 */
+        ESP_LOGE(APP_TAG, "dual M0 inference failed=%d seq=%lu",
+                 result->inference_status,
+                 (unsigned long)result->sequence);
+        /* 失败 logits 不得进入训练引擎。 */
         return;
     }
     /* 保存效果。 */
@@ -1015,7 +1233,7 @@ static void app_pipeline_on_inference(
     const device_coordinator_status_t status = device_coordinator_push_inference(
         &s_coordinator,
         result->logits,
-        app_coordinator_time_ms(result->end_timestamp_us / UINT64_C(1000)),
+        inference_ms,
         (uint16_t)(result->quality_flags & UINT16_MAX),
         &effects);
     /* 成功时可能触发动作锁定和页面切换。 */
@@ -1030,12 +1248,22 @@ static void app_pipeline_on_inference(
 }
 
 /* 将一帧 QMI 原始数据提交给应用任务独占的流水线。 */
-static void app_process_qmi_frame(const board_qmi8658_frame_t *frame)
+static APP_STACK_BOUNDARY void app_process_qmi_frame(const board_qmi8658_frame_t *frame)
 {
     /* 空帧不处理。 */
     if (frame == NULL) {
         /* 安全返回。 */
         return;
+    }
+    /* Cmd11 应答后的首个到期 QMI 帧原子打开发布门，BLE worker 此前不会收到六轴或分类帧。 */
+    if (s_raw_stream_activation_pending &&
+        (frame->timestamp_us >= s_raw_stream_activation_due_us)) {
+        /* 先清除 pending，保证后续每帧不重复执行激活事务。 */
+        s_raw_stream_activation_pending = false;
+        /* 清零已消费的绝对门槛，避免诊断快照误读旧时间。 */
+        s_raw_stream_activation_due_us = UINT64_C(0);
+        /* 最后打开 volatile 发布门；BLE 任务从下一批队列项开始允许通知。 */
+        s_raw_stream_enabled = true;
     }
     /* 复用一个三轴原始点结构。 */
     imu_qmi_raw_sample_t raw;
@@ -1261,7 +1489,9 @@ static bool app_process_local_ui_command(const ui_command_t command)
 }
 
 /* 处理 UI 命令；设置/诊断直接改纯 UI，其余走协调器统一控制。 */
-static void app_process_ui_command(const ui_command_t command, const uint64_t captured_ms)
+static APP_STACK_BOUNDARY void app_process_ui_command(
+    const ui_command_t command,
+    const uint64_t captured_ms)
 {
     /* 任意真实触摸都是用户活动，重新开始熄屏和长空闲计时。 */
     power_idle_timer_note_activity(&s_power_idle_timer, captured_ms);
@@ -1407,7 +1637,7 @@ static bool app_preferences_match_current(const device_preferences_command_t *pr
 }
 
 /* 处理 Cmd6/7/8/9/11；返回 true 表示命令已完成并已释放完成信号。 */
-static bool app_process_device_config_command(const uint64_t captured_ms)
+static APP_STACK_BOUNDARY bool app_process_device_config_command(const uint64_t captured_ms)
 {
     /* 非配置命令交给原会话控制路径。 */
     if (!app_is_device_config_command(s_ble_command_slot.command_id)) {
@@ -1498,8 +1728,25 @@ static bool app_process_device_config_command(const uint64_t captured_ms)
     if (command.command_id == (uint8_t)DEVICE_COMMAND_SET_RAW_STREAM) {
         /* 保存运行配置视图。 */
         s_device_config.raw_stream_enabled = candidate.raw_stream_enabled;
-        /* 发布任务只读取该易失门控。 */
-        s_raw_stream_enabled = candidate.raw_stream_enabled;
+        /* 开关命令处理期间保持发布关闭，禁止通知抢在 Control Point 应答前进入 GATT。 */
+        s_raw_stream_enabled = false;
+        /* 开启前清空 WOM 或旧诊断留下的时间网格，首个 62 点窗口必须全部来自连续 ACTIVE 数据。 */
+        if (candidate.raw_stream_enabled) {
+            /* 应用任务是流水线唯一写者，此处重置不会和 QMI 读取任务并发修改窗口。 */
+            imu_pipeline_reset_session(&s_imu_pipeline);
+            /* 记录延迟激活状态；后续 QMI 帧到期时才允许六轴与分类通知。 */
+            s_raw_stream_activation_pending = true;
+            /* 使用单调微秒构造 750 ms 门槛，uint64 在设备寿命内不会溢出。 */
+            s_raw_stream_activation_due_us =
+                (app_now_ms() + (uint64_t)APP_RAW_STREAM_ACTIVATION_DELAY_MS) * UINT64_C(1000);
+        } else {
+            /* 关闭命令取消尚未到期的激活，防止旧定时点在关闭后重新开流。 */
+            s_raw_stream_activation_pending = false;
+            /* 清除旧门槛。 */
+            s_raw_stream_activation_due_us = UINT64_C(0);
+        }
+        /* 开启时临时恢复 QMI ACTIVE，关闭时恢复协调器当前页面的 HOME/WOM 或训练策略。 */
+        app_queue_raw_stream_power_policy(candidate.raw_stream_enabled);
         /* 返回成功，不执行 NVS commit。 */
         app_finish_ble_explicit(BLE_SERVICE_CONTROL_OK, BLE_SERVICE_ERROR_NONE);
         /* 命令已完成。 */
@@ -1608,7 +1855,7 @@ static bool app_process_device_config_command(const uint64_t captured_ms)
 }
 
 /* 应用任务处理 broker 中已复制的 BLE 控制命令。 */
-static void app_process_ble_command(const uint64_t captured_ms)
+static APP_STACK_BOUNDARY void app_process_ble_command(const uint64_t captured_ms)
 {
     /* 每个已经通过 BLE 安全层和协议解析的控制命令都属于用户活动。 */
     power_idle_timer_note_activity(&s_power_idle_timer, captured_ms);
@@ -2008,8 +2255,14 @@ static void app_event_task(void *argument)
                 if (!event.data.ble_connected) {
                     /* 关闭 BLE 发布任务门控。 */
                     s_raw_stream_enabled = false;
+                    /* 断线同时取消尚未到期的延迟激活，重连后必须重新发送 Cmd11。 */
+                    s_raw_stream_activation_pending = false;
+                    /* 清除旧连接的激活门槛。 */
+                    s_raw_stream_activation_due_us = UINT64_C(0);
                     /* 同步运行配置视图，但不写入 NVS。 */
                     s_device_config.raw_stream_enabled = false;
+                    /* 断线后恢复当前页面策略，HOME 不得继续为已失效的 PC 诊断保持 ACTIVE 采样。 */
+                    app_queue_raw_stream_power_policy(false);
                 }
                 /* 保存效果。 */
                 device_effects_t effects;
@@ -2321,39 +2574,14 @@ static void app_ui_task(void *argument)
     (void)argument;
     /* 保存页面快照。 */
     ui_context_t ui;
-    /* 标记 ui 已收到第一份长期快照，避免读取未初始化栈内容。 */
-    bool has_snapshot = false;
     /* 永久等待最新页面。 */
     while (true) {
-        /* PREPARE 每 100 ms 醒一次以推进 3-2-1；其它页面永久等待事件，减少 CPU 唤醒。 */
-        const TickType_t wait_ticks = has_snapshot && (ui.state == UI_STATE_PREPARE)
-            ? pdMS_TO_TICKS(100U)
-            : portMAX_DELAY;
+        /* 所有页面都只等待领域层新快照；准备页不再用本地倒计时制造额外唤醒和重绘。 */
+        const TickType_t wait_ticks = portMAX_DELAY;
         /* 标记本轮是否收到领域层新快照。 */
         const bool received = xQueueReceive(s_ui_queue, &ui, wait_ticks) == pdPASS;
-        /* 新快照使局部页面内容有效。 */
+        /* 只有收到新的领域事实才渲染，减少 QSPI 局部刷新并保持官方异步显示路径。 */
         if (received) {
-            /* 保存初始化事实。 */
-            has_snapshot = true;
-        }
-        /* 默认只有新快照需要重绘。 */
-        bool should_render = received;
-        /* PREPARE 的倒计时只修改 UI 任务私有副本，不跨线程写 coordinator。 */
-        if (has_snapshot && (ui.state == UI_STATE_PREPARE)) {
-            /* 按状态进入时刻和当前单调低 32 位计算 3、2、1、0。 */
-            const uint8_t remaining = ui_prepare_countdown_seconds(
-                ui.state_entered_ms,
-                (uint32_t)app_now_ms());
-            /* 只有数字变化才重绘，避免 AMOLED 每 100 ms 无效刷新。 */
-            if (remaining != ui.view.prepare_countdown_seconds) {
-                /* 更新私有显示字段；领域会话不读取该副本。 */
-                ui.view.prepare_countdown_seconds = remaining;
-                /* 请求本轮刷新。 */
-                should_render = true;
-            }
-        }
-        /* 有新事实或倒计时变化时渲染。 */
-        if (should_render) {
             /* 渲染失败只记录，业务状态仍保持。 */
             const ui_lvgl_result_t status = ui_lvgl_renderer_render(&s_ui_renderer, &ui);
             /* 输出错误。 */
@@ -2424,10 +2652,19 @@ static void app_ble_task(void *argument)
                 (void)ble_service_nimble_publish_live_state(&output.live_state);
             } else if (output.kind == APP_BLE_OUTPUT_EVENT) {
                 /* 发布 EventV1 payload。 */
-                (void)ble_service_nimble_publish_event(output.event_payload, output.event_length);
+                (void)ble_service_nimble_publish_event(
+                    output.event_payload,
+                    output.event_length,
+                    output.event_monotonic_ms);
             } else if ((output.kind == APP_BLE_OUTPUT_RAW_STREAM) && s_raw_stream_enabled) {
                 /* 仅在易失开关仍开启时发布；关闭后排队的旧帧会被静默丢弃。 */
                 (void)ble_service_nimble_publish_raw_stream(output.raw_payload, output.raw_length);
+            } else if ((output.kind == APP_BLE_OUTPUT_INFERENCE_DIAGNOSTIC) &&
+                       s_raw_stream_enabled) {
+                /* 复用 Raw Stream 的已加密订阅发布分类窗口，不阻塞应用推理任务。 */
+                (void)ble_service_nimble_publish_inference_diagnostic(
+                    output.inference_payload,
+                    output.inference_length);
             }
         }
         /* 未连接时不消费 transfer 页，保留给 PC 重试。 */
@@ -2915,8 +3152,11 @@ static void app_power_task(void *argument)
                 continue;
             }
         }
-        /* Deep-sleep 先决条件已通过或本策略不睡眠，现在才切换 BLE 射频状态。 */
-        app_apply_ble_power_mode(request.policy.ble_mode);
+        /* RawStream 临时 QMI 覆盖必须保持当前 BLE 会话；其它策略继续差分切换射频模式。 */
+        if (!request.preserve_ble_link) {
+            /* 仅普通页面、训练、待机和关机请求允许提交 GAP 连接或广播参数。 */
+            app_apply_ble_power_mode(request.policy.ble_mode);
+        }
         /* 应用 AMOLED 物理 Display On/Off 与亮度。 */
         (void)board_adapter_set_display(
             board_runtime_adapter(&s_board_runtime),
@@ -3563,8 +3803,8 @@ static bool app_init_domains(void)
         .gyro_dps_per_lsb = BOARD_QMI8658_GYRO_DPS_PER_LSB,
         /* 生产双 M0 使用短时最高频率锁，推理结束立即允许动态降频。 */
         .infer = app_pm_locked_dual_m0_infer,
-        /* 当前模型无可变上下文。 */
-        .inference_context = NULL,
+        /* 长期诊断对象接收基础、掩码和融合 Top-1；由同一应用任务串行读写。 */
+        .inference_context = &s_dual_m0_diagnostics,
         /* 25 Hz 点进入计数/热量。 */
         .on_sample = app_pipeline_on_sample,
         /* 不保存原始窗口。 */
@@ -4128,8 +4368,19 @@ void app_main(void)
     app_queue_ui(&s_coordinator.ui);
     /* 隔离版保持 BSP 已建立的 35% 常亮状态；普通版本才允许初始策略切换全部外设。 */
     if (!APP_BENCH_SKIP_INITIAL_POWER_POLICY) {
-        /* 应用初始 Home 功耗策略。 */
-        const power_policy_t initial_policy = power_manager_policy(&s_coordinator.power);
+        /* 复制初始 Home 功耗策略；联调常亮版需要在 BLE 命令到来前预先保持 QMI 活动。 */
+        power_policy_t initial_policy = power_manager_policy(&s_coordinator.power);
+        /* 阶段一禁用低功耗并持续采集，避免 Cmd11 控制事务中途切换 QMI 寄存器。 */
+        if (APP_BENCH_ALWAYS_ON) {
+            /* 六轴采样从开机即使用 ACTIVE 量程和 ODR，RawStream 与分类共享同一连续时间轴。 */
+            initial_policy.imu_mode = POWER_IMU_ACTIVE_25HZ;
+            /* 常亮联调不得携带自动 Light-sleep 请求。 */
+            initial_policy.automatic_light_sleep = false;
+            /* 常亮联调不得携带 Deep-sleep 请求。 */
+            initial_policy.request_deep_sleep = false;
+            /* ACTIVE 采样不使用 QMI 运动唤醒中断。 */
+            initial_policy.enable_imu_deep_wake = false;
+        }
         /* 投递策略。 */
         app_queue_power(&initial_policy, false);
         /* PMIC 可信时立即送入 15/8/5% 规则。 */

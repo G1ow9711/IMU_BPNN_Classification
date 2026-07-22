@@ -25,9 +25,16 @@
                     <!-- 状态提示行。 -->
                     <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
-                <!-- 当前动作名称。 -->
-                <TextBlock Grid.Row="0" Text="{Binding ActionName}" FontSize="28" FontWeight="SemiBold" HorizontalAlignment="Center" />
-                <!-- 纯 WPF 矢量火柴人由权威 action_id 与 AnimationRevision 驱动，不加载 GIF、Lottie 或网络资源。 -->
+                <!-- 当前动作和佩戴要求形成两级标题。 -->
+                <StackPanel Grid.Row="0" HorizontalAlignment="Center">
+                    <!-- 当前稳定动作来自设备权威状态。 -->
+                    <TextBlock Text="{Binding ActionName}" FontSize="28" FontWeight="SemiBold" HorizontalAlignment="Center" />
+                    <!-- 单条标准姿态提示与教练人偶保持同一动作来源。 -->
+                    <TextBlock Text="{Binding ActionCueText}" Foreground="{StaticResource SecondaryTextBrush}" FontSize="12" HorizontalAlignment="Center" Margin="0,4,0,0" />
+                    <!-- 当前模型固定使用右手腕佩戴域。 -->
+                    <TextBlock Text="右手腕佩戴" Foreground="{StaticResource SecondaryTextBrush}" FontSize="11" HorizontalAlignment="Center" Margin="0,2,0,0" />
+                </StackPanel>
+                <!-- 纯 WPF 矢量教练人偶由权威 action_id 与 AnimationRevision 驱动，不加载 GIF、Lottie 或网络资源。 -->
                 <controls:ActionStickFigure Grid.Row="1"
                                             Action="{Binding CurrentAction}"
                                             AnimationRevision="{Binding AnimationRevision}"
@@ -70,7 +77,7 @@
             <!-- 指标卡片纵向排列。 -->
             <StackPanel>
                 <!-- 当前计数主卡片。 -->
-                <Border Background="#0A1110" BorderBrush="#16483A" BorderThickness="1" CornerRadius="14" Padding="22">
+                <Border Background="{StaticResource AccentSoftBrush}" BorderBrush="{StaticResource AccentBrush}" BorderThickness="1" CornerRadius="16" Padding="22">
                     <!-- 计数垂直排列。 -->
                     <StackPanel>
                         <!-- 指标标签。 -->

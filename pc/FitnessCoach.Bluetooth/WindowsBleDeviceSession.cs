@@ -11,7 +11,7 @@ namespace FitnessCoach.Bluetooth;
 /// <summary>
 /// 实现 Windows 真 BLE 会话：扫描连接、订阅、MTU 分片、控制重试、权威 revision 和指数退避重连。
 /// </summary>
-public sealed class WindowsBleDeviceSession : IDeviceSession, IDevicePairingSession, IDeviceDiscoverySession, ISessionHistorySyncSource, IDeviceDiagnosticsSource, IDeviceConfigurationSession, IRawStreamSource
+public sealed class WindowsBleDeviceSession : IDeviceSession, IDevicePairingSession, IDeviceDiscoverySession, ISessionHistorySyncSource, IDeviceDiagnosticsSource, IDeviceConfigurationSession, IRawStreamSource, IDeviceProtocolEventSource
 {
     // 协议规定控制 indication 最长等待 2 秒；测试可注入更短值但生产默认不可漂移。
     private static readonly TimeSpan DefaultControlTimeout = TimeSpan.FromSeconds(2);
@@ -176,6 +176,9 @@ public sealed class WindowsBleDeviceSession : IDeviceSession, IDevicePairingSess
 
     /// <inheritdoc />
     public event EventHandler<RawImuSampleReceivedEventArgs>? RawSampleReceived;
+
+    /// <inheritdoc />
+    public event EventHandler<InferenceDiagnosticReceivedEventArgs>? InferenceDiagnosticReceived;
 
     /// <summary>收到低延迟 Event 时触发；累计次数仍必须来自后续 LiveState。</summary>
     public event EventHandler<DeviceProtocolEventEventArgs>? ProtocolEventReceived;
@@ -1376,6 +1379,32 @@ public sealed class WindowsBleDeviceSession : IDeviceSession, IDevicePairingSess
                 // 在通知泵线程发布不可变样本；ViewModel 必须切回 WPF Dispatcher。
                 RawSampleReceived?.Invoke(this, new RawImuSampleReceivedEventArgs(rawSample!));
                 // 原始样本处理结束。
+                break;
+
+            // 分类诊断与 RawStream 共享 UUID 0007，但使用独立类型九和固定 28 字节布局。
+            case ProtocolMessageType.InferenceDiagnostic:
+                // 关闭状态下迟到或设备错误发布的分类诊断必须丢弃。
+                if (!IsRawStreamEnabled)
+                {
+                    // 不保存、不转发关闭后的模型中间结果。
+                    break;
+                }
+
+                // 严格解码三路动作、置信度、质量位、窗口序号和推理耗时。
+                if (!InferenceDiagnosticV1Codec.TryDecode(
+                        frame.Payload.Span,
+                        out InferenceDiagnosticV1? inferenceDiagnostic,
+                        out string? inferenceError))
+                {
+                    // 坏分类诊断不得进入 UI 或训练状态。
+                    throw new InvalidDataException(inferenceError ?? "分类诊断 v1 解码失败。" );
+                }
+
+                // 在通知泵线程发布不可变诊断；ViewModel 负责切回 WPF Dispatcher。
+                InferenceDiagnosticReceived?.Invoke(
+                    this,
+                    new InferenceDiagnosticReceivedEventArgs(inferenceDiagnostic!));
+                // 分类诊断处理结束。
                 break;
 
             // 其它消息由会话同步或开发者原始流模块处理，本设备会话安全忽略。

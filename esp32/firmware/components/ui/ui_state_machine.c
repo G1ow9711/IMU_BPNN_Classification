@@ -34,16 +34,18 @@ void ui_context_init(ui_context_t *context, uint32_t monotonic_ms)
     context->screen_on = true;
     /* 保存冷启动单调时刻。 */
     context->state_entered_ms = monotonic_ms;
-    /* 255 表示动作尚未稳定，不与 0~10 类别冲突。 */
+    /* 255 表示本轮主动作尚未选择，不与 0~10 类别冲突。 */
     context->view.action_id = UINT8_MAX;
+    /* 冷启动尚无实时推理类别。 */
+    context->view.inferred_action_id = UINT8_MAX;
+    /* 冷启动没有运行中的计数许可。 */
+    context->view.counting_enabled = false;
     /* 新会话计数从零开始。 */
     context->view.count = 0U;
     /* 新会话热量从零毫卡开始。 */
     context->view.calories_milli_kcal = 0U;
     /* 新会话运行时间从零秒开始。 */
     context->view.elapsed_seconds = 0U;
-    /* 非准备页不显示倒计时，使用零哨兵。 */
-    context->view.prepare_countdown_seconds = 0U;
     /* 纯状态机使用冻结默认 35%，生产入口会用 NVS 配置覆盖。 */
     context->view.brightness_percent = 35U;
     /* 纯状态机默认 30 秒熄屏，生产入口会用 NVS 配置覆盖。 */
@@ -79,8 +81,9 @@ static ui_dispatch_result_t ui_apply_global_event(ui_context_t *context, const u
     if (event->type == UI_EVENT_METRIC_UPDATED) {
         if (((event->metrics.action_id >= UI_ACTION_CLASS_COUNT) &&
              (event->metrics.action_id != UINT8_MAX)) ||
+            ((event->metrics.inferred_action_id >= UI_ACTION_CLASS_COUNT) &&
+             (event->metrics.inferred_action_id != UINT8_MAX)) ||
             (event->metrics.confidence_centipercent > 10000U) ||
-            (event->metrics.prepare_countdown_seconds > 3U) ||
             ((event->metrics.battery_percent > 100U) &&
              (event->metrics.battery_percent != UINT8_MAX))) {
             return UI_DISPATCH_ERR_RANGE;
@@ -206,14 +209,17 @@ ui_dispatch_result_t ui_dispatch_event(ui_context_t *context, const ui_event_t *
                 ui_transition(context, UI_STATE_SETTINGS, event->monotonic_ms);
                 return UI_DISPATCH_OK;
             }
-            /* 用户点击开始后进入 3 秒准备和 62 点窗口预热。 */
+            /* 用户点击开始后立即进入采样和识别；首个 62 点窗口形成期间不再显示倒计时。 */
             if (event->type == UI_EVENT_START_REQUESTED) {
                 context->session_active = true;
                 context->view.count = 0U;
                 context->view.calories_milli_kcal = 0U;
                 context->view.elapsed_seconds = 0U;
-                context->view.prepare_countdown_seconds = 3U;
                 context->view.action_id = UINT8_MAX;
+                /* 新会话尚无实时类别。 */
+                context->view.inferred_action_id = UINT8_MAX;
+                /* 准备阶段只采样和锁类，不运行任何计数器。 */
+                context->view.counting_enabled = false;
                 ui_transition(context, UI_STATE_PREPARE, event->monotonic_ms);
                 return UI_DISPATCH_OK;
             }
@@ -225,16 +231,14 @@ ui_dispatch_result_t ui_dispatch_event(ui_context_t *context, const ui_event_t *
             }
             break;
         case UI_STATE_PREPARE:
-            /* IMU 预热和倒计时完成后正式进入训练页。 */
+            /* 首个完整窗口锁定本会话唯一动作后进入训练页。 */
             if (event->type == UI_EVENT_PREPARE_COMPLETED) {
-                context->view.prepare_countdown_seconds = 0U;
                 ui_transition(context, UI_STATE_RUNNING, event->monotonic_ms);
                 return UI_DISPATCH_OK;
             }
             /* 准备阶段停止视为取消，不生成空总结。 */
             if (event->type == UI_EVENT_STOP_REQUESTED) {
                 context->session_active = false;
-                context->view.prepare_countdown_seconds = 0U;
                 ui_transition(context, UI_STATE_HOME, event->monotonic_ms);
                 return UI_DISPATCH_OK;
             }

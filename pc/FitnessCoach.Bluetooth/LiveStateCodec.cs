@@ -77,7 +77,7 @@ public static class LiveStateCodec
         // 读取设备状态原始字节。
         byte rawDeviceState = payload[12];
         // v1 只接受 Booting 到 Error 的连续枚举值。
-        if (rawDeviceState > (byte)FitnessDeviceState.Error)
+        if (rawDeviceState > (byte)FitnessDeviceState.Shutdown)
         {
             // 未知设备状态可能属于更高协议版本，不应映射成错误旧状态。
             error = $"未知设备状态值：{rawDeviceState}。";

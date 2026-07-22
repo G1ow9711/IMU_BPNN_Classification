@@ -14,7 +14,7 @@ typedef enum device_ble_state {
     DEVICE_BLE_STATE_BOOTING = 0,
     /* 主页空闲，可接受新会话。 */
     DEVICE_BLE_STATE_IDLE = 1,
-    /* 正在积累三个高置信窗口锁定动作。 */
+    /* 正在形成首个完整窗口并锁定本会话唯一动作。 */
     DEVICE_BLE_STATE_PREPARING = 2,
     /* 已锁定动作并接收 25 Hz 样本。 */
     DEVICE_BLE_STATE_RUNNING = 3,
@@ -264,8 +264,12 @@ static device_coordinator_status_t device_build_view_model(
     }
     /* 从当前 UI 顶栏开始，保留 BLE/电池/充电属性。 */
     *view = coordinator->ui.view;
-    /* 复制锁定动作或 255 未知哨兵。 */
+    /* 复制本轮主动作或 255 未知哨兵；该字段只决定计数器和指标单位。 */
     view->action_id = snapshot->action_id;
+    /* 复制最近推理窗口真实类别，使手表休息时不伪装为仍在执行主动作。 */
+    view->inferred_action_id = snapshot->inferred_action_id;
+    /* 复制领域计数门；false 时 UI 显示暂不计数但保留本轮累计。 */
+    view->counting_enabled = snapshot->classification_consistent;
     /* sit 快照已转为秒，其它动作是次或步。 */
     view->count = device_saturate_u64_to_u32(snapshot->metric_value);
     /* microkcal 除以 1000 变为 0.001 kcal，只做单位投影。 */
@@ -551,6 +555,53 @@ static device_coordinator_status_t device_absorb_metric_event(
     /* 标记已有稳定度样本。 */
     coordinator->has_stability = true;
     /* 吸收成功。 */
+    return DEVICE_COORDINATOR_OK;
+}
+
+/* 从训练引擎取出全部准备期补算事件，按序吸收摘要统计并写入本次 effect。 */
+static device_coordinator_status_t device_drain_replay_metric_events(
+    device_coordinator_t *coordinator,
+    device_effects_t *effects)
+{
+    /* 协调器和效果对象必须有效。 */
+    if ((coordinator == NULL) || (effects == NULL)) {
+        /* 返回参数错误。 */
+        return DEVICE_COORDINATOR_ERR_ARGUMENT;
+    }
+    /* 在固定 effect 容量内逐条取最早事件。 */
+    while (effects->replay_metric_event_count <
+           DEVICE_COORDINATOR_MAX_REPLAY_METRIC_EFFECTS) {
+        /* 当前写槽同时是尚未交付的事件索引。 */
+        fitness_metric_event_t *event =
+            &effects->replay_metric_events[effects->replay_metric_event_count];
+        /* 空队列表示全部补算事件已取完。 */
+        if (!workout_engine_pop_replay_metric_event(&coordinator->workout, event)) {
+            /* 正常结束循环。 */
+            break;
+        }
+        /* 每条事件必须按严格递增序号进入协调器摘要统计。 */
+        const device_coordinator_status_t absorb_status = device_absorb_metric_event(
+            coordinator,
+            event);
+        /* 事件链冲突时拒绝整次锁类候选事务。 */
+        if (absorb_status != DEVICE_COORDINATOR_OK) {
+            /* 返回真实错误。 */
+            return absorb_status;
+        }
+        /* 有效事件数增加一。 */
+        effects->replay_metric_event_count += 1U;
+    }
+    /* 训练引擎仍有事件表示容量推导漂移，禁止静默截断。 */
+    if (coordinator->workout.replay_metric_event_count != 0U) {
+        /* 返回领域错误。 */
+        return DEVICE_COORDINATOR_ERR_DOMAIN;
+    }
+    /* 至少一条事件时启用 BLE Event effect。 */
+    if (effects->replay_metric_event_count > 0U) {
+        /* 主任务将逐条排入 BLE 输出队列。 */
+        effects->flags |= DEVICE_EFFECT_BLE_EVENT;
+    }
+    /* 全部事件已按序吸收。 */
     return DEVICE_COORDINATOR_OK;
 }
 
@@ -1309,6 +1360,16 @@ device_coordinator_status_t device_coordinator_push_inference(
             return ui_status;
         }
     }
+    /* 锁类补算可能一次形成多条权威事件；必须在生成 LiveState 前逐条吸收并保留原时刻。 */
+    const device_coordinator_status_t replay_event_status =
+        device_drain_replay_metric_events(&candidate, effects);
+    /* 事件序号、会话或容量异常时回滚整次候选。 */
+    if (replay_event_status != DEVICE_COORDINATOR_OK) {
+        /* 清空半成品输出。 */
+        device_effects_clear(effects);
+        /* 返回真实错误。 */
+        return replay_event_status;
+    }
     /* 已锁定或运行置信度变化时递增修订号。 */
     device_increment_revision(&candidate);
     /* 把新动作、置信度和当前指标投影到 UI。 */
@@ -1320,7 +1381,7 @@ device_coordinator_status_t device_coordinator_push_inference(
         /* 返回错误。 */
         return ui_status;
     }
-    /* 锁定产生两次 20 ms 开始振动；运行置信度更新通常无振动。 */
+    /* 锁定补算可能产生真实次数振动；不再额外发送会污染首个实时周期的开始振动。 */
     device_drain_haptics(&candidate, effects);
     /* 生成 UI 和 LiveState；锁定不改变电源状态。 */
     const device_coordinator_status_t effect_status = device_emit_snapshots(
@@ -1333,6 +1394,23 @@ device_coordinator_status_t device_coordinator_push_inference(
         device_effects_clear(effects);
         /* 返回错误。 */
         return effect_status;
+    }
+    /* 补算事件已改变权威次数和 last_event_seq，必须同时交付幂等摘要写入。 */
+    if (effects->replay_metric_event_count > 0U) {
+        /* 从已吸收全部事件的候选构造最新摘要。 */
+        const device_coordinator_status_t summary_status = device_build_summary(
+            &candidate,
+            0U,
+            &effects->summary);
+        /* 摘要构造失败时回滚整次锁类。 */
+        if (summary_status != DEVICE_COORDINATOR_OK) {
+            /* 清空半成品。 */
+            device_effects_clear(effects);
+            /* 返回错误。 */
+            return summary_status;
+        }
+        /* 请求存储任务幂等写入最新累计。 */
+        effects->flags |= DEVICE_EFFECT_SUMMARY_WRITE;
     }
     /* 一次性提交。 */
     *coordinator = candidate;
@@ -1359,8 +1437,9 @@ device_coordinator_status_t device_coordinator_push_sample(
     }
     /* 先清空 effect。 */
     device_effects_clear(effects);
-    /* 暂停/准备/总结时不应处理 25 Hz 样本。 */
-    if (coordinator->workout.state != WORKOUT_STATE_RUNNING) {
+    /* PREPARING 需要缓存首窗样本；只有暂停、空闲和总结才不处理 25 Hz 点。 */
+    if ((coordinator->workout.state != WORKOUT_STATE_PREPARING) &&
+        (coordinator->workout.state != WORKOUT_STATE_RUNNING)) {
         /* 返回安全忽略。 */
         return DEVICE_COORDINATOR_IGNORED;
     }
@@ -1395,10 +1474,19 @@ device_coordinator_status_t device_coordinator_push_sample(
         quality_flags,
         &event,
         &emitted);
-    /* 任何错误时不提交候选副本。 */
-    if (workout_status != WORKOUT_STATUS_OK) {
+    /* PREPARING 返回 IGNORED 表示点已进入补算缓存，不是错误。 */
+    if ((workout_status != WORKOUT_STATUS_OK) &&
+        (workout_status != WORKOUT_STATUS_IGNORED)) {
         /* 转换错误。 */
         return device_map_workout_status(workout_status);
+    }
+    /* 准备期样本只提交环形缓存和活动时间，不在 25 Hz 频率刷新 UI/BLE。 */
+    if ((workout_status == WORKOUT_STATUS_IGNORED) &&
+        (candidate.workout.state == WORKOUT_STATE_PREPARING)) {
+        /* 原子提交已验证的准备点。 */
+        *coordinator = candidate;
+        /* 返回成功，主入口可继续分发空 effect。 */
+        return DEVICE_COORDINATOR_OK;
     }
     /* 没有 MetricEvent 时只提交领域时间/热量，不以 25 Hz 刷 UI/BLE。 */
     if (!emitted) {

@@ -41,7 +41,7 @@ extern "C" {
 typedef enum {
     /* 早安式体前屈，使用两相位完整周期计数。 */
     FITNESS_ACTION_GOOD_MORNING = 0,
-    /* 开合跳，使用起跳-腾空-落地完整周期计数。 */
+    /* 开合跳，腕戴场景使用手臂张开与合拢的主向/回向完整周期计数。 */
     FITNESS_ACTION_JUMPING_JACK = 1,
     /* 跳跃弓步，使用起跳-腾空-落地完整周期计数。 */
     FITNESS_ACTION_JUMPING_LUNGE = 2,
@@ -131,7 +131,7 @@ typedef struct {
 typedef struct {
     /* true 表示 start 已成功且 stop 尚未调用。 */
     bool active;
-    /* 当前会话动作；v1 一个会话只跟踪一种动作。 */
+    /* 当前识别动作；产品训练引擎在有界累计确认后保持到本次会话停止。 */
     fitness_action_t action;
     /* 会话唯一序号，原样复制到每个 MetricEvent。 */
     uint32_t session_seq;
@@ -161,7 +161,7 @@ typedef struct {
 
 /* 上游动作相位分类结果；本组件不定义相位如何从 IMU 得出。 */
 typedef enum {
-    /* 动作基线/站稳状态，也是两相位动作的返回端点。 */
+    /* 动作基线或返回端点；连续两相位动作可由主方向重新越界确认返回。 */
     FITNESS_PHASE_REST = 0,
     /* 两相位动作的第一方向，例如下蹲或向一侧挥动。 */
     FITNESS_PHASE_PRIMARY = 1,
@@ -181,7 +181,7 @@ typedef enum {
 
 /* 8 类重复动作被归纳为两种有限状态机。 */
 typedef enum {
-    /* 普通往返动作依次经历静止、主向运动、反向运动并回到静止。 */
+    /* 普通往返动作依次经历主向、反向并回到主向起点或稳定基线。 */
     FITNESS_REP_MODE_TWO_PHASE = 0,
     /* 跳跃动作依次经历静止、起跳、腾空、落地、恢复并回到静止。 */
     FITNESS_REP_MODE_JUMP = 1
@@ -330,6 +330,18 @@ fitness_status_t fitness_session_tick(
  */
 fitness_status_t fitness_session_rebase_time(
     fitness_session_t *session,
+    uint64_t now_ms);
+
+/*
+ * 在同一训练会话内切换动作；保留次数、步数、时长、热量和事件序号，只更新当前动作与时间基准。
+ * now_ms 使用设备单调毫秒且不得早于 last_tick_ms；调用方必须先完成新动作连续确认。
+ */
+fitness_status_t fitness_session_switch_action(
+    /* 非空且 active 的会话对象；成功后 action 和 last_tick_ms 会更新。 */
+    fitness_session_t *session,
+    /* 新动作必须位于 FITNESS_ACTION_GOOD_MORNING..FITNESS_ACTION_WAVE。 */
+    fitness_action_t action,
+    /* 动作确认时刻，单位毫秒；切换本身不补算未覆盖区间的热量。 */
     uint64_t now_ms);
 
 /* 把已确认的 REP/STEP 增量写入会话并生成唯一 MetricEvent。 */

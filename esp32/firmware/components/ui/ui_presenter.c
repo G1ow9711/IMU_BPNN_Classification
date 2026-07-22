@@ -84,20 +84,6 @@ const char *ui_action_display_name(uint8_t action_id)
     return "等待识别";
 }
 
-/* 根据 PREPARE 进入时刻生成 3 秒倒计时；全部输入使用同一单调毫秒时基。 */
-uint8_t ui_prepare_countdown_seconds(uint32_t state_entered_ms, uint32_t now_ms)
-{
-    /* 无符号减法在 uint32 单次回绕时仍得到正确短时间差。 */
-    const uint32_t elapsed_ms = now_ms - state_entered_ms;
-    /* 满 3 秒后返回零，表示显示“开始动作”并继续等待动作锁定。 */
-    if (elapsed_ms >= UINT32_C(3000)) {
-        /* 返回倒计时结束哨兵。 */
-        return 0U;
-    }
-    /* 0~999、1000~1999、2000~2999 ms 分别映射 3、2、1。 */
-    return (uint8_t)(3U - (elapsed_ms / UINT32_C(1000)));
-}
-
 /* 格式化通用顶栏状态。 */
 static void ui_format_status(const ui_context_t *context, ui_page_model_t *page)
 {
@@ -165,13 +151,13 @@ bool ui_presenter_build(const ui_context_t *context, ui_page_model_t *page)
     switch (context->state) {
         case UI_STATE_BOOT:
             /* 开机页标题显示产品名。 */
-            ui_write_text(page->title, sizeof(page->title), "健身助手");
-            /* 开机页主区域用大号文字显示本次真板联调版本，用户断电重启后可肉眼证明新应用已经启动。 */
-            ui_write_text(page->primary, sizeof(page->primary), "常亮联调版 0716");
-            /* 开机页副区域保留初始化状态说明，避免版本标记替代必要的启动反馈。 */
-            ui_write_text(page->secondary, sizeof(page->secondary), "正在启动设备...");
-            /* 开机页脚说明当前固件禁用了自动熄屏，便于定位低功耗循环问题。 */
-            ui_write_text(page->footer, sizeof(page->footer), "联调期间不自动熄屏");
+            ui_write_text(page->title, sizeof(page->title), "训练助手");
+            /* 开机页主区域使用产品状态，不向用户暴露内部联调日期或阶段编号。 */
+            ui_write_text(page->primary, sizeof(page->primary), "正在启动");
+            /* 开机页副区域说明设备正在建立传感器、显示和蓝牙能力。 */
+            ui_write_text(page->secondary, sizeof(page->secondary), "正在准备设备");
+            /* 开机页脚保持简短，避免重复主状态。 */
+            ui_write_text(page->footer, sizeof(page->footer), "请稍候");
             /* BOOT 页面不提供按钮，等待状态机自动进入自检。 */
             break;
         case UI_STATE_SELF_TEST:
@@ -187,13 +173,13 @@ bool ui_presenter_build(const ui_context_t *context, ui_page_model_t *page)
             break;
         case UI_STATE_HOME:
             /* 主页显示产品功能名称。 */
-            ui_write_text(page->title, sizeof(page->title), "健身手柄");
-            /* 主页主区域继续用大号文字显示版本标记，避免开机页过短而无法被用户看到。 */
-            ui_write_text(page->primary, sizeof(page->primary), "常亮联调版 0716");
-            /* 副区域说明设备已经进入可操作状态并保留离线识别能力提示。 */
-            ui_write_text(page->secondary, sizeof(page->secondary), "设备就绪 / 11种动作");
-            /* 页脚同时引导开始训练并再次声明联调固件不会自动熄屏。 */
-            ui_write_text(page->footer, sizeof(page->footer), "点击开始 / 屏幕常亮");
+            ui_write_text(page->title, sizeof(page->title), "训练助手");
+            /* 主页主区域明确唯一首要操作，避免工程版本号占据视觉中心。 */
+            ui_write_text(page->primary, sizeof(page->primary), "准备训练");
+            /* 副区域固定当前模型的右手腕佩戴合同和可识别动作数量。 */
+            ui_write_text(page->secondary, sizeof(page->secondary), "右手腕 / 11种动作");
+            /* 页脚只保留下一步操作，不显示内部常亮联调状态。 */
+            ui_write_text(page->footer, sizeof(page->footer), "点击开始");
             /* 第一个按钮启动准备倒计时。 */
             ui_set_button(page, 0U, UI_COMMAND_START, "开始", true);
             /* 第二个按钮进入设置页。 */
@@ -203,30 +189,15 @@ bool ui_presenter_build(const ui_context_t *context, ui_page_model_t *page)
             /* 主页模型构建完成。 */
             break;
         case UI_STATE_PREPARE:
-            /* 准备页标题提示即将开始。 */
-            ui_write_text(page->title, sizeof(page->title), "准备开始");
-            /* 3、2、1 使用单个大数字；0 表示三秒结束、继续等待模型锁定动作。 */
-            if (context->view.prepare_countdown_seconds > 0U) {
-                /* 显示当前剩余整秒，范围已由状态机限制为 1~3。 */
-                ui_write_text(
-                    page->primary,
-                    sizeof(page->primary),
-                    "%u",
-                    (unsigned int)context->view.prepare_countdown_seconds);
-            } else {
-                /* 倒计时结束后提示开始动作，锁定完成会自动进入 RUNNING。 */
-                ui_write_text(page->primary, sizeof(page->primary), "开始动作");
-            }
-            /* 提示用户保持手腕放松，减少锁类前毛刺。 */
-            ui_write_text(page->secondary, sizeof(page->secondary), "保持手腕放松");
-            /* 倒计时后可能还需累计三个高置信窗口，页脚明确当前状态。 */
-            ui_write_text(
-                page->footer,
-                sizeof(page->footer),
-                context->view.prepare_countdown_seconds > 0U
-                    ? "惯导预热中"
-                    : "正在锁定动作...");
-            /* 倒计时期间只允许取消。 */
+            /* 准备页直接进入动作识别，不再插入会误导用户等待的倒计时。 */
+            ui_write_text(page->title, sizeof(page->title), "正在识别");
+            /* 主文案要求用户点击开始后立即做本会话唯一动作。 */
+            ui_write_text(page->primary, sizeof(page->primary), "开始运动");
+            /* 次文案再次提醒固定右手腕，避免佩戴域变化造成分类偏差。 */
+            ui_write_text(page->secondary, sizeof(page->secondary), "保持右手佩戴");
+            /* 页脚说明识别完成后的自动行为；准备期已经持续采样并缓存。 */
+            ui_write_text(page->footer, sizeof(page->footer), "识别后自动记录");
+            /* 动作尚未锁定时只允许取消本次会话。 */
             ui_set_button(page, 0U, UI_COMMAND_CANCEL, "取消", true);
             /* 准备页模型构建完成。 */
             break;
@@ -237,14 +208,24 @@ bool ui_presenter_build(const ui_context_t *context, ui_page_model_t *page)
                 : ((context->view.action_id == 7U) || (context->view.action_id == 9U)
                     ? "步"
                     : "次");
-            /* 训练页标题保持稳定，减少 AMOLED 大面积刷新。 */
-            ui_write_text(page->title, sizeof(page->title), "训练中");
-            /* 主区域显示设备权威动作名称。 */
+            /* 实时类别有效时显示真实识别动作；未知时使用已有“正在识别”文案。 */
+            const char *live_action_name = context->view.inferred_action_id < UI_ACTION_CLASS_COUNT
+                ? ui_action_display_name(context->view.inferred_action_id)
+                : "正在识别";
+            /* 计数门关闭时明确显示暂停，避免把站立或静坐伪装为持续主动作。 */
+            ui_write_text(
+                page->title,
+                sizeof(page->title),
+                "%s",
+                context->view.counting_enabled ? "训练中" : "计数已暂停");
+            /* 计数允许时显示主动作；冻结时显示最近实时类别，二者角色不再混淆。 */
             ui_write_text(
                 page->primary,
                 sizeof(page->primary),
                 "%s",
-                ui_action_display_name(context->view.action_id));
+                context->view.counting_enabled
+                    ? ui_action_display_name(context->view.action_id)
+                    : live_action_name);
             /* 副区域显示动作对应指标和设备累计卡路里。 */
             ui_write_text(
                 page->secondary,
@@ -255,15 +236,25 @@ bool ui_presenter_build(const ui_context_t *context, ui_page_model_t *page)
                     : context->view.count),
                 unit,
                 (double)context->view.calories_milli_kcal / 1000.0);
-            /* 页脚显示训练时长和百分之一百分比置信度。 */
-            ui_write_text(
-                page->footer,
-                sizeof(page->footer),
-                "时间 %02lu:%02lu  置信度 %u.%02u%%",
-                (unsigned long)(context->view.elapsed_seconds / 60U),
-                (unsigned long)(context->view.elapsed_seconds % 60U),
-                (unsigned int)(context->view.confidence_centipercent / 100U),
-                (unsigned int)(context->view.confidence_centipercent % 100U));
+            /* 计数状态决定页脚：正常时显示时间/置信度，冻结时说明恢复条件。 */
+            if (context->view.counting_enabled) {
+                /* 正常计数页脚显示训练时长和百分之一百分比置信度。 */
+                ui_write_text(
+                    page->footer,
+                    sizeof(page->footer),
+                    "时间 %02lu:%02lu  置信度 %u.%02u%%",
+                    (unsigned long)(context->view.elapsed_seconds / 60U),
+                    (unsigned long)(context->view.elapsed_seconds % 60U),
+                    (unsigned int)(context->view.confidence_centipercent / 100U),
+                    (unsigned int)(context->view.confidence_centipercent % 100U));
+            } else {
+                /* 使用已有字体字符说明同类恢复后自动继续，不改变本轮计数器类型。 */
+                ui_write_text(
+                    page->footer,
+                    sizeof(page->footer),
+                    "继续%s后自动记录",
+                    ui_action_display_name(context->view.action_id));
+            }
             /* 第一个按钮暂停计数和热量时钟。 */
             ui_set_button(page, 0U, UI_COMMAND_PAUSE, "暂停", true);
             /* 第二个按钮结束会话并进入总结。 */

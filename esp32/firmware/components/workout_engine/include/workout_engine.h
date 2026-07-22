@@ -4,9 +4,10 @@
 /*
  * 设备训练引擎：把双 M0 融合 logits、25 Hz 六轴点、计数器、热量和振动串成单一事实链。
  *
- * v1 产品合同：用户点击开始后进入准备页，连续三个高置信因果累计结果锁定一个计数动作；
- * 运行阶段继续累计最终双 M0 证据，但不重新初始化计数状态。累计分类与锁定动作不一致时，
- * 原始点仍推进时间和热量，但冻结相位与次数；切换动作必须停止并开始新会话。
+ * 产品合同：用户点击开始后立即采集和缓存 25 Hz 六轴点，累计类别连续两窗且概率过门后锁定；
+ * 最迟第四窗按当前累计类别结束准备。锁定后 selected_action 只固定本轮计数器类型；实时类别
+ * 可切到站立、静坐或其它动作并冻结次数，干净同类窗口恢复后从完整新周期继续。锁定时按原
+ * 时间顺序补算准备期完整 160 点，使点击开始后已经完成的动作仍能进入权威累计。
  */
 
 /* 引入次数、步数、热量、MetricEvent 和振动 FIFO。 */
@@ -26,10 +27,21 @@ extern "C" {
 
 /* 双 M0 固定输出 11 类，与 FITNESS_ACTION_COUNT 一致。 */
 #define WORKOUT_CLASS_COUNT (11U)
-/* 准备阶段同一高置信动作需连续出现三个推理窗口才锁定。 */
-#define WORKOUT_ACTION_LOCK_WINDOWS (3U)
-/* 锁定最低 softmax 置信度为 55%，Q16 近似取 36044/65535。 */
-#define WORKOUT_ACTION_LOCK_CONFIDENCE_Q15 (36044U)
+/* 累计最优类别必须连续保持两个重叠窗口，抑制动作起步的单窗瞬态误判。 */
+#define WORKOUT_ACTION_LOCK_WINDOWS (2U)
+/* 准备态最多累计四个窗口；25 Hz、步长 12 点时首窗后最多增加 1.44 秒。 */
+#define WORKOUT_ACTION_MAX_PREPARE_WINDOWS (4U)
+/*
+ * 最坏准备跨度包含一次 62 点窗口重建，再接三次 12 点重叠步进：2*62+3*12=160 点。
+ * 25 Hz 下对应 6.40 秒；全部保留才能在锁类后补算点击开始以来的完整动作。
+ */
+#define WORKOUT_PRELOCK_SAMPLE_CAPACITY (160U)
+/* 160 点按 13 点单轴不应期最多形成 12 条权威事件；静态 FIFO 保留每条原始时刻。 */
+#define WORKOUT_REPLAY_EVENT_QUEUE_CAPACITY (12U)
+/* 开合跳同时跟踪 ax、ay、az 三个加速度轴，轴顺序与六轴输入后 3 通道一致。 */
+#define WORKOUT_JUMPING_JACK_AXIS_COUNT (3U)
+/* 累计平均 logits 的锁定最低 softmax 概率为 50%，Q15 取 32768/65535。 */
+#define WORKOUT_ACTION_LOCK_CONFIDENCE_Q15 (32768U)
 /* 未锁定动作使用 255，不能送入 fitness_action_t。 */
 #define WORKOUT_ACTION_UNKNOWN (255U)
 
@@ -69,11 +81,11 @@ typedef struct {
     workout_state_t state;
     /* 保存会话持久化序号。 */
     uint32_t session_seq;
-    /* 保存锁定动作 0..10；准备阶段为 255。 */
+    /* 保存本轮主动作 0..10；只决定计数器与会话摘要，准备阶段为 255。 */
     uint8_t action_id;
-    /* 保存当前动作段因果累计分类 0..10；尚无有效窗口时为 255。 */
+    /* 保存最近推理窗口实时分类 0..10；尚无有效窗口时为 255。 */
     uint8_t inferred_action_id;
-    /* true 表示当前累计分类与锁定计数动作一致；准备阶段固定为 false。 */
+    /* true 表示实时分类与主动作一致且干净；准备阶段和休息期间固定为 false。 */
     bool classification_consistent;
     /* 保存次数、步数或完整秒；单位由 metric_kind 决定。 */
     uint64_t metric_value;
@@ -89,6 +101,16 @@ typedef struct {
     uint64_t active_microkcal;
 } workout_snapshot_t;
 
+/* 保存一个尚未锁类的 25 Hz 计数输入；锁定后按原时间顺序补算。 */
+typedef struct {
+    /* 保存单调毫秒与 gx、gy、gz、ax、ay、az 六轴物理量。 */
+    motion_phase_sample_t sample;
+    /* true 表示该点没有间断、队列溢出或马达污染，可推进相位。 */
+    bool count_input_valid;
+    /* 保存该点质量位，补算产生的 MetricEvent 必须沿用真实来源。 */
+    uint16_t quality_flags;
+} workout_prelock_sample_t;
+
 /* 保存完整静态训练状态；无运行期堆分配。 */
 typedef struct {
     /* 保存当前产品训练状态。 */
@@ -99,7 +121,13 @@ typedef struct {
     uint32_t weight_g;
     /* 保存开始准备的单调毫秒。 */
     uint64_t started_ms;
-    /* 保存 11 类准备阶段累计 logits。 */
+    /* 保存准备期完整 160 个 25 Hz 点；覆盖一次重建后的第四窗，固定占用且不使用堆。 */
+    workout_prelock_sample_t prelock_samples[WORKOUT_PRELOCK_SAMPLE_CAPACITY];
+    /* 指向下一个准备期写入槽，范围 0..159。 */
+    uint8_t prelock_write_index;
+    /* 保存当前有效准备期点数，范围 0..160。 */
+    uint8_t prelock_sample_count;
+    /* 保存 11 类准备阶段累计 logits；有界锁类后 RUNNING 只保留单窗诊断，不再参与切类。 */
     float bout_logit_sum[WORKOUT_CLASS_COUNT];
     /* 保存准备阶段已累计窗口数。 */
     uint32_t bout_window_count;
@@ -107,9 +135,9 @@ typedef struct {
     uint8_t inferred_action;
     /* true 表示 inferred_action 与 selected_action 一致，允许推进相位和次数。 */
     bool classification_consistent;
-    /* 保存当前连续候选动作 0..10；255 表示没有候选。 */
+    /* 保存当前累计候选动作 0..10；255 表示尚无有限证据。 */
     uint8_t candidate_action;
-    /* 保存候选连续高置信窗口数。 */
+    /* 保存累计最优类连续保持的窗口数；达到 2 且概率过门时锁定。 */
     uint8_t candidate_windows;
     /* 保存最终锁定动作 0..10；255 表示尚未锁定。 */
     uint8_t selected_action;
@@ -125,6 +153,19 @@ typedef struct {
     fitness_step_counter_t step_counter;
     /* 保存锁定动作的原始点相位/步峰检测器。 */
     motion_phase_detector_t phase_detector;
+    /*
+     * 保存开合跳 ax、ay、az 三个独立 11+5 均值与相邻峰谷检测器。
+     * 数组维度为 [3 个加速度轴]；每轴累计不直接公开，三轴中位数才是权威次数。
+     */
+    motion_periodic_pair_detector_t jumping_jack_pair_detectors[WORKOUT_JUMPING_JACK_AXIS_COUNT];
+    /* 保存已经发布到 fitness_session 的三轴中位次数，防止暂停或重放后重复发布旧次数。 */
+    uint64_t jumping_jack_reported_repetitions;
+    /* 保存锁类补算产生的每条 MetricEvent；数组按 event_seq 递增，无运行期堆分配。 */
+    fitness_metric_event_t replay_metric_events[WORKOUT_REPLAY_EVENT_QUEUE_CAPACITY];
+    /* 指向最早未交付补算事件槽，范围 0..11。 */
+    uint8_t replay_metric_event_head;
+    /* 保存当前补算事件数量，范围 0..12。 */
+    uint8_t replay_metric_event_count;
     /* 保存所有业务振动请求；马达任务异步消费。 */
     fitness_haptic_queue_t haptic_queue;
 } workout_engine_t;
@@ -138,15 +179,18 @@ workout_status_t workout_engine_start(
     uint32_t weight_g,
     uint64_t now_ms);
 /*
- * 只清空双 M0 动作段分类证据；保留 selected_action、fitness_session、已计次数、热量和振动队列。
- * 暂停、IMU 连续性重置、设备重连或用户明确开始新动作段时调用；空指针安全无操作。
+ * 标记一次 IMU 连续性边界；PREPARING 保留已闭合动作点和干净分类候选，边界质量点在重放时
+ * 只清除未完成半周期。RUNNING 保留 selected_action、次数和热量，但立即冻结计数，直到新的
+ * 干净同类窗口恢复；空指针安全无操作。
  */
 void workout_engine_reset_bout_evidence(workout_engine_t *engine);
 /*
- * 加入一次双 M0 融合 logits；PREPARING 和 RUNNING 都使用同一动作段因果累计器。
+ * 加入一次双 M0 融合 logits；PREPARING 使用有界因果累计确认，RUNNING 更新实时类别与计数门。
  * logits 必须非空，形状固定为 [11]，按 FITNESS_ACTION_* 顺序保存无量纲融合分数；
- * 数组生命周期只需覆盖本次同步调用，函数按值累计且不会保存其地址；RUNNING 不切换
- * selected_action，只更新 inferred_action、classification_consistent 和累计置信度。
+ * 数组生命周期只需覆盖本次同步调用，函数不会保存其地址；RUNNING 不允许切换 selected_action，
+ * PREPARING 每窗公开累计候选；连续两窗且概率至少 50% 时锁定，最迟第四窗按累计 argmax 锁定。
+ * RUNNING 不切换 selected_action；异类或低置信窗口立即冻结并清空未完成周期，新的干净同类
+ * 高置信窗口恢复原计数器。这样站立、静坐或其它动作休息不会继续完成旧动作半周期。
  * action_locked 仅在本次由未锁定变为锁定时为 true。
  */
 workout_status_t workout_engine_push_inference(
@@ -187,6 +231,10 @@ workout_status_t workout_engine_snapshot(
 bool workout_engine_pop_haptic(
     workout_engine_t *engine,
     fitness_haptic_request_t *request);
+/* 从补算事件 FIFO 取最早 MetricEvent；只用于锁类调用后的协调器 BLE/摘要扇出。 */
+bool workout_engine_pop_replay_metric_event(
+    workout_engine_t *engine,
+    fitness_metric_event_t *event);
 
 #ifdef __cplusplus
 /* 结束 C ABI 声明区。 */

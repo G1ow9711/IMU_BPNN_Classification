@@ -72,8 +72,17 @@ public partial class App : Application
             HistoryViewModel history = new(_sessionRepository, historyCsvExporter, historyDestinationPicker, _deviceSession, dispatcher);
             // 创建设置页并注入同一设备会话；本地保存成功后才按连接状态同步时间、资料、目标和偏好。
             SettingsViewModel settings = new(_preferencesStore, animationPreferences, _deviceSession);
-            // 创建诊断页。
-            DiagnosticsViewModel diagnostics = new(_deviceSession, dispatcher);
+            // 创建 IMU CSV 导出器；固定写出中文表头、六轴原始码、物理量、双时间戳和质量位。
+            IImuCsvExporter imuCsvExporter = new ImuCsvExporter();
+            // 创建 IMU 保存位置选择器；只有用户确认系统对话框后才写入文件。
+            IImuExportDestinationPicker imuExportDestinationPicker = new WpfImuExportDestinationPicker();
+            // 创建诊断页，并注入可测试的 IMU 文件边界。
+            DiagnosticsViewModel diagnostics = new(
+                _deviceSession,
+                dispatcher,
+                animationPreferences,
+                imuCsvExporter,
+                imuExportDestinationPicker);
             // 组合主窗口 ViewModel。
             _mainViewModel = new MainViewModel(device, live, summary, history, settings, diagnostics);
             // 读取设置和历史。

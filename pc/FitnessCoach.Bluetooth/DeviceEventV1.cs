@@ -83,8 +83,8 @@ public sealed class DeviceEventV1
             throw new ArgumentOutOfRangeException(nameof(eventType), "Event 类型必须位于 1..11。");
         }
 
-        // 设备状态只允许 Booting～Error 的 0～7。
-        if (deviceState > FitnessDeviceState.Error)
+        // 设备状态只允许 Booting～Shutdown 的 0～7。
+        if (deviceState > FitnessDeviceState.Shutdown)
         {
             // 拒绝未来状态被旧客户端误解释。
             throw new ArgumentOutOfRangeException(nameof(deviceState), "设备状态必须位于 0..7。");

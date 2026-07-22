@@ -342,14 +342,41 @@ internal static class WindowsBleDeviceSessionTests
 
         // 记录收到的完整 22 字节样本。
         List<RawImuSampleV1> samples = [];
+        // 记录收到的完整 28 字节双 M0 分类诊断。
+        List<InferenceDiagnosticV1> diagnostics = [];
         // 订阅后台 RawStream 事件。
         session.RawSampleReceived += (_, eventArgs) => samples.Add(eventArgs.Sample);
+        // 订阅同一 UUID 上的类型九分类事件。
+        session.InferenceDiagnosticReceived += (_, eventArgs) => diagnostics.Add(eventArgs.Diagnostic);
         // 发布确定性 sample_index=1、monotonic_ms=2、六轴 3..8 和质量位 9。
         transport.EmitRawStream(new RawImuSampleV1(1U, 2U, 3, 4, 5, 6, 7, 8, 9));
         // 等待通知泵完成 0007 重组与解码。
         await WaitUntilAsync(() => samples.Count == 1, "RawStream 0007 样本未发布。" );
         // 核对通道顺序和质量位。
         Assert(samples[0].GxRaw == 3 && samples[0].AzRaw == 8 && samples[0].QualityFlags == 9U, "RawStream 六轴字段错位。" );
+        // 发布一个融合深蹲、基础深蹲、掩码跳跃深蹲的分类窗口。
+        transport.EmitInferenceDiagnostic(new InferenceDiagnosticV1(
+            1,
+            ActionId.Squat,
+            ActionId.Squat,
+            ActionId.JumpingSquat,
+            0.80,
+            0.75,
+            0.70,
+            0,
+            12U,
+            2480U,
+            18400U,
+            0U));
+        // 等待通知泵按类型九解码同一 UUID 的独立逻辑帧。
+        await WaitUntilAsync(() => diagnostics.Count == 1, "分类诊断 0007 窗口未发布。" );
+        // 核对动作、耗时和窗口序号没有被 RawStream 分支错读。
+        Assert(
+            diagnostics[0].FusedAction == ActionId.Squat &&
+            diagnostics[0].MaskedAction == ActionId.JumpingSquat &&
+            diagnostics[0].WindowSequence == 12U &&
+            diagnostics[0].InferenceMicroseconds == 18400U,
+            "分类诊断类型九字段错位。" );
         // 打开命令 ACK 后属性必须为 true。
         Assert(session.IsRawStreamEnabled, "命令 11 成功后 RawStream 状态未开启。" );
 
@@ -360,7 +387,7 @@ internal static class WindowsBleDeviceSessionTests
         // 给通知泵短暂时间消费迟到帧。
         await Task.Delay(20);
         // 样本数量必须保持一条。
-        Assert(samples.Count == 1 && !session.IsRawStreamEnabled, "关闭 RawStream 后仍发布样本。" );
+        Assert(samples.Count == 1 && diagnostics.Count == 1 && !session.IsRawStreamEnabled, "关闭 RawStream 后仍发布六轴或分类诊断。" );
 
         // 自动校时之后的命令顺序必须固定为 7、8、9、11开、11关。
         ControlCommandId[] commandIds = transport.ControlCommands.Select(entry => entry.CommandId).ToArray();
@@ -1137,6 +1164,56 @@ internal static class WindowsBleDeviceSessionTests
                 sample.MonotonicMilliseconds,
                 payload);
             // 通过 RawStream UUID 发布，状态机必须使用其独立重组器。
+            ValueReceived?.Invoke(this, new BleGattValueReceivedEventArgs(ProtocolConstants.RawStreamUuid, BleFrameCodec.Encode(frame)));
+        }
+
+        /// <summary>按 UUID 0007 发布一个固定 InferenceDiagnosticV1 逻辑帧。</summary>
+        public void EmitInferenceDiagnostic(InferenceDiagnosticV1 diagnostic)
+        {
+            // 诊断对象不能为空。
+            ArgumentNullException.ThrowIfNull(diagnostic);
+            // 精确分配 28 字节 payload。
+            byte[] payload = new byte[InferenceDiagnosticV1Codec.PayloadSize];
+            // 写入诊断版本一。
+            payload[0] = diagnostic.DiagnosticVersion;
+            // 写入融合动作索引。
+            payload[1] = (byte)diagnostic.FusedAction;
+            // 写入基础模型动作索引。
+            payload[2] = (byte)diagnostic.BaseAction;
+            // 写入掩码模型动作索引。
+            payload[3] = (byte)diagnostic.MaskedAction;
+            // 把融合概率限制到 0～1 后四舍五入为 Q15。
+            BinaryPrimitives.WriteUInt16LittleEndian(
+                payload.AsSpan(4, 2),
+                checked((ushort)Math.Round(Math.Clamp(diagnostic.FusedConfidence, 0.0, 1.0) * ushort.MaxValue)));
+            // 编码基础模型概率。
+            BinaryPrimitives.WriteUInt16LittleEndian(
+                payload.AsSpan(6, 2),
+                checked((ushort)Math.Round(Math.Clamp(diagnostic.BaseConfidence, 0.0, 1.0) * ushort.MaxValue)));
+            // 编码掩码模型概率。
+            BinaryPrimitives.WriteUInt16LittleEndian(
+                payload.AsSpan(8, 2),
+                checked((ushort)Math.Round(Math.Clamp(diagnostic.MaskedConfidence, 0.0, 1.0) * ushort.MaxValue)));
+            // 写入质量位。
+            BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(10, 2), diagnostic.QualityFlags);
+            // 写入窗口序号。
+            BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(12, 4), diagnostic.WindowSequence);
+            // 写入窗口末点单调毫秒。
+            BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(16, 4), diagnostic.WindowEndMilliseconds);
+            // 写入推理耗时微秒。
+            BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(20, 4), diagnostic.InferenceMicroseconds);
+            // 写入累计推理失败数。
+            BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(24, 4), diagnostic.FailureCount);
+            // 构造消息类型九的完整逻辑帧。
+            BleLogicalFrame frame = new(
+                ProtocolConstants.ProtocolMajor,
+                ProtocolConstants.ProtocolMinor,
+                (byte)ProtocolMessageType.InferenceDiagnostic,
+                0,
+                unchecked(++_notificationSequence),
+                diagnostic.WindowEndMilliseconds,
+                payload);
+            // 通过同一 RawStream UUID 发布，状态机必须按 message_type 路由。
             ValueReceived?.Invoke(this, new BleGattValueReceivedEventArgs(ProtocolConstants.RawStreamUuid, BleFrameCodec.Encode(frame)));
         }
 

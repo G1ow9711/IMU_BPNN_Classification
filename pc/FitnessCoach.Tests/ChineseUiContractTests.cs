@@ -28,8 +28,47 @@ internal static partial class ChineseUiContractTests
     {
         // 先检查编译前 XAML，阻止新英文标题、标签或按钮进入界面。
         TestStaticXamlUsesChineseText();
+        // 检查阶段二训练监测页保持单屏动作、指标和双六轴曲线。
+        TestTrainingDashboardUsesSinglePageLayout();
         // 再检查运行时动态文案，覆盖设备、诊断和原始诊断流状态。
         await TestDynamicViewModelTextAsync();
+    }
+
+    // 检查训练监测页的单屏信息架构，防止后续又退回长说明和纵向滚动。
+    private static void TestTrainingDashboardUsesSinglePageLayout()
+    {
+        // 定位仓库根，读取真实人工维护的诊断页 XAML。
+        string repositoryRoot = FindRepositoryRoot();
+        // diagnosticsPath 指向阶段二单页训练监测视图。
+        string diagnosticsPath = Path.Combine(repositoryRoot, "pc", "FitnessCoach.App", "Views", "DiagnosticsView.xaml");
+        // 读取 UTF-8 XAML，静态合同无需启动 WPF 窗口。
+        string xaml = File.ReadAllText(diagnosticsPath);
+        // 训练页不得再使用纵向滚动容器，否则 1440×900 不能一眼看到全部关键事实。
+        Assert(!xaml.Contains("<ScrollViewer", StringComparison.Ordinal), "训练监测页仍依赖纵向滚动。 ");
+        // 标准动作必须使用本地矢量控件并绑定设备稳定动作。
+        Assert(
+            xaml.Contains("<controls:ActionStickFigure", StringComparison.Ordinal) &&
+            xaml.Contains("Action=\"{Binding CurrentAction}\"", StringComparison.Ordinal) &&
+            xaml.Contains("Text=\"{Binding StableActionCueText}\"", StringComparison.Ordinal) &&
+            xaml.Contains("Text=\"右手腕佩戴\"", StringComparison.Ordinal),
+            "训练监测页缺少随稳定分类更新的标准动作示范。 ");
+        // 两张曲线必须同屏存在，且分别绑定加速度和角速度点集。
+        Assert(
+            xaml.Contains("Points=\"{Binding AccelerationPoints}\"", StringComparison.Ordinal) &&
+            xaml.Contains("Points=\"{Binding GyroscopePoints}\"", StringComparison.Ordinal),
+            "训练监测页没有同屏显示加速度与角速度曲线。 ");
+        // 曲线必须提供过去窗口滑块和回到实时命令，不能只能看最新十秒。
+        Assert(
+            xaml.Contains("Maximum=\"{Binding RawChartMaximumOffsetSeconds}\"", StringComparison.Ordinal) &&
+            xaml.Contains("Value=\"{Binding RawChartOffsetSeconds", StringComparison.Ordinal) &&
+            xaml.Contains("Command=\"{Binding GoLiveRawChartCommand}\"", StringComparison.Ordinal),
+            "训练监测页缺少曲线历史滑块或回到实时入口。 ");
+        // 次数、时长和热量必须直接绑定设备权威状态，不能用长说明替代。
+        Assert(
+            xaml.Contains("Text=\"{Binding MetricValue}\"", StringComparison.Ordinal) &&
+            xaml.Contains("Text=\"{Binding DurationText}\"", StringComparison.Ordinal) &&
+            xaml.Contains("Text=\"{Binding CaloriesText}\"", StringComparison.Ordinal),
+            "训练监测页缺少次数、时长或热量关键指标。 ");
     }
 
     // 检查应用源目录下所有 XAML 静态可见属性。

@@ -158,14 +158,22 @@ esp_err_t ble_service_nimble_set_battery_percent(uint8_t battery_percent);
 // 编码并发布 LiveStateV1；Read 返回最新完整逻辑帧，Notify 使用 MTU 自适应分片包络。
 esp_err_t ble_service_nimble_publish_live_state(const ble_service_live_state_v1_t *state);
 
-// 发布 Event payload；事件只触发动画或提示，PC 不用它自行增加权威计数。
-esp_err_t ble_service_nimble_publish_event(const uint8_t *payload, uint16_t payload_length);
+// 发布 Event payload；monotonic_ms 必须是原始领域事件时刻，PC 用它在 IMU CSV 标出精确计数点。
+esp_err_t ble_service_nimble_publish_event(
+    const uint8_t *payload,
+    uint16_t payload_length,
+    uint32_t monotonic_ms);
 
 // 发布会话摘要或日志数据块；payload 最大 1024 字节并由逻辑帧 CRC 保护。
 esp_err_t ble_service_nimble_publish_transfer_data(const uint8_t *payload, uint16_t payload_length);
 
 // 发布开发者原始六轴流；默认不订阅且不重传丢包。
 esp_err_t ble_service_nimble_publish_raw_stream(const uint8_t *payload, uint16_t payload_length);
+
+// 发布阶段一双 M0 分类诊断；复用 Raw Stream 特征、加密连接和不可靠通知，不进入训练历史。
+esp_err_t ble_service_nimble_publish_inference_diagnostic(
+    const uint8_t *payload,
+    uint16_t payload_length);
 
 #ifdef __cplusplus
 // 结束 C 链接约定。

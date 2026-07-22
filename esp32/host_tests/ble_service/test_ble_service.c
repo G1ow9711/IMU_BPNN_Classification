@@ -217,18 +217,91 @@ static imu_ble_frame_view_t test_decode_control_response(const uint8_t *frame, s
     return decoded;
 }
 
-// 验证消息类型 1～8 全部接受，范围外明确拒绝。
+// 验证消息类型 1～9 全部接受，范围外明确拒绝。
 static void test_message_types(void)
 {
-    // 遍历当前 v1 定义的全部八种类型。
-    for (uint8_t type = UINT8_C(1); type <= UINT8_C(8); ++type) {
+    // 遍历当前 v1 定义的全部九种类型。
+    for (uint8_t type = UINT8_C(1); type <= UINT8_C(9); ++type) {
         // 每个定义值都必须通过。
         TEST_ASSERT(ble_service_validate_message_type(type) == BLE_SERVICE_STATUS_OK, "合法消息类型被拒绝。 ");
     }
     // 0 未定义，必须拒绝。
     TEST_ASSERT(ble_service_validate_message_type(UINT8_C(0)) == BLE_SERVICE_STATUS_WRONG_MESSAGE_TYPE, "消息类型 0 未被拒绝。 ");
-    // 9 未定义，必须拒绝。
-    TEST_ASSERT(ble_service_validate_message_type(UINT8_C(9)) == BLE_SERVICE_STATUS_WRONG_MESSAGE_TYPE, "消息类型 9 未被拒绝。 ");
+    // 10 未定义，必须拒绝。
+    TEST_ASSERT(ble_service_validate_message_type(UINT8_C(10)) == BLE_SERVICE_STATUS_WRONG_MESSAGE_TYPE, "消息类型 10 未被拒绝。 ");
+}
+
+// 验证推理诊断V1固定28字节布局，确保真板双M0证据不依赖日志文本猜测。
+static void test_inference_diagnostic_v1(void)
+{
+    // 构造覆盖融合、基础、掩码、时间和错误累计的诊断对象。
+    ble_service_inference_diagnostic_v1_t diagnostic = {
+        // 当前诊断结构版本固定为1。
+        .diagnostic_version = UINT8_C(1),
+        // 融合输出Top-1使用类别3。
+        .fused_action_id = UINT8_C(3),
+        // 基础M0 Top-1使用类别4，证明字段未与融合结果混淆。
+        .base_action_id = UINT8_C(4),
+        // 掩码M0 Top-1使用类别5。
+        .masked_action_id = UINT8_C(5),
+        // 三组Q15置信度使用不同非对称值验证偏移。
+        .fused_confidence_q15 = UINT16_C(0x1234),
+        .base_confidence_q15 = UINT16_C(0x2345),
+        .masked_confidence_q15 = UINT16_C(0x3456),
+        // 质量位使用0x4567验证小端序。
+        .quality_flags = UINT16_C(0x4567),
+        // 窗口序号使用非对称四字节值。
+        .window_sequence = UINT32_C(0x01020304),
+        // 窗口末时刻单位毫秒。
+        .window_end_ms = UINT32_C(0x11223344),
+        // 推理耗时单位微秒。
+        .inference_time_us = UINT32_C(0x55667788),
+        // 累计异常窗口数。
+        .failure_count = UINT32_C(0x99AABBCC)
+    };
+    // 固定输出缓冲严格等于协议长度。
+    uint8_t payload[BLE_SERVICE_INFERENCE_DIAGNOSTIC_V1_SIZE];
+    // 保存编码器返回长度。
+    size_t payload_length = 0U;
+    // 调用生产编码器。
+    const ble_service_status_t status = ble_service_encode_inference_diagnostic_v1(
+        &diagnostic,
+        payload,
+        sizeof(payload),
+        &payload_length);
+    // 合法对象必须成功编码。
+    TEST_ASSERT(status == BLE_SERVICE_STATUS_OK, "推理诊断V1编码失败。 ");
+    // 线上长度必须固定为28字节。
+    TEST_ASSERT(payload_length == BLE_SERVICE_INFERENCE_DIAGNOSTIC_V1_SIZE, "推理诊断V1长度错误。 ");
+    // 版本和三组Top-1必须位于偏移0～3。
+    TEST_ASSERT(
+        (payload[0] == UINT8_C(1)) &&
+        (payload[1] == UINT8_C(3)) &&
+        (payload[2] == UINT8_C(4)) &&
+        (payload[3] == UINT8_C(5)),
+        "推理诊断V1动作字段偏移错误。 ");
+    // 三组Q15置信度必须位于偏移4、6、8。
+    TEST_ASSERT(
+        (test_read_u16_le(&payload[4]) == UINT16_C(0x1234)) &&
+        (test_read_u16_le(&payload[6]) == UINT16_C(0x2345)) &&
+        (test_read_u16_le(&payload[8]) == UINT16_C(0x3456)),
+        "推理诊断V1置信度偏移错误。 ");
+    // 质量位必须位于偏移10。
+    TEST_ASSERT(test_read_u16_le(&payload[10]) == UINT16_C(0x4567), "推理诊断V1质量位偏移错误。 ");
+    // 四个32位字段必须从偏移12开始连续小端编码。
+    TEST_ASSERT(
+        (test_read_u32_le(&payload[12]) == UINT32_C(0x01020304)) &&
+        (test_read_u32_le(&payload[16]) == UINT32_C(0x11223344)) &&
+        (test_read_u32_le(&payload[20]) == UINT32_C(0x55667788)) &&
+        (test_read_u32_le(&payload[24]) == UINT32_C(0x99AABBCC)),
+        "推理诊断V1序号、时间或异常累计偏移错误。 ");
+    // 非法动作索引11必须拒绝，防止类别表错位。
+    diagnostic.fused_action_id = UINT8_C(11);
+    // 编码非法动作并检查稳定错误码。
+    TEST_ASSERT(
+        ble_service_encode_inference_diagnostic_v1(&diagnostic, payload, sizeof(payload), &payload_length) ==
+            BLE_SERVICE_STATUS_INVALID_ARGUMENT,
+        "推理诊断V1非法动作未被拒绝。 ");
 }
 
 // 验证 LiveStateV1 的固定长度、全部偏移和范围保护。
@@ -242,8 +315,8 @@ static void test_live_state_v1(void)
         .state_revision = UINT32_C(0x11223344),
         // 会话时长为 5000 毫秒。
         .elapsed_ms = UINT32_C(5000),
-        // Running 状态示例值为 2。
-        .device_state = UINT8_C(2),
+        // Running 状态示例值为 3；2 固定表示 Preparing。
+        .device_state = UINT8_C(3),
         // jumping_squat 模型索引为 3。
         .action_id = UINT8_C(3),
         // 指标单位为次数 1。
@@ -300,8 +373,8 @@ static void test_event_v1(void)
         .event_version = UINT8_C(1),
         // 事件类型为完成一次重复动作。
         .event_type = (uint8_t)BLE_SERVICE_EVENT_REPETITION_COUNTED,
-        // 设备状态使用 Running 的线上值 2。
-        .device_state = UINT8_C(2),
+        // 设备状态使用 Running 的线上值 3；2 固定表示 Preparing。
+        .device_state = UINT8_C(3),
         // 动作索引 3 对应 jumping_squat。
         .action_id = UINT8_C(3),
         // 指标种类 1 表示次数。
@@ -345,7 +418,7 @@ static void test_event_v1(void)
     TEST_ASSERT(
         (payload[0] == UINT8_C(1)) &&
         (payload[1] == (uint8_t)BLE_SERVICE_EVENT_REPETITION_COUNTED) &&
-        (payload[2] == UINT8_C(2)) &&
+        (payload[2] == UINT8_C(3)) &&
         (payload[3] == UINT8_C(3)) &&
         (payload[4] == UINT8_C(1)) &&
         (payload[5] == UINT8_C(88)),
@@ -1396,10 +1469,12 @@ static void test_forget_all_bonds_orchestration(void)
 // 主入口按固定顺序执行全部离线场景。
 int main(void)
 {
-    // 验证八种消息类型范围。
+    // 验证九种消息类型范围。
     test_message_types();
     // 验证 30 字节实时状态编码。
     test_live_state_v1();
+    // 验证28字节双M0推理诊断编码。
+    test_inference_diagnostic_v1();
     // 验证事件固定布局和范围保护。
     test_event_v1();
     // 验证控制命令 1～11 和命令版本保护。

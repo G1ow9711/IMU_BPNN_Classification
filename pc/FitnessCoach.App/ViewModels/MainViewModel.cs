@@ -13,6 +13,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private object _currentPage;
     // 当前页面标题。
     private string _pageTitle = "设备";
+    // 当前页面副标题，用一句话说明本页用户任务。
+    private string _pageSubtitle = "扫描并连接手柄，确认安全蓝牙链路。";
     // 是否已释放子页面订阅。
     private bool _disposed;
 
@@ -40,26 +42,26 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         // 初始显示设备页。
         _currentPage = Device;
         // 创建六个导航命令。
-        ShowDeviceCommand = new RelayCommand(_ => Navigate(Device, "设备"));
+        ShowDeviceCommand = new RelayCommand(_ => Navigate(Device, "设备", "扫描并连接手柄，确认安全蓝牙链路。"));
         // 导航到实时训练。
-        ShowLiveTrainingCommand = new RelayCommand(_ => Navigate(LiveTraining, "实时训练"));
+        ShowLiveTrainingCommand = new RelayCommand(_ => Navigate(LiveTraining, "实时训练", "右手腕佩戴，一次训练只做一种动作。"));
         // 导航到总结。
-        ShowSummaryCommand = new RelayCommand(_ => Navigate(Summary, "训练总结"));
+        ShowSummaryCommand = new RelayCommand(_ => Navigate(Summary, "训练总结", "查看已完成会话的设备与本地保存结果。"));
         // 导航到历史并异步刷新。
         ShowHistoryCommand = new RelayCommand(_ =>
         {
             // 立即切换页面。
-            Navigate(History, "历史记录");
+            Navigate(History, "历史记录", "筛选、核对并导出本地会话摘要。" );
             // 后台刷新本地历史；页面状态会显示异常。
             _ = History.RefreshAsync();
         });
         // 导航到设置。
-        ShowSettingsCommand = new RelayCommand(_ => Navigate(Settings, "设置"));
+        ShowSettingsCommand = new RelayCommand(_ => Navigate(Settings, "设置", "管理显示、单位、诊断与设备偏好。"));
         // 导航到诊断并刷新安全信息。
         ShowDiagnosticsCommand = new RelayCommand(_ =>
         {
             // 切换诊断页。
-            Navigate(Diagnostics, "诊断" );
+            Navigate(Diagnostics, "训练监测", "动作示范、训练指标与六轴曲线。" );
             // 刷新当前连接摘要。
             Diagnostics.Refresh();
         });
@@ -109,7 +111,28 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         // 返回页面对象。
         get => _currentPage;
         // 私有更新页面对象。
-        private set => SetProperty(ref _currentPage, value);
+        private set
+        {
+            // 页面未变化时不刷新导航选中态。
+            if (!SetProperty(ref _currentPage, value))
+            {
+                // 返回表示当前页面已经是目标页。
+                return;
+            }
+
+            // 通知设备导航项重新计算选中态。
+            OnPropertyChanged(nameof(IsDeviceSelected));
+            // 通知实时训练导航项重新计算选中态。
+            OnPropertyChanged(nameof(IsLiveTrainingSelected));
+            // 通知总结导航项重新计算选中态。
+            OnPropertyChanged(nameof(IsSummarySelected));
+            // 通知历史导航项重新计算选中态。
+            OnPropertyChanged(nameof(IsHistorySelected));
+            // 通知设置导航项重新计算选中态。
+            OnPropertyChanged(nameof(IsSettingsSelected));
+            // 通知诊断导航项重新计算选中态。
+            OnPropertyChanged(nameof(IsDiagnosticsSelected));
+        }
     }
 
     /// <summary>窗口顶部页面标题。</summary>
@@ -121,6 +144,33 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         private set => SetProperty(ref _pageTitle, value);
     }
 
+    /// <summary>当前页面的一句话任务说明。</summary>
+    public string PageSubtitle
+    {
+        // 返回页面任务说明。
+        get => _pageSubtitle;
+        // 私有更新页面任务说明。
+        private set => SetProperty(ref _pageSubtitle, value);
+    }
+
+    /// <summary>true 表示设备页是当前页。</summary>
+    public bool IsDeviceSelected => ReferenceEquals(CurrentPage, Device);
+
+    /// <summary>true 表示实时训练页是当前页。</summary>
+    public bool IsLiveTrainingSelected => ReferenceEquals(CurrentPage, LiveTraining);
+
+    /// <summary>true 表示训练总结页是当前页。</summary>
+    public bool IsSummarySelected => ReferenceEquals(CurrentPage, Summary);
+
+    /// <summary>true 表示历史记录页是当前页。</summary>
+    public bool IsHistorySelected => ReferenceEquals(CurrentPage, History);
+
+    /// <summary>true 表示设置页是当前页。</summary>
+    public bool IsSettingsSelected => ReferenceEquals(CurrentPage, Settings);
+
+    /// <summary>true 表示诊断页是当前页。</summary>
+    public bool IsDiagnosticsSelected => ReferenceEquals(CurrentPage, Diagnostics);
+
     /// <summary>初始化仓储页面数据。</summary>
     public async Task InitializeAsync()
     {
@@ -129,12 +179,14 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     }
 
     // 切换页面和标题。
-    private void Navigate(object page, string title)
+    private void Navigate(object page, string title, string subtitle)
     {
         // 更新当前页面对象。
         CurrentPage = page;
         // 更新顶部标题。
         PageTitle = title;
+        // 更新与页面对应的一句话任务说明。
+        PageSubtitle = subtitle;
     }
 
     // 接收已保存摘要并自动进入总结页。
@@ -147,7 +199,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             devicePersisted: true,
             localPersisted: true);
         // 切换到总结页面。
-        Navigate(Summary, "训练总结");
+        Navigate(Summary, "训练总结", "查看已完成会话的设备与本地保存结果。" );
         // 刷新历史，幂等保存后可立即看到新记录。
         _ = History.RefreshAsync();
     }

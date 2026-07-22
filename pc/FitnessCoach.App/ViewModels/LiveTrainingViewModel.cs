@@ -89,7 +89,7 @@ public sealed class LiveTrainingViewModel : ObservableObject, IDisposable
         // 创建恢复命令。
         ResumeCommand = new AsyncRelayCommand(ResumeAsync, () => _deviceSession.IsConnected && DeviceState == FitnessDeviceState.Paused);
         // 创建停止命令。
-        StopCommand = new AsyncRelayCommand(StopAsync, () => _deviceSession.IsConnected && DeviceState is FitnessDeviceState.Running or FitnessDeviceState.Paused);
+        StopCommand = new AsyncRelayCommand(StopAsync, () => _deviceSession.IsConnected && DeviceState is FitnessDeviceState.Preparing or FitnessDeviceState.Running or FitnessDeviceState.Paused);
         // 订阅后台权威状态事件。
         _deviceSession.StateChanged += OnStateChanged;
         // 订阅链路事件以刷新命令和提示。
@@ -139,6 +139,9 @@ public sealed class LiveTrainingViewModel : ObservableObject, IDisposable
 
     /// <summary>当前动作中文文本。</summary>
     public string ActionName => DisplayText.ActionName(_action);
+
+    /// <summary>当前动作的一条标准姿态提示，帮助用户理解教练人偶。</summary>
+    public string ActionCueText => DisplayText.ActionCue(_action);
 
     /// <summary>当前权威动作 ID；矢量控件直接使用该枚举选择姿态。</summary>
     public ActionId CurrentAction => _action;
@@ -345,6 +348,8 @@ public sealed class LiveTrainingViewModel : ObservableObject, IDisposable
                 _action = ActionId.Unknown;
                 // 通知动作名称改为等待识别。
                 OnPropertyChanged(nameof(ActionName));
+                // 通知姿态提示切回单动作训练说明。
+                OnPropertyChanged(nameof(ActionCueText));
                 // 通知矢量控件切换到等待态。
                 OnPropertyChanged(nameof(CurrentAction));
                 // 驱动动画控制器递增修订并清除旧视觉描述。
@@ -378,6 +383,8 @@ public sealed class LiveTrainingViewModel : ObservableObject, IDisposable
         _action = state.Action;
         // 通知动作中文文本。
         OnPropertyChanged(nameof(ActionName));
+        // 通知标准姿态提示随权威动作更新。
+        OnPropertyChanged(nameof(ActionCueText));
         // 通知矢量控件使用新的权威动作 ID。
         OnPropertyChanged(nameof(CurrentAction));
         // 保存指标单位。

@@ -86,8 +86,6 @@ typedef struct {
 
 /* 把 0~10 动作索引映射为稳定中文显示名；255 或越界返回“等待识别”。 */
 const char *ui_action_display_name(uint8_t action_id);
-/* 根据 PREPARE 进入时刻和当前单调毫秒返回 3、2、1、0；uint32 回绕按无符号差处理。 */
-uint8_t ui_prepare_countdown_seconds(uint32_t state_entered_ms, uint32_t now_ms);
 /* 把状态机上下文格式化为页面模型；时间复杂度 O(1)，不分配动态内存。 */
 bool ui_presenter_build(const ui_context_t *context, ui_page_model_t *page);
 /* 把触摸命令映射为状态机事件；无对应事件时返回 false。 */

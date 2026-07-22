@@ -4,7 +4,7 @@ using FitnessCoach.Domain;
 // 本地矢量动画数据位于应用服务层，测试无需创建 WPF 窗口即可验证周期和边界。
 namespace FitnessCoach.App.Services;
 
-/// <summary>定义火柴人骨架的 13 个关节点；坐标由 <see cref="StickFigurePose"/> 提供。</summary>
+/// <summary>定义教练人偶的 13 个关节点；坐标由 <see cref="StickFigurePose"/> 提供。</summary>
 public enum FigureJoint
 {
     // 头部圆心用于绘制独立圆形，不直接参与骨骼连线。
@@ -50,7 +50,7 @@ public readonly record struct PosePoint(double X, double Y)
     }
 }
 
-/// <summary>保存一帧完整火柴人姿态；所有坐标均为无单位归一化坐标。</summary>
+/// <summary>保存一帧完整教练人偶姿态；所有坐标均为无单位归一化坐标。</summary>
 /// <param name="Head">头部圆心的无量纲画布坐标。</param>
 /// <param name="Neck">连接头部、双肩和躯干的颈部坐标。</param>
 /// <param name="LeftShoulder">左肩关节点坐标。</param>
@@ -112,7 +112,7 @@ public readonly record struct StickFigurePose(
             // 返回右脚位置。
             FigureJoint.RightFoot => RightFoot,
             // 未定义枚举表示代码合同漂移，立即抛错而不是绘制错误骨架。
-            _ => throw new ArgumentOutOfRangeException(nameof(joint), joint, "未定义的火柴人关节点。"),
+            _ => throw new ArgumentOutOfRangeException(nameof(joint), joint, "未定义的教练人偶关节点。"),
         };
     }
 

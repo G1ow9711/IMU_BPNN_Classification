@@ -22,4 +22,6 @@ public enum ProtocolMessageType : byte
     TransferData = 7,
     /// <summary>开发者模式实时六轴原始样本批次。</summary>
     RawStream = 8,
+    /// <summary>开发者模式双 M0 与融合分类诊断窗口。</summary>
+    InferenceDiagnostic = 9,
 }

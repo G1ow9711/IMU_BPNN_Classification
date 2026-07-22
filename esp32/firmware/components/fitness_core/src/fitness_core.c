@@ -50,12 +50,11 @@ static bool fitness_action_is_repetition(const fitness_action_t action)
            (action == FITNESS_ACTION_WAVE);
 }
 
-/* 判断 action 是否使用五阶段跳跃状态机。 */
+/* 判断 action 是否使用腕部支持力五阶段跳跃状态机。 */
 static bool fitness_action_is_jump(const fitness_action_t action)
 {
-    /* 四个高动态跳跃类必须依次经过起跳、腾空、落地和恢复。 */
-    return (action == FITNESS_ACTION_JUMPING_JACK) ||
-           (action == FITNESS_ACTION_JUMPING_LUNGE) ||
+    /* 开合跳按手臂开合两相位计数；其余三个跳跃类要求起跳、腾空、落地和恢复。 */
+    return (action == FITNESS_ACTION_JUMPING_LUNGE) ||
            (action == FITNESS_ACTION_JUMPING_SQUAT) ||
            (action == FITNESS_ACTION_TUCK_JUMP);
 }
@@ -371,6 +370,34 @@ fitness_status_t fitness_session_rebase_time(
     return FITNESS_STATUS_OK;
 }
 
+fitness_status_t fitness_session_switch_action(
+    fitness_session_t *session,
+    const fitness_action_t action,
+    const uint64_t now_ms)
+{
+    /* 会话指针和新动作必须有效，非法输入不得改写任何领域累计。 */
+    if ((session == NULL) || !fitness_action_is_valid(action)) {
+        /* 返回参数错误，调用方继续保持旧动作。 */
+        return FITNESS_STATUS_INVALID_ARGUMENT;
+    }
+    /* 已停止或尚未开始的会话不能在原地切换动作。 */
+    if (!session->active) {
+        /* 返回状态错误，避免复活已完成会话。 */
+        return FITNESS_STATUS_INVALID_STATE;
+    }
+    /* 切换时刻不能早于最近一次 25 Hz tick，否则热量时间轴会倒退。 */
+    if (now_ms < session->last_tick_ms) {
+        /* 保留旧动作和旧积分基准。 */
+        return FITNESS_STATUS_INVALID_TIME;
+    }
+    /* 先移动热量积分左端点，动作切换本身不虚构一段未知动作热量。 */
+    session->last_tick_ms = now_ms;
+    /* 最后提交新动作；次数、步数、时长、热量、余数和事件序号全部保持原值。 */
+    session->action = action;
+    /* 切换成功。 */
+    return FITNESS_STATUS_OK;
+}
+
 fitness_status_t fitness_session_record_count(
     fitness_session_t *session,
     const fitness_metric_kind_t metric_kind,
@@ -465,7 +492,7 @@ fitness_status_t fitness_rep_counter_init(
     counter->initialized = true;
     /* 保存动作类别。 */
     counter->action = action;
-    /* 四个跳跃类使用五阶段模式，其余四类使用两相位模式。 */
+    /* 三个高动态跳跃类使用五阶段；开合跳及其余四类使用腕部两相位模式。 */
     counter->mode = fitness_action_is_jump(action) ?
                     FITNESS_REP_MODE_JUMP :
                     FITNESS_REP_MODE_TWO_PHASE;
@@ -481,6 +508,9 @@ fitness_status_t fitness_rep_counter_init(
     /* 根据动作动力学设置最短完整周期。 */
     if (counter->mode == FITNESS_REP_MODE_JUMP) {
         /* 跳跃起飞到恢复至少 400 ms。 */
+        counter->min_cycle_ms = 400U;
+    } else if (action == FITNESS_ACTION_JUMPING_JACK) {
+        /* 开合跳手臂张开到合拢至少 400 ms，兼顾快速动作和抖动抑制。 */
         counter->min_cycle_ms = 400U;
     } else if (action == FITNESS_ACTION_WAVE) {
         /* 挥手周期允许更快，但仍至少 300 ms。 */
@@ -555,10 +585,12 @@ static bool fitness_rep_process_stable_phase(
             /* 首次计数不需要 last_rep；后续计数必须跨过不应期。 */
             const bool refractory_valid = (counter->total_repetitions == 0ULL) ||
                                           ((now_ms - counter->last_rep_ms) >= counter->refractory_ms);
-            /* 无论是否有效都结束当前周期，避免同一个 REST 重复计数。 */
-            counter->state = FITNESS_TWO_STATE_WAIT_PRIMARY;
-            /* 当前周期起点失效。 */
-            counter->cycle_start_ms = 0ULL;
+            /* 开合跳的返回正峰同时是下一周期主峰，直接等待负峰；其它动作重新等待 PRIMARY。 */
+            counter->state = (counter->action == FITNESS_ACTION_JUMPING_JACK) ?
+                             FITNESS_TWO_STATE_WAIT_SECONDARY :
+                             FITNESS_TWO_STATE_WAIT_PRIMARY;
+            /* 开合跳从当前返回正峰开始下一周期；其它动作清除周期起点。 */
+            counter->cycle_start_ms = (counter->action == FITNESS_ACTION_JUMPING_JACK) ? now_ms : 0ULL;
             /* 任一约束失败时丢弃该周期。 */
             if (!duration_valid || !refractory_valid) {
                 /* 周期不计数。 */

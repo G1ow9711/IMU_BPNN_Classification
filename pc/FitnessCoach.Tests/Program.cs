@@ -37,6 +37,8 @@ internal static class Program
             TestCorruptionAndOutOfOrderRejection();
             // 验证 30 字节实时状态可无损往返。
             TestLiveStateRoundTrip();
+            // 验证固件状态字节 2/3/5/7 与 PC 准备、训练、总结和关机语义完全一致。
+            TestFirmwareDeviceStateNumericContract();
             // 验证非法实时状态字段不会进入领域层。
             TestInvalidLiveStateRejection();
             // 验证 EventV1 固定 36 字节载荷可跨 C/C# 无损往返。
@@ -45,6 +47,8 @@ internal static class Program
             await TestJsonRepositoryIdempotencyAsync();
             // 验证历史日期/动作筛选、选中详情和 CSV 导出合同。
             await TestHistoryFilteringAndCsvExportAsync();
+            // 验证 IMU 实时全部缓存、回看窗口和中文 CSV 导出合同。
+            await TestImuCsvExportAsync();
             // 验证连接设备摘要按 cursor 自动补传并幂等写入 JSON。
             await TestHistoryDeviceSynchronizationAsync();
             // 验证 Mock 开始、停止和重复命令幂等。
@@ -57,12 +61,14 @@ internal static class Program
             await TestLiveViewModelStateFlowAsync();
             // 验证 11 类本地动画资源均存在。
             TestLocalActionAnimationMapping();
-            // 验证 11 类离线矢量火柴人姿态、帧推进和减少动态效果。
+            // 验证 11 类离线矢量教练人偶姿态、帧推进和减少动态效果。
             ActionAnimationTests.RunAll();
             // 验证 Windows 真 BLE 会话的选择、重试、revision、事件、重连和释放状态机。
             await WindowsBleDeviceSessionTests.RunAllAsync();
             // 验证命令 6/7/8/9/11 的冻结 TLV 字节、边界和 RawStream 固定 22 字节布局。
             DeviceConfigurationContractTests.RunAll();
+            // 验证分类诊断固定 28 字节布局、动作边界和 Q15 换算。
+            InferenceDiagnosticContractTests.RunAll();
             // 验证会话摘要 LIST/GET 编解码、分页重放、超时同 ID 重试和幂等拉取合同。
             await SessionTransferContractTests.RunAllAsync();
             // 验证窗口、六个页面和动态状态文案全部使用自然中文。
@@ -199,7 +205,7 @@ internal static class Program
         Assert(payload.Length == ProtocolConstants.EventPayloadSize, "EventV1 长度错误。");
         // 与 C 测试确定的完整小端字节逐字节比较。
         Assert(
-            Convert.ToHexString(payload) == "0106020301583412040302010700000009000000010000000C00000029090000FF7F0000",
+            Convert.ToHexString(payload) == "0106030301583412040302010700000009000000010000000C00000029090000FF7F0000",
             $"EventV1 黄金字节错误：{Convert.ToHexString(payload)}");
         // 解码合法 payload。
         bool decoded = EventV1Codec.TryDecode(payload, out DeviceEventV1? actual, out string? error);
@@ -365,6 +371,50 @@ internal static class Program
         Assert(state.QualityFlags == source.QualityFlags, "质量标志往返错误。");
         // 核对组合电源标志。
         Assert(state.PowerFlags == source.PowerFlags, "电源标志往返错误。");
+    }
+
+    /// <summary>验证 PC 直接按固件冻结数值解码设备状态，防止运行态误显示为暂停。</summary>
+    private static void TestFirmwareDeviceStateNumericContract()
+    {
+        // 构造其余字段均合法的实时状态，用于取得固定 30 字节载荷。
+        LiveState source = new(
+            1,
+            1,
+            0,
+            FitnessDeviceState.Idle,
+            ActionId.Unknown,
+            MetricKind.None,
+            100,
+            0,
+            0,
+            0,
+            DataQualityFlags.None,
+            PowerFlags.None,
+            0);
+        // 编码为可修改状态字节的载荷。
+        byte[] payload = LiveStateCodec.Encode(source);
+        // 固件冻结状态值及 PC 期望枚举逐项配对。
+        (byte RawValue, FitnessDeviceState Expected)[] cases =
+        [
+            // 2 表示累计分类证据准备态。
+            (2, FitnessDeviceState.Preparing),
+            // 3 表示真正训练和计数运行态。
+            (3, FitnessDeviceState.Running),
+            // 5 表示停止后的会话总结态。
+            (5, FitnessDeviceState.Summary),
+            // 7 表示设备正在执行安全关机。
+            (7, FitnessDeviceState.Shutdown),
+        ];
+        // 遍历四个历史错位值。
+        foreach ((byte rawValue, FitnessDeviceState expected) in cases)
+        {
+            // LiveStateV1 第 13 字节偏移 12 固定为 device_state。
+            payload[12] = rawValue;
+            // 解码固件原始载荷。
+            bool decodedOk = LiveStateCodec.TryDecode(payload, out LiveState? decoded, out string? error);
+            // 解码必须成功且返回预期语义。
+            Assert(decodedOk && error is null && decoded?.DeviceState == expected, $"固件状态值 {rawValue} 未映射为 {expected}。" );
+        }
     }
 
     /// <summary>
@@ -570,6 +620,150 @@ internal static class Program
         }
     }
 
+    /// <summary>验证 IMU 全缓存与回看窗口均能导出带中文表头的可复算 CSV。</summary>
+    private static async Task TestImuCsvExportAsync()
+    {
+        // 使用当前系统临时根创建唯一目录，测试结束后只删除本方法创建的文件。
+        string directory = Path.Combine(Path.GetTempPath(), $"fitness-coach-imu-export-{Guid.NewGuid():N}");
+        // 创建隔离目录，避免和并行测试或真实用户导出冲突。
+        Directory.CreateDirectory(directory);
+        // 定义实时完整缓存的输出路径。
+        string fullPath = Path.Combine(directory, "imu-full.csv");
+        // 定义回看十秒窗口的输出路径。
+        string viewportPath = Path.Combine(directory, "imu-window.csv");
+
+        try
+        {
+            // 创建短周期 Mock，以有限等待生成超过十秒的 25 Hz 逻辑样本。
+            await using MockDeviceSession device = new(TimeSpan.FromMilliseconds(5), [ActionId.JumpingJack]);
+            // 同步调度器让 BLE 事件在测试线程立即进入 ViewModel。
+            ImmediateUiDispatcher dispatcher = new();
+            // 路径选择器按两次命令顺序返回完整缓存和回看窗口文件。
+            QueuedImuDestinationPicker picker = new(fullPath, viewportPath);
+            // 注入真实 CSV 导出器和测试路径选择器，覆盖生产文件边界。
+            using DiagnosticsViewModel viewModel = new(
+                device,
+                dispatcher,
+                animationPreferences: null,
+                imuCsvExporter: new ImuCsvExporter(),
+                imuExportDestinationPicker: picker);
+            // 建立 Mock 链路后才能同步开发者模式偏好。
+            await device.ConnectAsync();
+            // 开启开发者模式，满足 RawStream 命令权限合同。
+            await ((IDeviceConfigurationSession)device).SetPreferencesAsync(new DevicePreferencesV1(75, true, false, 30, 1U, true));
+            // 通过诊断页开启 RawStream，使 ViewModel 建立三份严格对齐的十分钟缓冲。
+            await viewModel.ToggleRawStreamCommand.ExecuteAsync();
+            // 启动训练，Mock 在活动态持续发布六轴记录。
+            await device.StartAsync();
+
+            // 最多等待五秒，直到历史超过一个 250 点可见窗口。
+            for (int waitAttempt = 0; waitAttempt < 100 && viewModel.RawChartMaximumOffsetSeconds <= 0.0; waitAttempt++)
+            {
+                // 每轮让后台定时器发布更多样本，避免依赖固定调度精度。
+                await Task.Delay(50);
+            }
+
+            // 测试前置条件必须已有超过十秒的同步历史。
+            Assert(viewModel.RawChartMaximumOffsetSeconds > 0.0, "IMU 导出测试没有形成超过十秒的样本历史。");
+            // 实时模式导出全部缓存。
+            await viewModel.ExportImuCsvCommand.ExecuteAsync();
+            // 完整文件必须存在并包含至少 251 行数据加一行表头。
+            Assert(File.Exists(fullPath), "实时 IMU 全缓存 CSV 未生成。");
+            // 读取完整文件字节验证带 BOM 的 UTF-8 中文兼容性。
+            byte[] fullBytes = await File.ReadAllBytesAsync(fullPath);
+            // BOM 固定为 EF BB BF。
+            Assert(fullBytes.Length >= 3 && fullBytes[0] == 0xEF && fullBytes[1] == 0xBB && fullBytes[2] == 0xBF, "IMU CSV 未使用 UTF-8 BOM。");
+            // 读取文本验证中文列名、原始码、物理量和质量位列均存在。
+            string[] fullLines = await File.ReadAllLinesAsync(fullPath);
+            // 第一行必须是用户要求的中文内容，并标明关键单位。
+            Assert(
+                fullLines[0].Contains("样本序号", StringComparison.Ordinal) &&
+                fullLines[0].Contains("设备单调时间（毫秒）", StringComparison.Ordinal) &&
+                fullLines[0].Contains("角速度横轴（度每秒）", StringComparison.Ordinal) &&
+                fullLines[0].Contains("加速度垂直轴（重力倍数）", StringComparison.Ordinal) &&
+                fullLines[0].Contains("质量标志（十六进制）", StringComparison.Ordinal) &&
+                fullLines[0].Contains("佩戴手侧", StringComparison.Ordinal) &&
+                fullLines[0].Contains("设备稳定动作", StringComparison.Ordinal) &&
+                fullLines[0].Contains("分类窗口序号", StringComparison.Ordinal) &&
+                fullLines[0].Contains("分类窗口结束时间（毫秒）", StringComparison.Ordinal) &&
+                fullLines[0].Contains("基础模型类别", StringComparison.Ordinal) &&
+                fullLines[0].Contains("掩码模型类别", StringComparison.Ordinal) &&
+                fullLines[0].Contains("融合模型类别", StringComparison.Ordinal) &&
+                fullLines[0].Contains("模型是否一致", StringComparison.Ordinal) &&
+                fullLines[0].Contains("分类窗口是否在本行结束", StringComparison.Ordinal) &&
+                fullLines[0].Contains("是否计数标记点", StringComparison.Ordinal) &&
+                fullLines[0].Contains("计数事件序号", StringComparison.Ordinal) &&
+                fullLines[0].Contains("计数动作", StringComparison.Ordinal) &&
+                fullLines[0].Contains("计数后累计值", StringComparison.Ordinal),
+                "IMU CSV 中文表头或单位不完整。");
+            // 按中文表头建立列索引，后续断言不依赖列在文件尾部或字符串偶然包含相同词。
+            string[] headerFields = fullLines[0].Split(',');
+            // 新诊断合同固定为 44 列，防止以后新增字段时无意删除佩戴域、六轴、模型或计数证据。
+            Assert(headerFields.Length == 44, $"IMU CSV 应为44列，实际={headerFields.Length}列。");
+            // 读取佩戴手侧列索引，离线分类分析必须能区分当前右腕产品域。
+            int wristSideColumn = Array.IndexOf(headerFields, "佩戴手侧");
+            // 读取融合模型类别列索引。
+            int fusedActionColumn = Array.IndexOf(headerFields, "融合模型类别");
+            // 读取分类窗口精确结束点列索引。
+            int inferenceEndColumn = Array.IndexOf(headerFields, "分类窗口是否在本行结束");
+            // 读取计数标记点列索引。
+            int metricMarkerColumn = Array.IndexOf(headerFields, "是否计数标记点");
+            // 读取计数后累计值列索引。
+            int metricTotalColumn = Array.IndexOf(headerFields, "计数后累计值");
+            // 五个关键列都必须存在，缺列时前面的包含判断无法保证可机器读取。
+            Assert(
+                wristSideColumn >= 0 && fusedActionColumn >= 0 && inferenceEndColumn >= 0 &&
+                metricMarkerColumn >= 0 && metricTotalColumn >= 0,
+                "IMU CSV 缺少分类或计数关键列索引。");
+            // 把数据行拆成稳定列数组，导出字段不含逗号且无需 CSV 引号解析。
+            string[][] dataRows = fullLines.Skip(1).Select(line => line.Split(',')).ToArray();
+            // 当前产品所有导出行必须明确属于右手腕佩戴域，禁止空值进入后续训练数据。
+            Assert(
+                dataRows.All(fields =>
+                    fields.Length == headerFields.Length &&
+                    fields[wristSideColumn] == "右手腕"),
+                "IMU CSV 存在缺失或错误的佩戴手侧。");
+            // 至少一个样本行必须关联到已经完成的开合跳分类窗口，证明导出不是只增加空列。
+            Assert(
+                dataRows.Any(fields =>
+                    fields.Length == headerFields.Length &&
+                    fields[fusedActionColumn] == "开合跳" &&
+                    fields[inferenceEndColumn] == "是"),
+                "IMU CSV 没有关联到任何开合跳分类窗口结束点。");
+            // 至少一个样本行必须带权威计数事件和非空累计值，便于把计数点直接叠到六轴曲线上。
+            Assert(
+                dataRows.Any(fields =>
+                    fields.Length == headerFields.Length &&
+                    fields[metricMarkerColumn] == "是" &&
+                    !string.IsNullOrWhiteSpace(fields[metricTotalColumn])),
+                "IMU CSV 没有导出任何权威计数标记点。");
+            // 全缓存行数必须超过固定十秒视口。
+            Assert(fullLines.Length > 251, "实时模式没有导出超过十秒的完整 IMU 缓存。");
+
+            // 移动到最早可用历史窗口；属性会自动暂停并冻结当前视口。
+            viewModel.RawChartOffsetSeconds = viewModel.RawChartMaximumOffsetSeconds;
+            // 回看模式再次导出，只允许当前可见最多 250 点。
+            await viewModel.ExportImuCsvCommand.ExecuteAsync();
+            // 回看文件必须存在。
+            Assert(File.Exists(viewportPath), "回看窗口 IMU CSV 未生成。");
+            // 读取回看文件并验证表头加 250 点的固定窗口容量。
+            string[] viewportLines = await File.ReadAllLinesAsync(viewportPath);
+            // 一行中文表头加 250 个同步样本，共 251 行。
+            Assert(viewportLines.Length == 251, $"回看窗口应导出 250 点，实际数据行={viewportLines.Length - 1}。");
+            // 成功状态必须明确当前窗口和行数，用户可确认导出范围。
+            Assert(viewModel.ImuExportStatus.Contains("当前窗口 250 条", StringComparison.Ordinal), "IMU 导出状态没有说明当前窗口行数。");
+        }
+        finally
+        {
+            // 测试结束只删除本方法创建的唯一目录。
+            if (Directory.Exists(directory))
+            {
+                // 递归删除两份 CSV，避免污染用户项目和临时目录。
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
     /// <summary>验证 Mock 设备身份、电量、MTU、RSSI 和重连诊断可绑定到页面。</summary>
     private static async Task TestDeviceAndDiagnosticsViewModelsAsync()
     {
@@ -604,8 +798,12 @@ internal static class Program
         await diagnosticsViewModel.ToggleRawStreamCommand.ExecuteAsync();
         // 启动训练，Mock 只在活动设备状态下发布确定性原始样本。
         await device.StartAsync();
-        // 等待多个 5ms tick 进入 UI 调度器。
-        await Task.Delay(35);
+        // Windows 定时器可能合并 5 ms 测试 tick；在五秒上限内等待历史超过 250 点，而不是依赖固定睡眠猜测调度速度。
+        for (int waitAttempt = 0; waitAttempt < 100 && diagnosticsViewModel.RawChartMaximumOffsetSeconds <= 0.0; waitAttempt++)
+        {
+            // 每轮等待 50 ms，让后台 Mock 继续发布六轴样本和分类诊断。
+            await Task.Delay(50);
+        }
         // 开启必须由设备确认，页面显示样本且明确不落盘。
         Assert(
             diagnosticsViewModel.RawStreamEnabled &&
@@ -622,6 +820,48 @@ internal static class Program
             diagnosticsViewModel.RawSampleRateText.Contains("Hz", StringComparison.Ordinal) &&
             diagnosticsViewModel.RawQualityText.Contains("正常", StringComparison.Ordinal),
             "诊断页未形成同步六轴物理量曲线、采样率或质量状态。" );
+        // 超过十秒的内存历史必须允许用户回看，不再永久丢弃第 251 点以前的数据。
+        Assert(
+            diagnosticsViewModel.RawChartMaximumOffsetSeconds > 0.0 &&
+            diagnosticsViewModel.RawChartHistoryText.Contains("已缓存", StringComparison.Ordinal),
+            "六轴曲线没有形成可回看的进程内历史。" );
+        // 保存实时窗口末点，稍后验证回看和回到实时改变视口而不停止接收。
+        double liveEndSeconds = diagnosticsViewModel.AccelerationPoints[^1].Seconds;
+        // 把滑块移动到可用历史范围内的最远位置，视图应自动冻结在过去窗口。
+        diagnosticsViewModel.RawChartOffsetSeconds = diagnosticsViewModel.RawChartMaximumOffsetSeconds;
+        // 回看窗口必须进入暂停状态并显示过去时间范围。
+        Assert(
+            diagnosticsViewModel.RawChartPaused &&
+            diagnosticsViewModel.RawChartOffsetSeconds > 0.0 &&
+            diagnosticsViewModel.RawChartWindowText.Contains("回看", StringComparison.Ordinal) &&
+            diagnosticsViewModel.AccelerationPoints[^1].Seconds < liveEndSeconds,
+            "拖动曲线历史滑块没有切换到过去窗口。" );
+        // 保存回看窗口末点，验证暂停期间视口保持不动。
+        double historyEndSeconds = diagnosticsViewModel.AccelerationPoints[^1].Seconds;
+        // 等待 RawStream 继续接收；历史应增长但当前回看窗口不得移动。
+        await Task.Delay(40);
+        // 暂停回看期间曲线末点保持一致。
+        Assert(
+            diagnosticsViewModel.AccelerationPoints[^1].Seconds == historyEndSeconds,
+            "回看过去窗口时实时样本错误地推动了当前视口。" );
+        // 回到实时命令应解除暂停并显示最新十秒。
+        diagnosticsViewModel.GoLiveRawChartCommand.Execute(null);
+        // 最新窗口末点必须晚于先前回看末点，偏移归零。
+        Assert(
+            !diagnosticsViewModel.RawChartPaused &&
+            diagnosticsViewModel.RawChartOffsetSeconds == 0.0 &&
+            diagnosticsViewModel.AccelerationPoints[^1].Seconds > historyEndSeconds &&
+            diagnosticsViewModel.RawChartWindowText.Contains("实时", StringComparison.Ordinal),
+            "回到实时没有跳转到最新曲线窗口。" );
+        // 分类卡必须显示设备端三路模型结果、置信度和推理耗时。
+        Assert(
+            diagnosticsViewModel.FusedActionText == "深蹲" &&
+            diagnosticsViewModel.FusedConfidenceText.EndsWith('%') &&
+            diagnosticsViewModel.BaseModelText.Contains("基础模型：深蹲", StringComparison.Ordinal) &&
+            diagnosticsViewModel.MaskedModelText.Contains("掩码模型：", StringComparison.Ordinal) &&
+            diagnosticsViewModel.InferenceTimingText.Contains("ms", StringComparison.Ordinal) &&
+            diagnosticsViewModel.InferenceQualityText.Contains("累计失败 0", StringComparison.Ordinal),
+            $"诊断页未显示双 M0 分类、融合置信度、耗时或质量事实：融合={diagnosticsViewModel.FusedActionText}/{diagnosticsViewModel.FusedConfidenceText}；基础={diagnosticsViewModel.BaseModelText}；掩码={diagnosticsViewModel.MaskedModelText}；耗时={diagnosticsViewModel.InferenceTimingText}；质量={diagnosticsViewModel.InferenceQualityText}。" );
         // 记录暂停前曲线点数，验证暂停只冻结图形而不停止设备数据流。
         int chartCountBeforePause = diagnosticsViewModel.AccelerationPoints.Count;
         // 执行暂停曲线命令。
@@ -647,21 +887,21 @@ internal static class Program
             "清空曲线没有同时清除两张图或采样率窗口。" );
         // 恢复曲线，便于后续关闭 RawStream 前验证新样本重新进入图形。
         diagnosticsViewModel.PauseRawChartCommand.Execute(null);
-        // 等待至少一个新样本进入空曲线。
-        await Task.Delay(15);
+        // Windows 短周期定时器可能合并唤醒；等待 60ms 确保至少一个新样本进入空曲线。
+        await Task.Delay(60);
         // 恢复后曲线必须重新增长。
         Assert(!diagnosticsViewModel.RawChartPaused && diagnosticsViewModel.AccelerationPoints.Count > 0, "继续曲线后没有接收新样本。" );
-        // 关闭前记录合法样本数。
-        string countBeforeClose = diagnosticsViewModel.RawSampleCountText;
         // 通过同一按钮关闭 RawStream。
         await diagnosticsViewModel.ToggleRawStreamCommand.ExecuteAsync();
+        // 关闭 ACK 返回后记录稳定基准；按钮调用前最后一个合法在途样本允许先完成。
+        string countAfterClose = diagnosticsViewModel.RawSampleCountText;
         // 等待后台设备继续推进，确认关闭后不再发布。
         await Task.Delay(25);
         // 关闭后底层事实和页面计数都必须稳定。
         Assert(
             !diagnosticsViewModel.RawStreamEnabled &&
             !((IRawStreamSource)device).IsRawStreamEnabled &&
-            diagnosticsViewModel.RawSampleCountText == countBeforeClose,
+            diagnosticsViewModel.RawSampleCountText == countAfterClose,
             "RawStream 关闭后仍发布或计数原始样本。" );
         // 停止本次 Mock 训练，避免重连诊断混入运行态。
         _ = await device.StopAsync();
@@ -856,6 +1096,38 @@ internal static class Program
             Assert(suggestedFileName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase), "历史导出建议文件名缺少 CSV 扩展名。");
             // 返回固定测试路径。
             return Task.FromResult<string?>(_path);
+        }
+    }
+
+    // 测试 IMU 路径选择器按命令顺序返回预设路径，不打开 Windows 对话框。
+    private sealed class QueuedImuDestinationPicker : IImuExportDestinationPicker
+    {
+        // 保存尚未返回的绝对路径；队列顺序对应实时导出和回看导出。
+        private readonly Queue<string> _paths;
+
+        /// <summary>创建按顺序返回路径的 IMU 选择器。</summary>
+        public QueuedImuDestinationPicker(params string[] paths)
+        {
+            // 路径数组不能为空引用。
+            ArgumentNullException.ThrowIfNull(paths);
+            // 复制到独立队列，调用者后续修改原数组不会影响测试行为。
+            _paths = new Queue<string>(paths);
+        }
+
+        /// <inheritdoc />
+        public Task<string?> PickCsvPathAsync(string suggestedFileName)
+        {
+            // 默认文件名必须是中文 IMU 范围名并带 csv 扩展名。
+            Assert(
+                suggestedFileName.StartsWith("IMU_", StringComparison.Ordinal) &&
+                suggestedFileName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase),
+                "IMU 导出建议文件名不符合中文范围合同。");
+            // 每次命令都必须有独立预设路径，缺路径表示 ViewModel 多开了保存对话框。
+            Assert(_paths.Count > 0, "IMU 路径选择器收到超出预期的调用。" );
+            // 取出当前命令对应路径。
+            string selectedPath = _paths.Dequeue();
+            // 返回固定路径，不显示真实系统对话框。
+            return Task.FromResult<string?>(selectedPath);
         }
     }
 

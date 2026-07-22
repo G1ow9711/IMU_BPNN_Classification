@@ -62,6 +62,39 @@ public static class DisplayText
         };
     }
 
+    /// <summary>返回当前动作最关键的一条标准姿态提示；只描述可见身体关系，不承诺医学纠错。</summary>
+    public static string ActionCue(ActionId action)
+    {
+        // 每类只保留一条短提示，避免动作卡重新变成长说明墙。
+        return action switch
+        {
+            // 早安式重点是脊柱中立和髋部后移。
+            ActionId.GoodMorning => "背部平直，髋部向后",
+            // 开合跳要求手臂和双脚同步完成开合周期。
+            ActionId.JumpingJack => "手臂上举，双脚同步开合",
+            // 跳跃弓步要求躯干稳定并交替前后腿。
+            ActionId.JumpingLunge => "躯干稳定，前后腿交替",
+            // 跳跃深蹲重点是落地缓冲和膝脚方向一致。
+            ActionId.JumpingSquat => "落地屈髋，膝盖对齐脚尖",
+            // 普通弓步重点是前膝方向和后膝下沉。
+            ActionId.Lunge => "前膝对齐脚尖，后膝下沉",
+            // 静坐要求上身自然直立并减少晃动。
+            ActionId.Sit => "上身自然直立，保持稳定",
+            // 深蹲重点是屈髋和膝脚方向一致。
+            ActionId.Squat => "屈髋下蹲，膝盖对齐脚尖",
+            // 小跑要求躯干直立并保持自然摆臂。
+            ActionId.Trot => "躯干直立，双臂自然摆动",
+            // 收腹跳重点是起跳收膝和落地缓冲。
+            ActionId.TuckJump => "起跳收膝，落地注意缓冲",
+            // 行走要求目视前方并保持自然摆臂。
+            ActionId.Walk => "目视前方，双臂自然摆动",
+            // 挥手重点是保持肘部稳定并由前臂往返。
+            ActionId.Wave => "肘部稳定，前臂往返摆动",
+            // 尚未锁类时提示一次会话保持单动作。
+            _ => "开始后保持一种动作",
+        };
+    }
+
     /// <summary>把设备状态转换为用户可读中文。</summary>
     public static string DeviceStateName(FitnessDeviceState state)
     {
@@ -72,18 +105,18 @@ public static class DisplayText
             FitnessDeviceState.Booting => "开机自检",
             // 空闲可开始阶段。
             FitnessDeviceState.Idle => "空闲",
+            // 首个动作尚未锁定，设备仍在实时采样。
+            FitnessDeviceState.Preparing => "识别准备",
             // 正在采样识别阶段。
             FitnessDeviceState.Running => "训练中",
             // 会话暂停阶段。
             FitnessDeviceState.Paused => "已暂停",
             // 会话总结阶段。
             FitnessDeviceState.Summary => "训练完成",
-            // 仅屏幕关闭。
-            FitnessDeviceState.ScreenOff => "息屏待机",
-            // 充电空闲状态。
-            FitnessDeviceState.Charging => "充电中",
             // 设备阻断错误。
             FitnessDeviceState.Error => "设备错误",
+            // 设备已进入安全关机流程。
+            FitnessDeviceState.Shutdown => "正在关机",
             // 防御未来未知枚举。
             _ => "未知状态",
         };

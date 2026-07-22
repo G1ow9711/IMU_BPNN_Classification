@@ -13,17 +13,17 @@
 /* 固定加锁超时为 250 ms，超过后放弃本帧避免阻塞算法任务。 */
 #define UI_LVGL_LOCK_TIMEOUT_MS (250U)
 /* 固定 AMOLED 黑色背景，减少全屏发光功耗和烧屏风险。 */
-#define UI_COLOR_BACKGROUND_HEX (0x05070AU)
+#define UI_COLOR_BACKGROUND_HEX (0x080B10U)
 /* 固定卡片深灰色。 */
-#define UI_COLOR_CARD_HEX (0x10151CU)
+#define UI_COLOR_CARD_HEX (0x141A23U)
 /* 固定主强调青绿色。 */
-#define UI_COLOR_ACCENT_HEX (0x32E6A1U)
+#define UI_COLOR_ACCENT_HEX (0x6EA8FEU)
 /* 固定次强调蓝色。 */
-#define UI_COLOR_SECONDARY_HEX (0x45A3FFU)
+#define UI_COLOR_SECONDARY_HEX (0xB8C3D6U)
 /* 固定普通文本浅灰色。 */
-#define UI_COLOR_TEXT_HEX (0xF2F5F7U)
+#define UI_COLOR_TEXT_HEX (0xF4F7FBU)
 /* 固定弱化文本灰色。 */
-#define UI_COLOR_MUTED_HEX (0x8C98A4U)
+#define UI_COLOR_MUTED_HEX (0x8996A9U)
 /* SH8601 逻辑横向宽度固定 410 像素，用于计算圆角屏幕安全内容宽度。 */
 #define UI_SCREEN_WIDTH_PX (410)
 /* 左右各留 32 像素，避免标题首字和右侧状态进入玻璃圆角不可视区。 */
@@ -297,7 +297,7 @@ static void ui_lvgl_apply_static_home_layout(ui_lvgl_page_t *page)
     /* 状态行固定为 346×28 像素，可容纳 20 像素字体的 24 像素行高。 */
     lv_obj_set_size(page->status_label, UI_SAFE_CONTENT_WIDTH_PX, 28);
 
-    /* 主文案使用单行裁剪；当前“常亮联调版 0716”在 346 像素内完整显示。 */
+    /* 主文案使用单行裁剪；当前“准备训练”在 346 像素内完整显示。 */
     lv_label_set_long_mode(page->primary_label, LV_LABEL_LONG_CLIP);
     /* 主文案使用固定纵坐标，不再因标题或状态内容宽高变化而移动。 */
     lv_obj_set_pos(page->primary_label, UI_SAFE_HORIZONTAL_PX, UI_HOME_PRIMARY_Y_PX);

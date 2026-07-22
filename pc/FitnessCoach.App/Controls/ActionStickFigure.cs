@@ -16,7 +16,7 @@ using FitnessCoach.Domain;
 // 自定义绘制控件位于 Controls 命名空间，XAML 不需要外部图片或网络资源。
 namespace FitnessCoach.App.Controls;
 
-/// <summary>按权威 ActionId 和 AnimationRevision 绘制 11 类本地矢量火柴人动画。</summary>
+/// <summary>按权威 ActionId 和 AnimationRevision 绘制 11 类本地矢量教练人偶动画。</summary>
 public sealed class ActionStickFigure : FrameworkElement
 {
     // 使用约 30 FPS，兼顾动作可读性和 Windows 上位机空闲功耗。
@@ -56,7 +56,7 @@ public sealed class ActionStickFigure : FrameworkElement
         typeof(ActionStickFigure),
         new FrameworkPropertyMetadata(false, FrameworkPropertyMetadataOptions.AffectsRender, OnAnimationInputChanged));
 
-    // 注册主骨架画刷，默认青绿色并允许 XAML 使用主题资源覆盖。
+    // 注册动作强调画刷，默认青绿色并允许 XAML 使用主题资源覆盖。
     public static readonly DependencyProperty StrokeBrushProperty = DependencyProperty.Register(
         nameof(StrokeBrush),
         typeof(Brush),
@@ -127,12 +127,12 @@ public sealed class ActionStickFigure : FrameworkElement
         set => SetValue(IsConnectedProperty, value);
     }
 
-    /// <summary>主骨架画刷。</summary>
+    /// <summary>动作强调画刷，用于人偶内层四肢、关节和躯干轮廓。</summary>
     public Brush StrokeBrush
     {
-        // 读取主题骨架画刷。
+        // 读取主题动作强调画刷。
         get => (Brush)GetValue(StrokeBrushProperty);
-        // 写入主题骨架画刷。
+        // 写入主题动作强调画刷。
         set => SetValue(StrokeBrushProperty, value);
     }
 
@@ -267,7 +267,7 @@ public sealed class ActionStickFigure : FrameworkElement
         return (now - _phaseStartTimestamp) / (double)Stopwatch.Frequency;
     }
 
-    // 绘制一个完整火柴人姿态。
+    // 绘制一个具有身体体积、关节和站立基准的完整教练人偶姿态。
     private void DrawPose(DrawingContext drawingContext, StickFigurePose pose)
     {
         // 坐标系宽约 2.0、高约 2.0，额外留边避免手脚贴住卡片边缘。
@@ -276,83 +276,200 @@ public sealed class ActionStickFigure : FrameworkElement
         double centerX = ActualWidth * 0.5;
         // 垂直原点居中并留出头部外圈。
         double topY = Math.Max(8.0, (ActualHeight - (2.02 * scale)) * 0.5);
-        // 骨架线宽随控件尺寸变化，并限制在 4～9 像素。
-        double strokeWidth = Math.Clamp(scale * 0.045, 4.0, 9.0);
-        // 创建圆头圆尾画笔，让火柴人关节在缩放后仍平滑。
-        Pen bodyPen = new(StrokeBrush, strokeWidth)
+        // 人偶外层宽度随控件缩放，并限制在 12～23 像素，形成可辨识的肢体体积。
+        double outerLimbWidth = Math.Clamp(scale * 0.105, 12.0, 23.0);
+        // 人偶内层宽度约为外层六成，使用主题强调色表达动作方向。
+        double innerLimbWidth = Math.Max(7.0, outerLimbWidth * 0.58);
+        // 外层画笔使用中性辅助色，形成成熟教练人偶的身体基底。
+        Pen outerLimbPen = new(SecondaryBrush, outerLimbWidth)
         {
-            // 起点使用圆头，避免手脚末端出现方块。
+            // 起点使用圆头，使肢体呈胶囊形而不是细线。
+            StartLineCap = PenLineCap.Round,
+            // 终点使用圆头，使手脚连接自然。
+            EndLineCap = PenLineCap.Round,
+            // 折线连接使用圆角，避免肘膝处出现尖角。
+            LineJoin = PenLineJoin.Round,
+        };
+        // 内层画笔使用强调色，帮助用户辨认手臂、腿部和关节走向。
+        Pen innerLimbPen = new(StrokeBrush, innerLimbWidth)
+        {
+            // 内层同样使用圆头，保证双层线段完全重合。
             StartLineCap = PenLineCap.Round,
             // 终点使用圆头。
             EndLineCap = PenLineCap.Round,
-            // 折线连接使用圆角。
+            // 转折使用圆角。
             LineJoin = PenLineJoin.Round,
         };
-        // 创建较细辅助画笔绘制地面基准。
-        Pen floorPen = new(SecondaryBrush, Math.Max(1.0, strokeWidth * 0.22));
-        // 地面从画布 18% 宽度延伸到 82% 宽度。
-        Point floorStart = new(ActualWidth * 0.18, topY + (1.96 * scale));
-        // 地面终点与起点对称。
-        Point floorEnd = new(ActualWidth * 0.82, topY + (1.96 * scale));
-        // 绘制半透明感由主题灰色画刷自身提供。
-        drawingContext.DrawLine(floorPen, floorStart, floorEnd);
+        // 地面阴影中心位于双脚基准下方，帮助区分站立、下蹲和腾空姿态。
+        Point shadowCenter = new(centerX, topY + (1.965 * scale));
+        // 阴影透明度固定较低，不与动作主体争夺视觉焦点。
+        drawingContext.PushOpacity(0.14);
+        // 绘制扁椭圆地面阴影，不使用持续呼吸或循环装饰动画。
+        drawingContext.DrawEllipse(SecondaryBrush, null, shadowCenter, scale * 0.52, Math.Max(5.0, scale * 0.045));
+        // 恢复正常透明度，后续人体保持足够对比度。
+        drawingContext.Pop();
 
-        // 绘制颈部到左肩。
-        DrawBone(drawingContext, bodyPen, pose.Neck, pose.LeftShoulder, centerX, topY, scale);
-        // 绘制左上臂。
-        DrawBone(drawingContext, bodyPen, pose.LeftShoulder, pose.LeftElbow, centerX, topY, scale);
-        // 绘制左前臂。
-        DrawBone(drawingContext, bodyPen, pose.LeftElbow, pose.LeftHand, centerX, topY, scale);
-        // 绘制颈部到右肩。
-        DrawBone(drawingContext, bodyPen, pose.Neck, pose.RightShoulder, centerX, topY, scale);
-        // 绘制右上臂。
-        DrawBone(drawingContext, bodyPen, pose.RightShoulder, pose.RightElbow, centerX, topY, scale);
-        // 绘制右前臂。
-        DrawBone(drawingContext, bodyPen, pose.RightElbow, pose.RightHand, centerX, topY, scale);
-        // 绘制颈部到髋部的躯干。
-        DrawBone(drawingContext, bodyPen, pose.Neck, pose.Hip, centerX, topY, scale);
-        // 绘制左大腿。
-        DrawBone(drawingContext, bodyPen, pose.Hip, pose.LeftKnee, centerX, topY, scale);
+        // 双腿先于躯干绘制，髋部覆盖连接处后形成自然层级。
+        DrawLimb(drawingContext, outerLimbPen, innerLimbPen, pose.Hip, pose.LeftKnee, centerX, topY, scale);
         // 绘制左小腿。
-        DrawBone(drawingContext, bodyPen, pose.LeftKnee, pose.LeftFoot, centerX, topY, scale);
+        DrawLimb(drawingContext, outerLimbPen, innerLimbPen, pose.LeftKnee, pose.LeftFoot, centerX, topY, scale);
         // 绘制右大腿。
-        DrawBone(drawingContext, bodyPen, pose.Hip, pose.RightKnee, centerX, topY, scale);
+        DrawLimb(drawingContext, outerLimbPen, innerLimbPen, pose.Hip, pose.RightKnee, centerX, topY, scale);
         // 绘制右小腿。
-        DrawBone(drawingContext, bodyPen, pose.RightKnee, pose.RightFoot, centerX, topY, scale);
+        DrawLimb(drawingContext, outerLimbPen, innerLimbPen, pose.RightKnee, pose.RightFoot, centerX, topY, scale);
+        // 双臂先于躯干绘制，肩部由躯干轮廓和关节圆覆盖。
+        DrawLimb(drawingContext, outerLimbPen, innerLimbPen, pose.LeftShoulder, pose.LeftElbow, centerX, topY, scale);
+        // 绘制左前臂。
+        DrawLimb(drawingContext, outerLimbPen, innerLimbPen, pose.LeftElbow, pose.LeftHand, centerX, topY, scale);
+        // 绘制右上臂。
+        DrawLimb(drawingContext, outerLimbPen, innerLimbPen, pose.RightShoulder, pose.RightElbow, centerX, topY, scale);
+        // 绘制右前臂。
+        DrawLimb(drawingContext, outerLimbPen, innerLimbPen, pose.RightElbow, pose.RightHand, centerX, topY, scale);
+        // 绘制填充躯干，肩宽和髋宽来自当前关键姿态而非固定矩形。
+        DrawTorso(drawingContext, pose, centerX, topY, scale, outerLimbWidth);
+        // 绘制短颈连接，避免头部悬空。
+        DrawLimb(drawingContext, outerLimbPen, innerLimbPen, pose.Head, pose.Neck, centerX, topY, scale);
         // 头部圆心转换为 WPF 像素坐标。
         Point headCenter = TransformPoint(pose.Head, centerX, topY, scale);
-        // 头部半径随控件缩放并与骨架线宽保持比例。
-        double headRadius = Math.Clamp(scale * 0.13, 13.0, 31.0);
-        // 只绘制圆环不填充，保持真黑界面和轻量矢量风格。
-        drawingContext.DrawEllipse(null, bodyPen, headCenter, headRadius, headRadius);
-
-        // 减少动画时不显示任何修订脉冲，满足辅助功能要求。
-        if (!ReducedMotion)
+        // 头部半径随控件缩放并与胶囊四肢保持比例。
+        double headRadius = Math.Clamp(scale * 0.14, 15.0, 32.0);
+        // 头部轮廓使用强调色，宽度在高 DPI 下仍清晰。
+        Pen headPen = new(StrokeBrush, Math.Clamp(scale * 0.024, 2.5, 5.0));
+        // 头部使用中性填充，形成有体积的运动教练人偶而不是空心圆环。
+        drawingContext.DrawEllipse(SecondaryBrush, headPen, headCenter, headRadius, headRadius);
+        // 面部方向标记位于头部中央偏下，帮助用户辨别上身倾斜方向。
+        Pen visorPen = new(StrokeBrush, Math.Max(2.0, headPen.Thickness * 0.82))
         {
-            // 修订后的 220ms 内计算从 1 线性衰减到 0 的脉冲强度。
-            double pulse = Math.Max(0.0, 1.0 - (GetElapsedSeconds() / 0.22));
-            // 仅在脉冲有效时绘制外圈，避免常驻装饰干扰动作姿态。
-            if (pulse > 0.0)
-            {
-                // 脉冲外圈半径随衰减逐渐向外扩散。
-                double pulseRadius = headRadius + (10.0 * (1.0 - pulse));
-                // 脉冲画笔使用主色且随强度变细。
-                Pen pulsePen = new(StrokeBrush, Math.Max(1.0, strokeWidth * 0.35 * pulse));
-                // 绘制 revision 驱动的短外圈。
-                drawingContext.DrawEllipse(null, pulsePen, headCenter, pulseRadius, pulseRadius);
-            }
-        }
+            // 方向标记两端使用圆头。
+            StartLineCap = PenLineCap.Round,
+            // 方向标记终点同样使用圆头。
+            EndLineCap = PenLineCap.Round,
+        };
+        // 绘制短横向面罩，不使用眼睛或表情等装饰元素。
+        drawingContext.DrawLine(
+            visorPen,
+            new Point(headCenter.X - (headRadius * 0.42), headCenter.Y + (headRadius * 0.04)),
+            new Point(headCenter.X + (headRadius * 0.42), headCenter.Y + (headRadius * 0.04)));
+        // 关节半径约为内层肢体宽度的 0.58，保证肘膝在运动时可追踪。
+        double jointRadius = Math.Max(4.0, innerLimbWidth * 0.58);
+        // 双肩、双肘、髋和双膝使用统一关节标记。
+        DrawJoint(drawingContext, pose.LeftShoulder, centerX, topY, scale, jointRadius);
+        // 绘制左肘关节。
+        DrawJoint(drawingContext, pose.LeftElbow, centerX, topY, scale, jointRadius);
+        // 绘制右肩关节。
+        DrawJoint(drawingContext, pose.RightShoulder, centerX, topY, scale, jointRadius);
+        // 绘制右肘关节。
+        DrawJoint(drawingContext, pose.RightElbow, centerX, topY, scale, jointRadius);
+        // 绘制髋部中心关节。
+        DrawJoint(drawingContext, pose.Hip, centerX, topY, scale, jointRadius * 1.08);
+        // 绘制左膝关节。
+        DrawJoint(drawingContext, pose.LeftKnee, centerX, topY, scale, jointRadius);
+        // 绘制右膝关节。
+        DrawJoint(drawingContext, pose.RightKnee, centerX, topY, scale, jointRadius);
+        // 手部圆点比主要关节略小，保持抬手和摆臂方向可读。
+        DrawEndpoint(drawingContext, pose.LeftHand, centerX, topY, scale, jointRadius * 0.78);
+        // 绘制右手端点。
+        DrawEndpoint(drawingContext, pose.RightHand, centerX, topY, scale, jointRadius * 0.78);
+        // 脚部使用横向椭圆，明确脚掌落点和双脚间距。
+        DrawFoot(drawingContext, pose.LeftFoot, centerX, topY, scale, jointRadius);
+        // 绘制右脚落点。
+        DrawFoot(drawingContext, pose.RightFoot, centerX, topY, scale, jointRadius);
     }
 
-    // 绘制两个归一化关节点之间的一根骨骼。
-    private static void DrawBone(DrawingContext drawingContext, Pen pen, PosePoint start, PosePoint end, double centerX, double topY, double scale)
+    // 绘制两个关节点之间的双层胶囊肢体，外层提供体积，内层表达动作方向。
+    private static void DrawLimb(DrawingContext drawingContext, Pen outerPen, Pen innerPen, PosePoint start, PosePoint end, double centerX, double topY, double scale)
     {
-        // 转换骨骼起点到 WPF 像素坐标。
+        // 转换肢体起点到 WPF 像素坐标。
         Point startPoint = TransformPoint(start, centerX, topY, scale);
-        // 转换骨骼终点到 WPF 像素坐标。
+        // 转换肢体终点到 WPF 像素坐标。
         Point endPoint = TransformPoint(end, centerX, topY, scale);
-        // 绘制线段，DrawingContext 不保留额外 UIElement，减少布局开销。
-        drawingContext.DrawLine(pen, startPoint, endPoint);
+        // 先绘制中性外层，形成稳定的人体轮廓。
+        drawingContext.DrawLine(outerPen, startPoint, endPoint);
+        // 再绘制较窄强调内层，关节运动轨迹一眼可读。
+        drawingContext.DrawLine(innerPen, startPoint, endPoint);
+    }
+
+    // 绘制由肩线和髋中心推导的填充躯干，适配直立、前屈、下蹲和腾空姿态。
+    private void DrawTorso(DrawingContext drawingContext, StickFigurePose pose, double centerX, double topY, double scale, double outerLimbWidth)
+    {
+        // 转换左肩到像素坐标。
+        Point leftShoulder = TransformPoint(pose.LeftShoulder, centerX, topY, scale);
+        // 转换右肩到像素坐标。
+        Point rightShoulder = TransformPoint(pose.RightShoulder, centerX, topY, scale);
+        // 转换髋中心到像素坐标。
+        Point hipCenter = TransformPoint(pose.Hip, centerX, topY, scale);
+        // 肩宽用于推导稳定髋宽，异常极窄姿态仍受最小值保护。
+        double shoulderWidth = Math.Sqrt(
+            Math.Pow(rightShoulder.X - leftShoulder.X, 2.0) +
+            Math.Pow(rightShoulder.Y - leftShoulder.Y, 2.0));
+        // 髋半宽限制在肩宽的 20%～32%，防止动作插值时躯干忽胖忽瘦。
+        double hipHalfWidth = Math.Clamp(shoulderWidth * 0.24, scale * 0.075, scale * 0.16);
+        // 左髋沿画布横轴从中心向左偏移。
+        Point leftHip = new(hipCenter.X - hipHalfWidth, hipCenter.Y);
+        // 右髋沿画布横轴从中心向右偏移。
+        Point rightHip = new(hipCenter.X + hipHalfWidth, hipCenter.Y);
+        // 创建封闭四边形躯干；几何对象只存在于当前绘制帧。
+        StreamGeometry torsoGeometry = new();
+        // 打开流式几何上下文并按左肩、右肩、右髋、左髋顺序写入。
+        using (StreamGeometryContext geometryContext = torsoGeometry.Open())
+        {
+            // 左肩是封闭填充图形起点。
+            geometryContext.BeginFigure(leftShoulder, isFilled: true, isClosed: true);
+            // 连接右肩，形成肩线。
+            geometryContext.LineTo(rightShoulder, isStroked: true, isSmoothJoin: true);
+            // 连接右髋，形成右侧腰线。
+            geometryContext.LineTo(rightHip, isStroked: true, isSmoothJoin: true);
+            // 连接左髋，闭合后形成左侧腰线。
+            geometryContext.LineTo(leftHip, isStroked: true, isSmoothJoin: true);
+        }
+        // 冻结当前帧几何，允许 WPF 安全使用不可变绘图数据。
+        torsoGeometry.Freeze();
+        // 躯干轮廓使用主题强调色，宽度与四肢比例一致。
+        Pen torsoPen = new(StrokeBrush, Math.Clamp(outerLimbWidth * 0.16, 2.5, 4.5))
+        {
+            // 四个连接点使用圆角，避免菱形尖角。
+            LineJoin = PenLineJoin.Round,
+        };
+        // 用中性辅助色填充躯干并绘制强调轮廓，展示胸腔朝向和下蹲深度。
+        drawingContext.DrawGeometry(SecondaryBrush, torsoPen, torsoGeometry);
+    }
+
+    // 绘制主要关节圆，强调肩、肘、髋和膝的标准相对位置。
+    private void DrawJoint(DrawingContext drawingContext, PosePoint joint, double centerX, double topY, double scale, double radius)
+    {
+        // 把关节坐标转换到当前控件像素。
+        Point center = TransformPoint(joint, centerX, topY, scale);
+        // 使用强调色实心圆覆盖肢体连接缝隙。
+        drawingContext.DrawEllipse(StrokeBrush, null, center, radius, radius);
+        // 使用较小中性圆形成清晰的同心关节结构。
+        drawingContext.DrawEllipse(SecondaryBrush, null, center, radius * 0.46, radius * 0.46);
+    }
+
+    // 绘制手部端点，帮助辨识开合跳、挥手和上举动作的手臂终点。
+    private void DrawEndpoint(DrawingContext drawingContext, PosePoint endpoint, double centerX, double topY, double scale, double radius)
+    {
+        // 把手部坐标转换到像素。
+        Point center = TransformPoint(endpoint, centerX, topY, scale);
+        // 使用中性填充和强调色轮廓，避免手部与背景融为一体。
+        drawingContext.DrawEllipse(SecondaryBrush, new Pen(StrokeBrush, Math.Max(2.0, radius * 0.36)), center, radius, radius);
+    }
+
+    // 绘制横向脚掌，展示步幅、落脚距离和深蹲脚位。
+    private void DrawFoot(DrawingContext drawingContext, PosePoint foot, double centerX, double topY, double scale, double jointRadius)
+    {
+        // 把脚部坐标转换到像素。
+        Point center = TransformPoint(foot, centerX, topY, scale);
+        // 脚掌横向半径略大于膝关节，垂直半径保持扁平。
+        double horizontalRadius = jointRadius * 1.38;
+        // 垂直半径限制为横向的 48%，表达稳定落脚面。
+        double verticalRadius = Math.Max(3.5, jointRadius * 0.48);
+        // 绘制中性脚掌并使用强调色描边。
+        drawingContext.DrawEllipse(
+            SecondaryBrush,
+            new Pen(StrokeBrush, Math.Max(2.0, jointRadius * 0.28)),
+            center,
+            horizontalRadius,
+            verticalRadius);
     }
 
     // 把归一化姿态坐标转换为当前控件像素坐标。

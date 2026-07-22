@@ -841,6 +841,7 @@ static esp_err_t ble_service_publish_notification_message(
     uint8_t subscribed,
     const uint8_t *payload,
     uint16_t payload_length,
+    uint32_t monotonic_ms,
     uint8_t *latest_frame,
     size_t latest_capacity,
     size_t *latest_length)
@@ -865,7 +866,7 @@ static esp_err_t ble_service_publish_notification_message(
         message_type,
         UINT8_C(0),
         sequence,
-        ble_service_monotonic_ms(),
+        monotonic_ms,
         payload,
         payload_length,
         target_frame,
@@ -2308,13 +2309,17 @@ esp_err_t ble_service_nimble_publish_live_state(const ble_service_live_state_v1_
         g_ble_state.subscribed_live,
         payload,
         (uint16_t)payload_length,
+        ble_service_monotonic_ms(),
         g_ble_state.live_state_frame,
         sizeof(g_ble_state.live_state_frame),
         &g_ble_state.live_state_frame_length);
 }
 
 // 发布类型 4 Event。
-esp_err_t ble_service_nimble_publish_event(const uint8_t *payload, uint16_t payload_length)
+esp_err_t ble_service_nimble_publish_event(
+    const uint8_t *payload,
+    uint16_t payload_length,
+    const uint32_t monotonic_ms)
 {
     // 服务必须已启动。
     if (g_ble_state.started == 0U) {
@@ -2328,6 +2333,7 @@ esp_err_t ble_service_nimble_publish_event(const uint8_t *payload, uint16_t payl
         g_ble_state.subscribed_event,
         payload,
         payload_length,
+        monotonic_ms,
         NULL,
         0U,
         NULL);
@@ -2348,6 +2354,7 @@ esp_err_t ble_service_nimble_publish_transfer_data(const uint8_t *payload, uint1
         g_ble_state.subscribed_transfer_data,
         payload,
         payload_length,
+        ble_service_monotonic_ms(),
         NULL,
         0U,
         NULL);
@@ -2368,6 +2375,30 @@ esp_err_t ble_service_nimble_publish_raw_stream(const uint8_t *payload, uint16_t
         g_ble_state.subscribed_raw,
         payload,
         payload_length,
+        ble_service_monotonic_ms(),
+        NULL,
+        0U,
+        NULL);
+}
+
+// 发布类型 9 InferenceDiagnosticV1；分类诊断与六轴样本共享开发者 Raw Stream 特征。
+esp_err_t ble_service_nimble_publish_inference_diagnostic(
+    const uint8_t *payload,
+    uint16_t payload_length)
+{
+    // 服务必须已启动，否则没有有效连接、句柄或序号状态。
+    if (g_ble_state.started == 0U) {
+        // 返回无效状态，调用方不得把未发布数据当作 PC 已收到。
+        return ESP_ERR_INVALID_STATE;
+    }
+    // 编码类型 9 并走与 RawStream 相同的安全订阅；通知丢失不会阻塞下一推理窗口。
+    return ble_service_publish_notification_message(
+        (uint8_t)BLE_SERVICE_MESSAGE_INFERENCE_DIAGNOSTIC,
+        g_raw_stream_handle,
+        g_ble_state.subscribed_raw,
+        payload,
+        payload_length,
+        ble_service_monotonic_ms(),
         NULL,
         0U,
         NULL);

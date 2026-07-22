@@ -70,14 +70,19 @@ static void test_repetition_action_contract(void)
         CHECK(fitness_rep_counter_init(&counter, actions[index]) == FITNESS_STATUS_OK);
         /* initialized 必须置真。 */
         CHECK(counter.initialized);
-        /* 四个 jumping/tuck 类应采用跳跃状态机。 */
+        /* 只有三个高动态 jumping/tuck 类采用五阶段跳跃状态机。 */
         const bool expected_jump =
-            (actions[index] == FITNESS_ACTION_JUMPING_JACK) ||
             (actions[index] == FITNESS_ACTION_JUMPING_LUNGE) ||
             (actions[index] == FITNESS_ACTION_JUMPING_SQUAT) ||
             (actions[index] == FITNESS_ACTION_TUCK_JUMP);
         /* 实际模式必须与动作物理类型一致。 */
         CHECK((counter.mode == FITNESS_REP_MODE_JUMP) == expected_jump);
+        /* 腕戴开合跳必须使用手臂张开/合拢两相位，不能依赖腾空支持力。 */
+        if (actions[index] == FITNESS_ACTION_JUMPING_JACK) {
+            /* 最短周期 400 ms，兼顾快速开合和抖动抑制。 */
+            CHECK((counter.mode == FITNESS_REP_MODE_TWO_PHASE) &&
+                  (counter.min_cycle_ms == 400U));
+        }
     }
 
     /* sit 不允许使用重复计数器。 */
@@ -374,6 +379,64 @@ static void test_session_rebase_time(void)
     CHECK(fitness_session_rebase_time(NULL, 14000ULL) == FITNESS_STATUS_INVALID_ARGUMENT);
 }
 
+/* 验证运行中切换动作只改变当前动作和积分基准，不清除会话累计。 */
+static void test_session_switch_action_preserves_totals(void)
+{
+    /* 建立普通深蹲会话，后续切换为弓步。 */
+    fitness_session_t session;
+    /* 以 70 kg、序号 104、1000 ms 起点启动会话。 */
+    CHECK(fitness_session_start(&session, 104U, FITNESS_ACTION_SQUAT, 70000U, 1000ULL) ==
+          FITNESS_STATUS_OK);
+    /* 准备一次重复事件，建立非零累计和连续事件序号。 */
+    fitness_metric_event_t event;
+    /* 记录一次深蹲，事件序号应推进到 2。 */
+    CHECK(fitness_session_record_count(
+              &session,
+              FITNESS_METRIC_REPETITION,
+              1U,
+              1500ULL,
+              30000U,
+              0U,
+              &event) == FITNESS_STATUS_OK);
+    /* 先推进到 2000 ms，建立切换前深蹲热量。 */
+    bool emitted = false;
+    /* 非 sit 动作不会输出时长事件。 */
+    CHECK(fitness_session_tick(&session, 2000ULL, 30000U, 0U, &event, &emitted) ==
+          FITNESS_STATUS_OK);
+    /* 保存切换前毛热量，后续必须原样保留。 */
+    const uint64_t gross_before_switch = session.gross_microkcal;
+    /* 运行中切换为弓步，同时把热量左端点移动到当前推理时间。 */
+    CHECK(fitness_session_switch_action(&session, FITNESS_ACTION_LUNGE, 2200ULL) ==
+          FITNESS_STATUS_OK);
+    /* 当前动作必须更新为弓步，后续事件和 MET 使用新动作。 */
+    CHECK(session.action == FITNESS_ACTION_LUNGE);
+    /* 已完成的一次重复不能因动作切换归零。 */
+    CHECK(session.repetitions == 1ULL);
+    /* 已分配的事件序号必须保持连续。 */
+    CHECK(session.next_event_seq == 2U);
+    /* 切换本身不凭空增加热量。 */
+    CHECK(session.gross_microkcal == gross_before_switch);
+    /* 新动作计一次后累计应变为二，事件动作应为弓步。 */
+    CHECK(fitness_session_record_count(
+              &session,
+              FITNESS_METRIC_REPETITION,
+              1U,
+              2300ULL,
+              30000U,
+              0U,
+              &event) == FITNESS_STATUS_OK);
+    /* 累计次数跨动作保持单调。 */
+    CHECK(session.repetitions == 2ULL);
+    /* 第二个事件必须携带切换后的动作类别。 */
+    CHECK(event.action == FITNESS_ACTION_LUNGE);
+    /* 非法动作不得修改当前动作。 */
+    CHECK(fitness_session_switch_action(&session, FITNESS_ACTION_COUNT, 2400ULL) ==
+          FITNESS_STATUS_INVALID_ARGUMENT);
+    /* 时间倒退不得修改当前动作。 */
+    CHECK(fitness_session_switch_action(&session, FITNESS_ACTION_SQUAT, 2100ULL) ==
+          FITNESS_STATUS_INVALID_TIME);
+}
+
 /* 验证振动 FIFO、固定波形和 MetricEvent 反馈规则。 */
 static void test_haptic_queue(void)
 {
@@ -644,6 +707,8 @@ int main(void)
     test_calorie_tick_invariance();
     /* 验证暂停恢复不累计暂停区间。 */
     test_session_rebase_time();
+    /* 验证动作切换保留会话累计和事件连续性。 */
+    test_session_switch_action_preserves_totals();
     /* 验证振动队列和波形。 */
     test_haptic_queue();
     /* 验证全部固定振动波形目录。 */

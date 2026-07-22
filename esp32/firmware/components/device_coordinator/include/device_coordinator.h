@@ -37,6 +37,8 @@ extern "C" {
 
 /* 单次业务调用最多产生 4 个振动请求，超出表示上游异常积压。 */
 #define DEVICE_COORDINATOR_MAX_HAPTIC_EFFECTS (4U)
+/* 一次锁类最多交付准备期 12 条 MetricEvent，容量与 workout 固定补算 FIFO 一致。 */
+#define DEVICE_COORDINATOR_MAX_REPLAY_METRIC_EFFECTS (WORKOUT_REPLAY_EVENT_QUEUE_CAPACITY)
 /* 未设置 UTC 时使用 0，不把单调毫秒冒充 Unix 时间。 */
 #define DEVICE_COORDINATOR_UNIX_TIME_UNKNOWN (0ULL)
 
@@ -132,6 +134,10 @@ typedef struct device_effects {
     ble_service_live_state_v1_t live_state;
     /* Event 直接拷贝 workout_engine 产生的唯一 MetricEvent。 */
     fitness_metric_event_t metric_event;
+    /* 锁类补算事件按 event_seq 递增排列；每条都保留原始 IMU 设备毫秒。 */
+    fitness_metric_event_t replay_metric_events[DEVICE_COORDINATOR_MAX_REPLAY_METRIC_EFFECTS];
+    /* replay_metric_events 的有效数量，范围 0..12。 */
+    uint8_t replay_metric_event_count;
     /* 存储任务将该值交给 session_store_upsert，last_event_seq 是幂等键。 */
     session_summary_t summary;
     /* 一次调用中最多交付 4 个已排序振动请求。 */

@@ -131,16 +131,18 @@ typedef enum {
 
 /* 保存训练页展示数据；卡路里使用毫卡避免状态机依赖浮点格式化。 */
 typedef struct {
-    /* 保存当前稳定动作索引，取值 0~10；255 表示尚无可靠动作。 */
+    /* 保存本轮主动作索引，取值 0~10；255 表示尚未选择计数器类型。 */
     uint8_t action_id;
+    /* 保存最近推理窗口实时动作索引，取值 0~10；255 表示尚无可靠实时类别。 */
+    uint8_t inferred_action_id;
+    /* true 表示实时动作与本轮主动作一致且数据干净，当前点允许进入计数器。 */
+    bool counting_enabled;
     /* 保存当前动作计数或步数；sit 类由 elapsed_seconds 表示持续时间。 */
     uint32_t count;
     /* 保存会话累计热量，单位为 0.001 kcal。 */
     uint32_t calories_milli_kcal;
     /* 保存会话已运行秒数，用于顶部计时和 sit 持续时间。 */
     uint32_t elapsed_seconds;
-    /* 保存 PREPARE 页面剩余整秒，范围 0~3；0 表示倒计时结束、正在锁定动作。 */
-    uint8_t prepare_countdown_seconds;
     /* 保存当前 AMOLED 用户亮度百分比，范围 5~100；由设备配置投影。 */
     uint8_t brightness_percent;
     /* 保存当前自动熄屏时间，单位秒，范围 10~600；由设备配置投影。 */

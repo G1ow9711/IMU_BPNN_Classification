@@ -1,6 +1,13 @@
 // 协议事件对象位于蓝牙层，领域层仍以设备权威 LiveState 作为累计值唯一来源。
 namespace FitnessCoach.Bluetooth;
 
+/// <summary>定义设备低延迟事件源；累计值仍以 LiveState 为准，事件仅提供精确发生时刻。</summary>
+public interface IDeviceProtocolEventSource
+{
+    /// <summary>收到完整且通过 EventV1 边界校验的设备事件时触发。</summary>
+    event EventHandler<DeviceProtocolEventEventArgs>? ProtocolEventReceived;
+}
+
 /// <summary>
 /// 描述一个经过逻辑帧 CRC 校验的 Event 消息；事件只触发动画和诊断，不在 PC 端自行增加次数。
 /// </summary>

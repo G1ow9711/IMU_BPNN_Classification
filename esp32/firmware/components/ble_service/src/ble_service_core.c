@@ -223,16 +223,16 @@ void ble_service_connection_reset(ble_service_connection_t *connection)
     imu_ble_reassembler_reset(&connection->transfer_reassembler);
 }
 
-// 验证消息类型属于 v1 连续范围 1～8。
+// 验证消息类型属于 v1 连续范围 1～9。
 ble_service_status_t ble_service_validate_message_type(uint8_t message_type)
 {
-    // 小于 ControlRequest 或大于 RawStream 都是未知消息。
+    // 小于 ControlRequest 或大于 InferenceDiagnostic 都是未知消息。
     if ((message_type < (uint8_t)BLE_SERVICE_MESSAGE_CONTROL_REQUEST) ||
-        (message_type > (uint8_t)BLE_SERVICE_MESSAGE_RAW_STREAM)) {
+        (message_type > (uint8_t)BLE_SERVICE_MESSAGE_INFERENCE_DIAGNOSTIC)) {
         // 调用者必须记录并忽略未知次版本消息。
         return BLE_SERVICE_STATUS_WRONG_MESSAGE_TYPE;
     }
-    // 1～8 均为当前协议定义消息。
+    // 1～9 均为当前协议定义消息。
     return BLE_SERVICE_STATUS_OK;
 }
 
@@ -342,7 +342,7 @@ ble_service_status_t ble_service_encode_event_v1(
         // 未知事件不能让 PC 猜测业务含义。
         return BLE_SERVICE_STATUS_INVALID_ARGUMENT;
     }
-    // v1 设备状态只允许 Booting～Error 的 0～7。
+    // v1 设备状态只允许 Booting～Shutdown 的 0～7。
     if (event->device_state > UINT8_C(7)) {
         // 非法状态不能进入 PC 状态提示。
         return BLE_SERVICE_STATUS_INVALID_ARGUMENT;
@@ -398,6 +398,78 @@ ble_service_status_t ble_service_encode_event_v1(
     return BLE_SERVICE_STATUS_OK;
 }
 
+// 编码 InferenceDiagnosticV1 固定 28 字节 payload；所有整数按小端序输出。
+ble_service_status_t ble_service_encode_inference_diagnostic_v1(
+    const ble_service_inference_diagnostic_v1_t *diagnostic,
+    uint8_t *output,
+    size_t output_capacity,
+    size_t *output_length)
+{
+    // 诊断对象、输出缓冲和长度指针均为必填，避免返回未初始化数据。
+    if ((diagnostic == NULL) || (output == NULL) || (output_length == NULL)) {
+        // 空参数不写入任何部分 payload。
+        return BLE_SERVICE_STATUS_NULL_ARGUMENT;
+    }
+    // 固定 28 字节容量不足时返回精确需求，不产生截断诊断。
+    if (output_capacity < BLE_SERVICE_INFERENCE_DIAGNOSTIC_V1_SIZE) {
+        // 告知调用者需要的完整字节数。
+        *output_length = BLE_SERVICE_INFERENCE_DIAGNOSTIC_V1_SIZE;
+        // 返回容量不足供调用者扩大静态缓冲区。
+        return BLE_SERVICE_STATUS_BUFFER_TOO_SMALL;
+    }
+    // 当前只支持诊断 payload 版本 1。
+    if (diagnostic->diagnostic_version != UINT8_C(1)) {
+        // 未知布局不能按 v1 偏移编码。
+        return BLE_SERVICE_STATUS_INVALID_ARGUMENT;
+    }
+    // 融合动作只允许模型类别 0～10 或 255 未知。
+    if ((diagnostic->fused_action_id > UINT8_C(10)) &&
+        (diagnostic->fused_action_id != BLE_SERVICE_ACTION_UNKNOWN)) {
+        // 类别错位会让 PC 显示错误动作。
+        return BLE_SERVICE_STATUS_INVALID_ARGUMENT;
+    }
+    // 基础 M0 动作只允许模型类别 0～10 或 255 未知。
+    if ((diagnostic->base_action_id > UINT8_C(10)) &&
+        (diagnostic->base_action_id != BLE_SERVICE_ACTION_UNKNOWN)) {
+        // 基础模型非法类别不能进入线上诊断。
+        return BLE_SERVICE_STATUS_INVALID_ARGUMENT;
+    }
+    // 掩码 M0 动作只允许模型类别 0～10 或 255 未知。
+    if ((diagnostic->masked_action_id > UINT8_C(10)) &&
+        (diagnostic->masked_action_id != BLE_SERVICE_ACTION_UNKNOWN)) {
+        // 掩码模型非法类别不能进入线上诊断。
+        return BLE_SERVICE_STATUS_INVALID_ARGUMENT;
+    }
+    // 偏移 0 写入诊断结构版本。
+    output[0] = diagnostic->diagnostic_version;
+    // 偏移 1 写入融合 Top-1 动作。
+    output[1] = diagnostic->fused_action_id;
+    // 偏移 2 写入基础 M0 Top-1 动作。
+    output[2] = diagnostic->base_action_id;
+    // 偏移 3 写入掩码 M0 Top-1 动作。
+    output[3] = diagnostic->masked_action_id;
+    // 偏移 4 写入融合 Q15 置信度。
+    ble_service_write_u16_le(&output[4], diagnostic->fused_confidence_q15);
+    // 偏移 6 写入基础 M0 Q15 置信度。
+    ble_service_write_u16_le(&output[6], diagnostic->base_confidence_q15);
+    // 偏移 8 写入掩码 M0 Q15 置信度。
+    ble_service_write_u16_le(&output[8], diagnostic->masked_confidence_q15);
+    // 偏移 10 写入数据质量位集合。
+    ble_service_write_u16_le(&output[10], diagnostic->quality_flags);
+    // 偏移 12 写入完成推理的窗口序号。
+    ble_service_write_u32_le(&output[12], diagnostic->window_sequence);
+    // 偏移 16 写入窗口末设备单调毫秒。
+    ble_service_write_u32_le(&output[16], diagnostic->window_end_ms);
+    // 偏移 20 写入本次推理总耗时微秒。
+    ble_service_write_u32_le(&output[20], diagnostic->inference_time_us);
+    // 偏移 24 写入累计失败窗口数。
+    ble_service_write_u32_le(&output[24], diagnostic->failure_count);
+    // 固定 payload 始终写入 28 字节。
+    *output_length = BLE_SERVICE_INFERENCE_DIAGNOSTIC_V1_SIZE;
+    // 全部字段编码完成。
+    return BLE_SERVICE_STATUS_OK;
+}
+
 // 构造任一 v1 完整逻辑消息。
 ble_service_status_t ble_service_encode_message(
     uint8_t message_type,
@@ -423,7 +495,7 @@ ble_service_status_t ble_service_encode_message(
     frame.protocol_major = IMU_BLE_PROTOCOL_MAJOR;
     // 写入协议次版本 0。
     frame.protocol_minor = IMU_BLE_PROTOCOL_MINOR;
-    // 写入上层消息类型 1～8。
+    // 写入上层消息类型 1～9。
     frame.message_type = message_type;
     // 写入上层标志位。
     frame.flags = flags;

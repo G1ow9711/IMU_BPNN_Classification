@@ -10,18 +10,18 @@ public enum FitnessDeviceState : byte
     Booting = 0,
     /// <summary>设备空闲，允许开始新会话。</summary>
     Idle = 1,
-    /// <summary>设备正在采样、识别和计数。</summary>
-    Running = 2,
+    /// <summary>设备已开始采样，正在累计首个动作的分类证据。</summary>
+    Preparing = 2,
+    /// <summary>设备已经锁定本轮唯一动作，正在采样、识别和计数。</summary>
+    Running = 3,
     /// <summary>会话暂停，累计值保留但不增加。</summary>
-    Paused = 3,
+    Paused = 4,
     /// <summary>会话已经结束，正在展示或保存总结。</summary>
-    Summary = 4,
-    /// <summary>屏幕关闭但设备可能仍维持 BLE 连接。</summary>
-    ScreenOff = 5,
-    /// <summary>设备正在充电且当前没有训练会话。</summary>
-    Charging = 6,
+    Summary = 5,
     /// <summary>传感器、存储或模型出现阻断性错误。</summary>
-    Error = 7,
+    Error = 6,
+    /// <summary>设备已经进入安全关机流程，不再接受训练命令。</summary>
+    Shutdown = 7,
 }
 
 /// <summary>
