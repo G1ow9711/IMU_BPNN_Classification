@@ -1,4 +1,4 @@
-/* 实现 BLE Manifest v1；线上布局与标签定义见 docs/BLE通信协议.md 第 12 节。 */
+/* 实现 BLE Manifest v1；线上布局与标签定义见 docs/BLE通信、设备配置与会话存储.md 第 12 节。 */
 #include "ble_service_manifest.h"
 
 /* 引入 strlen 和 memcpy；输入字符串只读且线上不复制结尾 NUL。 */

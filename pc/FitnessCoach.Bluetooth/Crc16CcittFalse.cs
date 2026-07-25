@@ -1,4 +1,4 @@
-// CRC 公式、参数和复杂度见 docs/BLE通信协议.md 第 5 节。
+// CRC 公式、参数和复杂度见 docs/BLE通信、设备配置与会话存储.md 第 5 节。
 // CRC 实现与逻辑帧编解码分离，便于用标准字符串独立验证参数。
 namespace FitnessCoach.Bluetooth;
 

@@ -16,7 +16,7 @@ extern "C" {
 
 /* 当前 Manifest 特征合同版本为 1，对应固定 297 维顺序；维度或公式变化时必须递增。 */
 #define BLE_SERVICE_MANIFEST_FEATURE_VERSION UINT16_C(1)
-/* 当前卡路里表版本为 1，对应 docs/计数与卡路里算法.md 的固定 milliMET 表。 */
+/* 当前卡路里表版本为 1，对应 docs/算法原理、训练与实时计数.md 的固定 milliMET 表。 */
 #define BLE_SERVICE_MANIFEST_CALORIE_TABLE_VERSION UINT16_C(1)
 /* SHA-256 原始摘要固定为 32 字节；线上不发送 64 字节十六进制文本。 */
 #define BLE_SERVICE_MANIFEST_SHA256_BYTES ((size_t)32U)

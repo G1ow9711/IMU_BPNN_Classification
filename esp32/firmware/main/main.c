@@ -4,7 +4,7 @@
  * 线程所有权：QMI 任务只读取芯片并投递原始帧；应用任务独占 imu_pipeline 和
  * device_coordinator；UI、BLE、存储和电源任务只消费按值效果。该边界保证
  * 次数、步数、热量只由 workout_engine 产生一次，公式与任务关系见
- * docs/手柄与上位机软件详细设计.md。
+ * docs/系统架构与业务流程.md。
  */
 
 /* 引入 Waveshare 板级运行时，提供 BSP 显示、I2C、TF 与 LVGL 锁。 */

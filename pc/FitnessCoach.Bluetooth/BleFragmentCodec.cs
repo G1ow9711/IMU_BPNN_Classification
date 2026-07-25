@@ -1,4 +1,4 @@
-// MTU 容量、分片数公式和边界处理见 docs/BLE通信协议.md 第 6 节。
+// MTU 容量、分片数公式和边界处理见 docs/BLE通信、设备配置与会话存储.md 第 6 节。
 // 引入固定端序工具，分片包络不依赖 Windows 本机端序。
 using System.Buffers.Binary;
 

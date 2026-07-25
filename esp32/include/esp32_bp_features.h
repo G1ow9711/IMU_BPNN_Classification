@@ -306,7 +306,7 @@ static inline void preprocess_imu_window(
  * 追加一条等间隔序列的八项基础统计：均值、总体标准差、最小值、最大值、RMS、
  * 平均绝对一阶差、围绕均值的过零率和一阶差总体标准差。
  * x 长度为 n，输入单位可为 deg/s、g 或其采样差；feature 形状为 [FEATURE_DIM]，idx 指向下一写入索引。
- * 要求 n>=2 且指针有效；时间复杂度 O(n)，额外空间 O(1)，公式见 docs/算法文档.md 第 7.2 节。
+ * 要求 n>=2 且指针有效；时间复杂度 O(n)，额外空间 O(1)，公式见 docs/算法原理、训练与实时计数.md 第 7.2 节。
  */
 static inline void append_series_features(const float* x, int n, float* feature, int* idx) {
     /* sum 累计输入一阶矩，单位继承 x。 */
@@ -503,7 +503,7 @@ static inline void append_normalized_phase_features(const float* x, int n, float
 /*
  * 追加 10/25/50/75/90 百分位、偏度、超额峰度和最大相邻跳变共八项冲击分布特征。
  * 输入 x 长度为 n 且 n<=WINDOW_LEN；分位数使用最近位置规则，时间最坏 O(n^2)，空间 O(n)。
- * 偏度和峰度无量纲，分位数与最大跳变单位继承 x；公式见 docs/算法文档.md 第 7.6 节。
+ * 偏度和峰度无量纲，分位数与最大跳变单位继承 x；公式见 docs/算法原理、训练与实时计数.md 第 7.6 节。
  */
 static inline void append_impact_distribution_features(const float* x, int n, float* feature, int* idx) {
     /* ordered 保存输入副本并就地插入排序，不修改调用者序列。 */
@@ -786,7 +786,7 @@ static inline void append_temporal_features(const float* x, int n, float* featur
  * 对单通道窗口执行去均值、Hann 加窗和单边直接 DFT。
  * x 长度为 n，单位可为 g、deg/s 或 g/采样点；三个频带比和峰比无量纲，质心单位为 Hz。
  * 频带使用 [0.35,1.20)、[1.20,2.40)、[2.40,5.00) Hz；总功率过小时五个输出均为 0。
- * 时间复杂度 O(n^2)，额外空间 O(1)；公式见 docs/弱类频谱与峰形特征说明.md。
+ * 时间复杂度 O(n^2)，额外空间 O(1)；公式见 docs/算法原理、训练与实时计数.md。
  */
 static inline void selected_spectral_features(
     const float* x, /* 指向 n 个连续单通道采样值，生命周期覆盖本函数调用。 */
@@ -1159,7 +1159,7 @@ static inline float autocorr_prominent_peak_count(const float* x, int n) {
  * 计算显著正峰的幅值变异系数和峰间隔变异系数。
  * 输入 x 指向长度为 n 的单通道窗口；陀螺输入单位为 deg/s，加速度输入单位为 g。
  * 输出 amplitude_cv 和 interval_cv 均无量纲；无至少两个有效峰时写入 0，避免除零。
- * 数学公式、边界条件和 Python/C 一致性要求见 docs/弱类频谱与峰形特征说明.md。
+ * 数学公式、边界条件和 Python/C 一致性要求见 docs/算法原理、训练与实时计数.md。
  */
 static inline void positive_peak_shape_features(
     const float* x,
@@ -1640,7 +1640,7 @@ static inline float horizontal_anisotropy_from_window(
     return anisotropy;
 }
 
-/* 提取并追加四项完整腾空事件中位数；公式及边界见 docs/弱类联合优化方案.md。 */
+/* 提取并追加四项完整腾空事件中位数；公式及边界见 docs/算法原理、训练与实时计数.md。 */
 static inline void append_aligned_event_medians(
     const float window[WINDOW_LEN][AXIS_NUM],
     float* feature,
