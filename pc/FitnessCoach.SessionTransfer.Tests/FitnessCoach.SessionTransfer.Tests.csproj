@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- 独立测试项目不修改现有 FitnessCoach.Tests/Program.cs。 -->
+  <PropertyGroup>
+    <!-- 输出可直接运行的控制台测试器。 -->
+    <OutputType>Exe</OutputType>
+    <!-- 纯协议和 fake transport 可在任意 .NET 8 主机运行。 -->
+    <TargetFramework>net8.0</TargetFramework>
+    <!-- 开启可空引用检查。 -->
+    <Nullable>enable</Nullable>
+    <!-- 自动导入 System 和集合命名空间。 -->
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- 测试警告视为错误。 -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- 引用待测会话传输 codec 和 Windows 会话状态机。 -->
+    <ProjectReference Include="..\FitnessCoach.Bluetooth\FitnessCoach.Bluetooth.csproj" />
+    <!-- 引用领域会话摘要。 -->
+    <ProjectReference Include="..\FitnessCoach.Domain\FitnessCoach.Domain.csproj" />
+    <!-- 引用 JSON 幂等仓储验证复合键。 -->
+    <ProjectReference Include="..\FitnessCoach.Infrastructure\FitnessCoach.Infrastructure.csproj" />
+  </ItemGroup>
+</Project>

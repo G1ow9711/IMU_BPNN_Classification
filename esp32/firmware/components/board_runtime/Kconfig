@@ -1,0 +1,16 @@
+menu "Waveshare 2.06 板级运行时"
+
+    choice BOARD_RUNTIME_BACKEND
+        prompt "板级运行后端"
+        default BOARD_RUNTIME_REAL
+        help
+            REAL 使用厂家 managed BSP 1.0.7 和真实 GPIO；MOCK 不访问硬件，供无板联调。
+
+        config BOARD_RUNTIME_REAL
+            bool "真实 Waveshare BSP"
+
+        config BOARD_RUNTIME_MOCK
+            bool "纯软件 Mock"
+    endchoice
+
+endmenu

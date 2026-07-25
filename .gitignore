@@ -3,6 +3,8 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+**/bin/
+**/obj/
 
 # IDE
 .idea/
@@ -12,6 +14,13 @@ __pycache__/
 IMU_Dataset/
 outputs/
 .codex-local/
+
+# ESP-IDF 可再生依赖与构建状态；保留源码、dependencies.lock、sdkconfig.defaults 和 partitions.csv。
+build/
+esp32/firmware/build*/
+esp32/firmware/managed_components/
+esp32/firmware/sdkconfig
+esp32/firmware/sdkconfig.old
 
 # Local agent planning state
 task_plan.md

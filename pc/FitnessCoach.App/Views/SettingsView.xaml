@@ -1,0 +1,53 @@
+<UserControl x:Class="FitnessCoach.App.Views.SettingsView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!-- 设置页使用滚动卡片，适配小尺寸窗口。 -->
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <!-- 表单限制宽度，避免宽屏下输入框过长。 -->
+        <StackPanel MaxWidth="680" HorizontalAlignment="Left">
+            <!-- 设置表单卡片。 -->
+            <Border Background="{StaticResource CardBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="14" Padding="24">
+                <!-- 各字段纵向排列。 -->
+                <StackPanel>
+                    <!-- 设备模式仅在下次启动生效，避免训练过程中替换会话导致事件和历史丢失。 -->
+                    <CheckBox Content="下次启动使用真机蓝牙（关闭则使用模拟设备）" IsChecked="{Binding UseRealBleDevice}" Margin="0,0,0,13" />
+                    <!-- 单位选择只改变 PC 显示；设备协议继续使用换算后的千克和千卡。 -->
+                    <TextBlock Text="计量单位" Foreground="{StaticResource SecondaryTextBrush}" />
+                    <!-- 使用固定中文选项，选择结果持久化到用户偏好。 -->
+                    <ComboBox ItemsSource="{Binding UnitOptions}"
+                              SelectedItem="{Binding SelectedUnitOption}"
+                              DisplayMemberPath="DisplayName"
+                              Margin="0,5,0,13" />
+                    <!-- 体重标签随公制或英制显示对应单位和合法范围。 -->
+                    <TextBlock Text="{Binding WeightInputLabel}" Foreground="{StaticResource SecondaryTextBrush}" />
+                    <!-- 输入值按当前单位显示，写入后由 ViewModel 换算为协议千克。 -->
+                    <TextBox Text="{Binding WeightDisplayValue, UpdateSourceTrigger=PropertyChanged}" Margin="0,5,0,13" />
+                    <!-- 亮度标签。 -->
+                    <TextBlock Text="屏幕亮度（5～100%）" Foreground="{StaticResource SecondaryTextBrush}" />
+                    <!-- 亮度输入。 -->
+                    <TextBox Text="{Binding BrightnessPercent, UpdateSourceTrigger=PropertyChanged}" Margin="0,5,0,13" />
+                    <!-- 熄屏标签。 -->
+                    <TextBlock Text="无操作熄屏（10～300 秒）" Foreground="{StaticResource SecondaryTextBrush}" />
+                    <!-- 熄屏输入。 -->
+                    <TextBox Text="{Binding ScreenTimeoutSeconds, UpdateSourceTrigger=PropertyChanged}" Margin="0,5,0,13" />
+                    <!-- 每日目标标签。 -->
+                    <TextBlock Text="每日卡路里目标（0 表示关闭）" Foreground="{StaticResource SecondaryTextBrush}" />
+                    <!-- 每日目标输入。 -->
+                    <TextBox Text="{Binding DailyCalorieGoal, UpdateSourceTrigger=PropertyChanged}" Margin="0,5,0,13" />
+                    <!-- 提示音开关。 -->
+                    <CheckBox Content="开始、目标和错误提示音" IsChecked="{Binding SoundEnabled}" />
+                    <!-- 开发者模式是诊断六轴流的显式安全门，普通使用保持关闭。 -->
+                    <CheckBox Content="开发者模式（允许诊断页临时查看 25 赫兹同步诊断六轴，不保存）" IsChecked="{Binding DeveloperModeEnabled}" />
+                    <!-- 本次运行的减少动画开关；系统关闭动画时即使不勾选也会强制静态姿态。 -->
+                    <CheckBox Content="本次运行减少动作动画" IsChecked="{Binding ReducedMotionEnabled}" />
+                    <!-- 解释当前有效状态和系统辅助功能优先级。 -->
+                    <TextBlock Text="{Binding ReducedMotionSummary}" Foreground="{StaticResource SecondaryTextBrush}" TextWrapping="Wrap" Margin="0,2,0,0" />
+                    <!-- 保存按钮。 -->
+                    <Button Style="{StaticResource PrimaryButtonStyle}" Content="保存设置" Command="{Binding SaveCommand}" HorizontalAlignment="Left" MinWidth="130" Margin="0,16,0,0" />
+                    <!-- 设置结果。 -->
+                    <TextBlock Text="{Binding StatusMessage}" Foreground="{StaticResource SecondaryTextBrush}" TextWrapping="Wrap" Margin="0,14,0,0" />
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

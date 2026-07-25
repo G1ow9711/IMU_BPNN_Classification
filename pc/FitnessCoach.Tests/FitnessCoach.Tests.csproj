@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- 测试项目使用无第三方包的控制台测试器，离线环境也能执行。 -->
+  <PropertyGroup>
+    <!-- 输出可直接运行的测试程序，以退出码表示通过或失败。 -->
+    <OutputType>Exe</OutputType>
+    <!-- 正式协议测试目标固定为 .NET 8。 -->
+    <TargetFramework>net8.0-windows10.0.26100.0</TargetFramework>
+    <!-- 主机测试最低运行边界与 WPF 真 BLE 应用一致。 -->
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+    <!-- 开启可空引用分析，测试断线和未完成重组的空输出。 -->
+    <Nullable>enable</Nullable>
+    <!-- 自动导入基础命名空间。 -->
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- 编译警告全部视为错误，测试代码本身也必须保持严格。 -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- 引用领域模型，构造和核对 LiveState。 -->
+    <ProjectReference Include="..\FitnessCoach.Domain\FitnessCoach.Domain.csproj" />
+    <!-- 引用待测 BLE 编解码实现。 -->
+    <ProjectReference Include="..\FitnessCoach.Bluetooth\FitnessCoach.Bluetooth.csproj" />
+    <!-- 引用线程安全本地仓储实现。 -->
+    <ProjectReference Include="..\FitnessCoach.Infrastructure\FitnessCoach.Infrastructure.csproj" />
+    <!-- 引用 WPF ViewModel 和无窗口调度器，验证 UI 状态机。 -->
+    <ProjectReference Include="..\FitnessCoach.App\FitnessCoach.App.csproj" />
+  </ItemGroup>
+</Project>

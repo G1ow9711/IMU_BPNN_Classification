@@ -1,0 +1,67 @@
+{
+  "bundle_format_version": 1,
+  "feature_dim": 297,
+  "class_count": 11,
+  "class_names": [
+    "good_morning",
+    "jumping_jack",
+    "jumping_lunge",
+    "jumping_squat",
+    "lunge",
+    "sit",
+    "squat",
+    "trot",
+    "tuck_jump",
+    "walk",
+    "wave"
+  ],
+  "sample_rate_hz": 25,
+  "window_len": 62,
+  "step_len": 12,
+  "group_input_dims": [
+    112,
+    48,
+    24,
+    48,
+    32,
+    33
+  ],
+  "group_output_dims": [
+    24,
+    12,
+    8,
+    12,
+    8,
+    16
+  ],
+  "fusion_dims": [
+    80,
+    64,
+    32,
+    11
+  ],
+  "ensemble_weights": {
+    "base": 0.85,
+    "masked": 0.15
+  },
+  "masked_feature_range": [
+    184,
+    232
+  ],
+  "models": {
+    "base": {
+      "sha256": "8f66e344bcfaafb8299a1ccdbe189651b457e26be7e70604c527e9de2dca8f27",
+      "suppress_normalized_phase": false
+    },
+    "masked": {
+      "sha256": "57f4b2bca05db750ca734e674e203812bec1ea884f16a2018ddf2e2cc7ed5b3b",
+      "suppress_normalized_phase": true
+    }
+  },
+  "generated_files": {
+    "dual_m0_bundle.npz": "25c28449524d333d95a534c11c238884d03f8104b9f0d80b28bf981e5a64e95c",
+    "esp32_bp_features.h": "389a2a4bb250c8df69a15382a910d27915e2ccf6984c9e76f9b5d29aa577d5b5",
+    "esp32_dual_m0_model.h": "9ab5eecdc4ee2cd71774ce01dad4ea73620bb6325b8f3041979c4522e990a0f5"
+  },
+  "hardware_validation_status": "not_run_no_hardware"
+}

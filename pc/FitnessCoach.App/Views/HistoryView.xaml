@@ -1,0 +1,94 @@
+<UserControl x:Class="FitnessCoach.App.Views.HistoryView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!-- 历史页依次显示筛选工具栏、会话表格和选中详情。 -->
+    <Grid>
+        <!-- 三行布局保证小窗口中列表优先获得可伸缩空间。 -->
+        <Grid.RowDefinitions>
+            <!-- 筛选和导出工具栏按内容高度布局。 -->
+            <RowDefinition Height="Auto" />
+            <!-- 历史表格占用剩余主区域。 -->
+            <RowDefinition Height="*" />
+            <!-- 选中会话详情最多占页面约三分之一。 -->
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- 筛选工具栏允许窄窗口横向滚动，避免控件被截断。 -->
+        <ScrollViewer Grid.Row="0" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled" Margin="0,0,0,12">
+            <!-- 日期、动作和操作按钮横向排列。 -->
+            <StackPanel Orientation="Horizontal">
+                <!-- 开始日期标签。 -->
+                <TextBlock Text="开始日期" Foreground="{StaticResource SecondaryTextBrush}" VerticalAlignment="Center" />
+                <!-- 开始日期包含选中当天；清空表示不限制。 -->
+                <DatePicker SelectedDate="{Binding DateFrom, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="135" Margin="8,0,14,0" />
+                <!-- 结束日期标签。 -->
+                <TextBlock Text="结束日期" Foreground="{StaticResource SecondaryTextBrush}" VerticalAlignment="Center" />
+                <!-- 结束日期包含选中当天。 -->
+                <DatePicker SelectedDate="{Binding DateTo, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="135" Margin="8,0,14,0" />
+                <!-- 动作标签。 -->
+                <TextBlock Text="动作" Foreground="{StaticResource SecondaryTextBrush}" VerticalAlignment="Center" />
+                <!-- 选择全部动作或 11 个正式动作之一。 -->
+                <ComboBox ItemsSource="{Binding ActionFilters}"
+                          SelectedItem="{Binding SelectedActionFilter, Mode=TwoWay}"
+                          DisplayMemberPath="DisplayName"
+                          Width="145"
+                          Margin="8,0,14,0" />
+                <!-- 应用当前日期和动作条件。 -->
+                <Button Style="{StaticResource PrimaryButtonStyle}" Content="筛选" Command="{Binding RefreshCommand}" />
+                <!-- 恢复全部历史条件。 -->
+                <Button Style="{StaticResource BaseButtonStyle}" Content="清空条件" Command="{Binding ClearFiltersCommand}" />
+                <!-- 把当前筛选快照保存为逗号分隔值表格。 -->
+                <Button Style="{StaticResource BaseButtonStyle}" Content="导出表格" Command="{Binding ExportCsvCommand}" />
+            </StackPanel>
+        </ScrollViewer>
+
+        <!-- 历史记录只读表格；选择变化驱动下方详情面板。 -->
+        <DataGrid Grid.Row="1"
+                  ItemsSource="{Binding Sessions}"
+                  SelectedItem="{Binding SelectedSession, Mode=TwoWay}"
+                  AutoGenerateColumns="False"
+                  IsReadOnly="True"
+                  SelectionMode="Single"
+                  SelectionUnit="FullRow"
+                  MinHeight="220">
+            <!-- 使用稳定显示列，原始数值仍保留在领域摘要中供表格导出使用。 -->
+            <DataGrid.Columns>
+                <!-- 会话开始时间列。 -->
+                <DataGridTextColumn Header="开始时间" Binding="{Binding StartedAtText}" Width="1.25*" />
+                <!-- 动作摘要列。 -->
+                <DataGridTextColumn Header="动作" Binding="{Binding ActionsText}" Width="1.5*" />
+                <!-- 单调时长列。 -->
+                <DataGridTextColumn Header="时长" Binding="{Binding DurationText}" Width="0.7*" />
+                <!-- 总卡路里列。 -->
+                <DataGridTextColumn Header="卡路里" Binding="{Binding CaloriesText}" Width="0.7*" />
+                <!-- 设备标识列。 -->
+                <DataGridTextColumn Header="设备" Binding="{Binding DeviceId}" Width="1.15*" />
+                <!-- 结束原因列。 -->
+                <DataGridTextColumn Header="结束原因" Binding="{Binding EndReason}" Width="1.0*" />
+            </DataGrid.Columns>
+        </DataGrid>
+
+        <!-- 状态和选中会话详情卡片。 -->
+        <Border Grid.Row="2"
+                Background="{StaticResource CardBrush}"
+                BorderBrush="{StaticResource BorderBrush}"
+                BorderThickness="1"
+                CornerRadius="12"
+                Padding="16"
+                Margin="0,12,0,0"
+                MaxHeight="260">
+            <!-- 详情内容在空间不足时垂直滚动。 -->
+            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <!-- 状态、标题和完整指标纵向排列。 -->
+                <StackPanel>
+                    <!-- 显示筛选和导出结果。 -->
+                    <TextBlock Text="{Binding StatusMessage}" Foreground="{StaticResource SecondaryTextBrush}" TextWrapping="Wrap" Margin="0,0,0,10" />
+                    <!-- 详情标题。 -->
+                    <TextBlock Text="选中会话详情" FontSize="17" FontWeight="SemiBold" Margin="0,0,0,8" />
+                    <!-- 未选择时绑定为空；选择后显示设备、时间、总量和逐动作指标。 -->
+                    <TextBlock Text="{Binding SelectedSession.DetailsText}" FontFamily="Consolas" TextWrapping="Wrap" />
+                </StackPanel>
+            </ScrollViewer>
+        </Border>
+    </Grid>
+</UserControl>

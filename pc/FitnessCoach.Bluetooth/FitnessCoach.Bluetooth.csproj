@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- 蓝牙层负责二进制协议，不直接引用 WPF 控件，便于独立测试。 -->
+  <PropertyGroup>
+    <!-- 正式上位机目标固定为 .NET 8。 -->
+    <TargetFramework>net8.0</TargetFramework>
+    <!-- 开启可空引用分析，明确断线和未完成重组状态。 -->
+    <Nullable>enable</Nullable>
+    <!-- 自动导入 System、集合等基础命名空间。 -->
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- 协议层警告全部视为错误，防止隐式转换造成字段截断。 -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- 引用纯领域层，把实时状态解码为与界面无关的业务对象。 -->
+    <ProjectReference Include="..\FitnessCoach.Domain\FitnessCoach.Domain.csproj" />
+  </ItemGroup>
+</Project>

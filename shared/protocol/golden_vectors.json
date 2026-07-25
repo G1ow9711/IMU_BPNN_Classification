@@ -1,0 +1,22 @@
+{
+  "description": "BLE协议v1黄金向量；所有多字节字段均为小端序。",
+  "crc16_ccitt_false": {
+    "input_ascii": "123456789",
+    "expected_hex": "29B1"
+  },
+  "logical_frame": {
+    "protocol_major": 1,
+    "protocol_minor": 0,
+    "message_type": 3,
+    "flags": 1,
+    "sequence": 4660,
+    "monotonic_ms": 16909060,
+    "payload_hex": "1020304050",
+    "crc_hex": "F992",
+    "frame_hex": "7EB1010003013412040302010500102030405092F9"
+  },
+  "fragments_mtu23": [
+    "3412000002000C007EB101000301341204030201",
+    "34120100020009000500102030405092F9"
+  ]
+}
