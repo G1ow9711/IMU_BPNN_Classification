@@ -20,7 +20,7 @@ $deviceConfigSource = Join-Path $repositoryRoot "esp32\firmware\components\devic
 $workoutSource = Join-Path $repositoryRoot "esp32\firmware\components\workout_engine\workout_engine.c"
 # 定义动作相位源文件。
 $phaseSource = Join-Path $repositoryRoot "esp32\firmware\components\motion_phase\motion_phase.c"
-# 定义计数、热量和振动源文件。
+# 定义计数、热量和训练事件源文件；真表没有振动马达。
 $fitnessSource = Join-Path $repositoryRoot "esp32\firmware\components\fitness_core\src\fitness_core.c"
 # 定义 UI 纯状态机源文件。
 $uiSource = Join-Path $repositoryRoot "esp32\firmware\components\ui\ui_state_machine.c"

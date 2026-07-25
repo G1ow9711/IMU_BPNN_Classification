@@ -2,17 +2,18 @@
 #define IMU_HANDHELD_WORKOUT_ENGINE_H
 
 /*
- * 设备训练引擎：把双 M0 融合 logits、25 Hz 六轴点、计数器、热量和振动串成单一事实链。
+ * 设备训练引擎：把双 M0 融合 logits、25 Hz 六轴点、计数器和热量串成单一事实链。
  *
- * 产品合同：用户点击开始后立即采集和缓存 25 Hz 六轴点，累计类别连续两窗且概率过门后锁定；
- * 最迟第四窗按当前累计类别结束准备。锁定后 selected_action 只固定本轮计数器类型；实时类别
- * 可切到站立、静坐或其它动作并冻结次数，干净同类窗口恢复后从完整新周期继续。锁定时按原
- * 时间顺序补算准备期完整 160 点，使点击开始后已经完成的动作仍能进入权威累计。
+ * 产品合同：用户点击开始后立即采集和缓存 25 Hz 六轴点，独立窗口类别连续两窗且概率过门后锁定；
+ * 最迟第四窗按累计平均类别结束准备。锁定后 selected_action 固定本轮计数器和界面动作；后续
+ * inferred_action 只进入诊断日志，不再切断计数。计数许可由训练端同源的 25 点运动/静止门和
+ * 数据质量共同控制；休息只清除未完成半周期，恢复活动后继续同一动作。锁定时按原时间顺序
+ * 补算准备期完整 160 点，使点击开始后已经完成的动作仍能进入权威累计。
  */
 
-/* 引入次数、步数、热量、MetricEvent 和振动 FIFO。 */
+/* 引入次数、步数、热量和 MetricEvent。 */
 #include "fitness_core.h"
-/* 引入普通往返、跳跃五阶段和 walk/trot 步峰检测器。 */
+/* 引入自适应完整往返、开合跳峰谷和 walk/trot 施密特步峰检测器。 */
 #include "motion_phase.h"
 
 /* 引入 bool 表达事件、锁定和运行状态。 */
@@ -27,7 +28,7 @@ extern "C" {
 
 /* 双 M0 固定输出 11 类，与 FITNESS_ACTION_COUNT 一致。 */
 #define WORKOUT_CLASS_COUNT (11U)
-/* 累计最优类别必须连续保持两个重叠窗口，抑制动作起步的单窗瞬态误判。 */
+/* 独立窗口最优类别必须连续保持两个重叠窗口，抑制动作起步的单窗瞬态误判。 */
 #define WORKOUT_ACTION_LOCK_WINDOWS (2U)
 /* 准备态最多累计四个窗口；25 Hz、步长 12 点时首窗后最多增加 1.44 秒。 */
 #define WORKOUT_ACTION_MAX_PREPARE_WINDOWS (4U)
@@ -38,9 +39,11 @@ extern "C" {
 #define WORKOUT_PRELOCK_SAMPLE_CAPACITY (160U)
 /* 160 点按 13 点单轴不应期最多形成 12 条权威事件；静态 FIFO 保留每条原始时刻。 */
 #define WORKOUT_REPLAY_EVENT_QUEUE_CAPACITY (12U)
-/* 开合跳同时跟踪 ax、ay、az 三个加速度轴，轴顺序与六轴输入后 3 通道一致。 */
-#define WORKOUT_JUMPING_JACK_AXIS_COUNT (3U)
-/* 累计平均 logits 的锁定最低 softmax 概率为 50%，Q15 取 32768/65535。 */
+/* 活动门使用训练端固定 1 秒因果窗；25 Hz 下恰为 25 个六轴点。 */
+#define WORKOUT_ACTIVITY_WINDOW_SAMPLES (25U)
+/* 逐点活动分数过门至少 5/25，即训练端 MOTION_TRIGGER_RATIO=20%。 */
+#define WORKOUT_ACTIVITY_MIN_ACTIVE_POINTS (5U)
+/* 独立窗口正常确认的最低 softmax 概率为 50%，Q15 取 32768/65535。 */
 #define WORKOUT_ACTION_LOCK_CONFIDENCE_Q15 (32768U)
 /* 未锁定动作使用 255，不能送入 fitness_action_t。 */
 #define WORKOUT_ACTION_UNKNOWN (255U)
@@ -71,7 +74,7 @@ typedef enum {
     WORKOUT_STATUS_ERR_STATE = -2,
     /* 单调时间倒退或间断导致本次输入不可用。 */
     WORKOUT_STATUS_ERR_TIME = -3,
-    /* 下游 fitness_core、motion_phase 或振动队列返回错误。 */
+    /* 下游 fitness_core 或 motion_phase 返回错误。 */
     WORKOUT_STATUS_ERR_DOMAIN = -4
 } workout_status_t;
 
@@ -85,7 +88,7 @@ typedef struct {
     uint8_t action_id;
     /* 保存最近推理窗口实时分类 0..10；尚无有效窗口时为 255。 */
     uint8_t inferred_action_id;
-    /* true 表示实时分类与主动作一致且干净；准备阶段和休息期间固定为 false。 */
+    /* true 表示训练同源活动门允许计数；与后续实时分类类别无关。 */
     bool classification_consistent;
     /* 保存次数、步数或完整秒；单位由 metric_kind 决定。 */
     uint64_t metric_value;
@@ -105,7 +108,7 @@ typedef struct {
 typedef struct {
     /* 保存单调毫秒与 gx、gy、gz、ax、ay、az 六轴物理量。 */
     motion_phase_sample_t sample;
-    /* true 表示该点没有间断、队列溢出或马达污染，可推进相位。 */
+    /* true 表示该点没有间断、队列溢出或旧执行器污染，可推进相位。 */
     bool count_input_valid;
     /* 保存该点质量位，补算产生的 MetricEvent 必须沿用真实来源。 */
     uint16_t quality_flags;
@@ -133,7 +136,7 @@ typedef struct {
     uint32_t bout_window_count;
     /* 保存动作段当前因果累计分类 0..10；没有有效窗口时为 255。 */
     uint8_t inferred_action;
-    /* true 表示 inferred_action 与 selected_action 一致，允许推进相位和次数。 */
+    /* true 表示 25 点训练同源活动门允许推进相位和次数；字段名为兼容既有协议保留。 */
     bool classification_consistent;
     /* 保存当前累计候选动作 0..10；255 表示尚无有限证据。 */
     uint8_t candidate_action;
@@ -145,6 +148,24 @@ typedef struct {
     uint16_t confidence_q15;
     /* 保存最近质量位。 */
     uint16_t quality_flags;
+    /* 保存最近 25 点加速度模长，单位 g；数组固定占用 100 字节。 */
+    float activity_acceleration_magnitude_g[WORKOUT_ACTIVITY_WINDOW_SAMPLES];
+    /* 保存最近 25 点角速度模长，单位 deg/s；数组固定占用 100 字节。 */
+    float activity_gyro_magnitude_dps[WORKOUT_ACTIVITY_WINDOW_SAMPLES];
+    /* 保存每点活动分数是否超过训练阈值，元素为 0/1，固定占用 25 字节。 */
+    uint8_t activity_point_active[WORKOUT_ACTIVITY_WINDOW_SAMPLES];
+    /* 指向下一次覆盖的活动窗槽位，范围 0..24。 */
+    uint8_t activity_write_index;
+    /* 保存活动窗已有有效点数，范围 0..25。 */
+    uint8_t activity_sample_count;
+    /* 保存当前窗逐点活动标志之和，范围 0..25，避免每点重复统计布尔数组。 */
+    uint8_t activity_active_point_count;
+    /* 保存前一干净点 ax、ay、az，单位 g，用于计算当前 |Δa|。 */
+    float activity_previous_acceleration_g[3];
+    /* true 表示前一干净加速度可用于差分；时间线边界后清零。 */
+    bool activity_previous_acceleration_valid;
+    /* true 表示本轮活动窗已经确认过真实运动；确认前的准备上下文不得提前冻结首个周期。 */
+    bool activity_gate_has_seen_motion;
     /* 保存单动作次数/步数/热量领域会话。 */
     fitness_session_t fitness_session;
     /* 保存 8 类重复动作状态；非重复动作不读取。 */
@@ -153,24 +174,15 @@ typedef struct {
     fitness_step_counter_t step_counter;
     /* 保存锁定动作的原始点相位/步峰检测器。 */
     motion_phase_detector_t phase_detector;
-    /*
-     * 保存开合跳 ax、ay、az 三个独立 11+5 均值与相邻峰谷检测器。
-     * 数组维度为 [3 个加速度轴]；每轴累计不直接公开，三轴中位数才是权威次数。
-     */
-    motion_periodic_pair_detector_t jumping_jack_pair_detectors[WORKOUT_JUMPING_JACK_AXIS_COUNT];
-    /* 保存已经发布到 fitness_session 的三轴中位次数，防止暂停或重放后重复发布旧次数。 */
-    uint64_t jumping_jack_reported_repetitions;
     /* 保存锁类补算产生的每条 MetricEvent；数组按 event_seq 递增，无运行期堆分配。 */
     fitness_metric_event_t replay_metric_events[WORKOUT_REPLAY_EVENT_QUEUE_CAPACITY];
     /* 指向最早未交付补算事件槽，范围 0..11。 */
     uint8_t replay_metric_event_head;
     /* 保存当前补算事件数量，范围 0..12。 */
     uint8_t replay_metric_event_count;
-    /* 保存所有业务振动请求；马达任务异步消费。 */
-    fitness_haptic_queue_t haptic_queue;
 } workout_engine_t;
 
-/* 初始化为空闲状态和空振动队列。 */
+/* 初始化为空闲状态。 */
 void workout_engine_init(workout_engine_t *engine);
 /* 从 Idle/Summary 开始准备；weight_g 合理范围统一为 0 或 30～250 kg。 */
 workout_status_t workout_engine_start(
@@ -180,17 +192,17 @@ workout_status_t workout_engine_start(
     uint64_t now_ms);
 /*
  * 标记一次 IMU 连续性边界；PREPARING 保留已闭合动作点和干净分类候选，边界质量点在重放时
- * 只清除未完成半周期。RUNNING 保留 selected_action、次数和热量，但立即冻结计数，直到新的
- * 干净同类窗口恢复；空指针安全无操作。
+ * 只清除未完成半周期。RUNNING 保留 selected_action、次数、热量和当前活动门，只清除跨缺口
+ * 半周期并重建活动统计；恢复不依赖下一次 2.48 秒模型窗口。空指针安全无操作。
  */
 void workout_engine_reset_bout_evidence(workout_engine_t *engine);
 /*
- * 加入一次双 M0 融合 logits；PREPARING 使用有界因果累计确认，RUNNING 更新实时类别与计数门。
+ * 加入一次双 M0 融合 logits；PREPARING 使用有界因果累计确认，RUNNING 只更新实时诊断类别。
  * logits 必须非空，形状固定为 [11]，按 FITNESS_ACTION_* 顺序保存无量纲融合分数；
  * 数组生命周期只需覆盖本次同步调用，函数不会保存其地址；RUNNING 不允许切换 selected_action，
  * PREPARING 每窗公开累计候选；连续两窗且概率至少 50% 时锁定，最迟第四窗按累计 argmax 锁定。
- * RUNNING 不切换 selected_action；异类或低置信窗口立即冻结并清空未完成周期，新的干净同类
- * 高置信窗口恢复原计数器。这样站立、静坐或其它动作休息不会继续完成旧动作半周期。
+ * RUNNING 不切换 selected_action，也不使用后续 Top-1 开关计数；运动/静止门在逐样本入口按
+ * 训练冻结公式控制相位，避免模型窗抖动造成数秒漏计。
  * action_locked 仅在本次由未锁定变为锁定时为 true。
  */
 workout_status_t workout_engine_push_inference(
@@ -206,7 +218,7 @@ workout_status_t workout_engine_push_inference(
     bool *action_locked);
 /*
  * 输入一个 25 Hz 六轴点；count_input_valid=false 时仍累计热量，但不推进相位/步峰。
- * emitted=true 时 event 是 UI、BLE、存储和振动的唯一新指标事实。
+ * emitted=true 时 event 是 UI、BLE 和存储共享的唯一新指标事实。
  */
 workout_status_t workout_engine_push_sample(
     workout_engine_t *engine,
@@ -227,10 +239,6 @@ void workout_engine_return_idle(workout_engine_t *engine);
 workout_status_t workout_engine_snapshot(
     const workout_engine_t *engine,
     workout_snapshot_t *snapshot);
-/* 从引擎振动 FIFO 取出最早请求；空队列返回 false。 */
-bool workout_engine_pop_haptic(
-    workout_engine_t *engine,
-    fitness_haptic_request_t *request);
 /* 从补算事件 FIFO 取最早 MetricEvent；只用于锁类调用后的协调器 BLE/摘要扇出。 */
 bool workout_engine_pop_replay_metric_event(
     workout_engine_t *engine,

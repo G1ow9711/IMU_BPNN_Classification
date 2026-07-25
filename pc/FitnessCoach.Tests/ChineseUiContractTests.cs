@@ -140,8 +140,6 @@ internal static partial class ChineseUiContractTests
         AssertNoLatin(diagnosticsViewModel.ProtocolText, "协议说明");
         // 模拟或真机实现说明不得把内部类名暴露给普通用户。
         AssertNoLatin(diagnosticsViewModel.DeviceImplementationText, "设备实现说明");
-        // 振动策略必须使用“计次”和“毫秒”。
-        AssertNoLatin(diagnosticsViewModel.HapticPolicyText, "振动策略");
         // 模型职责使用用户可懂的中文名称，不展示内部模型代号。
         AssertNoLatin(diagnosticsViewModel.ModelText, "模型说明");
         // 动画说明不得暴露桌面框架缩写。

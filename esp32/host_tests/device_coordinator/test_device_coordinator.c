@@ -135,8 +135,6 @@ static int start_and_lock(
     CHECK(lock_effects->ui.state == UI_STATE_RUNNING);
     /* LiveState 复制目标动作。 */
     CHECK(lock_effects->live_state.action_id == (uint8_t)action);
-    /* 累计锁类不产生开始振动，避免污染紧随其后的第一个计数周期。 */
-    CHECK(lock_effects->haptic_count == 0U);
     /* 锁定成功。 */
     return 0;
 }
@@ -199,8 +197,10 @@ static int emit_one_squat_rep(
     }
     /* 第一 REST 点只建立候选。 */
     CHECK(push_point(coordinator, base_ms + 720ULL, 0.0F, 1.0F, &effects) == 0);
-    /* 第二 REST 点闭合完整周期。 */
-    CHECK(push_point(coordinator, base_ms + 760ULL, 0.0F, 1.0F, metric_effects) == 0);
+    /* 第二个真实 REST 点由相位层确认端点，但领域层仍等待一次接口保持事件。 */
+    CHECK(push_point(coordinator, base_ms + 760ULL, 0.0F, 1.0F, &effects) == 0);
+    /* 第三个输入点承载已确认 REST，不参与新的物理端点判断。 */
+    CHECK(push_point(coordinator, base_ms + 800ULL, 0.0F, 1.0F, metric_effects) == 0);
     /* 必须产生唯一 BLE Event。 */
     CHECK((metric_effects->flags & DEVICE_EFFECT_BLE_EVENT) != 0U);
     /* 必须产生幂等摘要写入。 */
@@ -209,14 +209,14 @@ static int emit_one_squat_rep(
     return 0;
 }
 
-/* 验证主动作只固定计数器；静坐休息动态冻结，恢复后必须从新完整周期计数。 */
+/* 验证主动作固定，样本活动门控制休息/恢复，模型异类只进入诊断。 */
 static int test_dynamic_rest_freezes_primary_counter(void)
 {
     /* 创建独立协调器，覆盖领域、UI、BLE LiveState 和 MetricEvent 联合事务。 */
     device_coordinator_t coordinator;
     /* 使用独立会话 40，避免与其它测试序号重叠。 */
     CHECK(initialize_ready(&coordinator, 40U, 0ULL) == 0);
-    /* effects 保存每次协调器调用产生的 UI、BLE、存储和振动输出。 */
+    /* effects 保存每次协调器调用产生的 UI、BLE 和存储输出。 */
     device_effects_t effects;
     /* 两个干净高置信窗口选择深蹲作为本轮主动作和计数器类型。 */
     CHECK(start_and_lock(&coordinator, FITNESS_ACTION_SQUAT, 10ULL, &effects) == 0);
@@ -226,14 +226,24 @@ static int test_dynamic_rest_freezes_primary_counter(void)
     CHECK((coordinator.workout.inferred_action == (uint8_t)FITNESS_ACTION_SQUAT) &&
           coordinator.workout.classification_consistent);
 
-    /* 两个正向点建立一个尚未闭合的深蹲半周期。 */
-    CHECK(push_point(&coordinator, 1010ULL, 80.0F, 1.0F, &effects) == 0);
-    /* 第二点确认 PRIMARY 相位，但尚未返回站立。 */
-    CHECK(push_point(&coordinator, 1050ULL, 65.0F, 1.0F, &effects) == 0);
-    /* 当前没有完整周期，不应产生 MetricEvent。 */
-    CHECK((effects.flags & DEVICE_EFFECT_BLE_EVENT) == 0U);
+    /* 先输入 25 点同向脉冲活动，武装训练同源休息检测且不形成反向完整周期。 */
+    for (uint8_t point = 0U; point < WORKOUT_ACTIVITY_WINDOW_SAMPLES; ++point) {
+        /* 每五点一个 80 deg/s 正向脉冲，使活动点恰好达到 5/25。 */
+        const float gyro_x_dps = (point % 5U) == 0U ? 80.0F : 0.0F;
+        /* 从 1010 ms 起严格按 40 ms 提交。 */
+        CHECK(push_point(
+                  &coordinator,
+                  1010ULL + ((uint64_t)point * 40ULL),
+                  gyro_x_dps,
+                  1.0F,
+                  &effects) == 0);
+    }
+    /* 活动窗满足整体方差和 5/25 双门后仍允许计数。 */
+    CHECK(coordinator.workout.classification_consistent);
+    /* 正向脉冲没有 SECONDARY，不得形成深蹲次数。 */
+    CHECK(coordinator.workout.fitness_session.repetitions == 0ULL);
 
-    /* 构造高置信静坐窗口，代表用户在本轮深蹲过程中站定或坐下休息。 */
+    /* 构造高置信静坐窗口，验证后续分类只记录诊断而不直接关闭计数。 */
     float logits[WORKOUT_CLASS_COUNT];
     /* 静坐类别写高分，其它类写低分。 */
     make_logits(logits, FITNESS_ACTION_SIT);
@@ -241,84 +251,78 @@ static int test_dynamic_rest_freezes_primary_counter(void)
     CHECK(device_coordinator_push_inference(
               &coordinator,
               logits,
-              1090ULL,
+              2010ULL,
               0U,
               &effects) == DEVICE_COORDINATOR_OK);
     /* 实时类别必须公开静坐。 */
     CHECK(coordinator.workout.inferred_action == (uint8_t)FITNESS_ACTION_SIT);
-    /* 休息期间必须关闭深蹲计数门。 */
-    CHECK(!coordinator.workout.classification_consistent);
+    /* 单个异类模型窗不能关闭计数；休息只由六轴活动门确认。 */
+    CHECK(coordinator.workout.classification_consistent);
     /* 主动作仍为深蹲，禁止自动换成静坐时长计数器。 */
     CHECK(coordinator.workout.selected_action == (uint8_t)FITNESS_ACTION_SQUAT);
-    /* 手表训练页仍保存本轮深蹲，但实时动作显示静坐。 */
+    /* 手表状态仍保存本轮深蹲，实时静坐只留在诊断字段。 */
     CHECK((effects.ui.view.action_id == (uint8_t)FITNESS_ACTION_SQUAT) &&
-          (effects.ui.view.inferred_action_id == (uint8_t)FITNESS_ACTION_SIT));
-    /* 手表必须明确关闭计数显示门。 */
-    CHECK(!effects.ui.view.counting_enabled);
-    /* 冻结 BLE LiveState 的 action_id 仍表示本轮指标类型，不能变成静坐秒数。 */
+           (effects.ui.view.inferred_action_id == (uint8_t)FITNESS_ACTION_SIT));
+    /* 推理后活动门仍开，手表不能因模型抖动提前显示休息。 */
+    CHECK(effects.ui.view.counting_enabled);
+    /* BLE LiveState 的 action_id 始终表示本轮指标类型，不能变成静坐秒数。 */
     CHECK(effects.live_state.action_id == (uint8_t)FITNESS_ACTION_SQUAT);
 
-    /* 休息期间即使腕部形成反向点，也不能与休息前 PRIMARY 半周期拼接。 */
-    CHECK(push_point(&coordinator, 1130ULL, -80.0F, 1.0F, &effects) == 0);
-    /* 第二个反向点本来会确认 SECONDARY，但计数门已冻结。 */
-    CHECK(push_point(&coordinator, 1170ULL, -65.0F, 1.0F, &effects) == 0);
-    /* 两个静止点本来会返回 REST，但仍不得闭合旧半周期。 */
-    CHECK(push_point(&coordinator, 1210ULL, 0.0F, 1.0F, &effects) == 0);
-    /* 第二个静止点结束休息测试段。 */
-    CHECK(push_point(&coordinator, 1250ULL, 0.0F, 1.0F, &effects) == 0);
-    /* 休息段不得产生次数。 */
+    /* 保存活动门关闭那一个点产生的 UI/BLE 快照；后续静止点按 25 Hz 静默提交。 */
+    device_effects_t rest_effects;
+    /* 清零快照，未观察到边界时断言会失败。 */
+    (void)memset(&rest_effects, 0, sizeof(rest_effects));
+    /* true 表示已捕获唯一休息状态修订。 */
+    bool rest_snapshot_seen = false;
+    /* 输入完整 25 点 1 g、零角速度静止窗，真实确认用户进入休息。 */
+    for (uint8_t point = 0U; point < WORKOUT_ACTIVITY_WINDOW_SAMPLES; ++point) {
+        /* 从 2010 ms 起连续输入静止点，逐步滚出旧活动样本。 */
+        CHECK(push_point(
+                  &coordinator,
+                  2010ULL + ((uint64_t)point * 40ULL),
+                  0.0F,
+                  1.0F,
+                  &effects) == 0);
+        /* 活动门真正关闭的点会同时产生 UI 和 BLE LiveState，不产生 MetricEvent。 */
+        if ((effects.flags & (DEVICE_EFFECT_UI_RENDER | DEVICE_EFFECT_BLE_LIVE_STATE)) ==
+            (DEVICE_EFFECT_UI_RENDER | DEVICE_EFFECT_BLE_LIVE_STATE)) {
+            /* 按值保存该次边界快照，供循环结束后检查。 */
+            rest_effects = effects;
+            /* 标记已观察到休息边界。 */
+            rest_snapshot_seen = true;
+        }
+    }
+    /* 完整静止窗必须关闭计数门。 */
+    CHECK(!coordinator.workout.classification_consistent);
+    /* 必须产生且只需产生可见休息快照。 */
+    CHECK(rest_snapshot_seen);
+    /* UI 进入计数暂停，但主动作仍为深蹲。 */
+    CHECK(!rest_effects.ui.view.counting_enabled);
+    /* UI 主动作字段不能变成静坐。 */
+    CHECK(rest_effects.ui.view.action_id == (uint8_t)FITNESS_ACTION_SQUAT);
+    /* BLE 主动作同样保持深蹲。 */
+    CHECK(rest_effects.live_state.action_id == (uint8_t)FITNESS_ACTION_SQUAT);
+    /* 整段休息不得增加次数。 */
     CHECK(coordinator.workout.fitness_session.repetitions == 0ULL);
-    /* 休息段不得产生 BLE MetricEvent 或振动。 */
-    CHECK((effects.flags & (DEVICE_EFFECT_BLE_EVENT | DEVICE_EFFECT_HAPTIC)) == 0U);
 
-    /* 构造新的干净高置信深蹲窗口，表示用户结束休息并继续本轮动作。 */
-    make_logits(logits, FITNESS_ACTION_SQUAT);
-    /* 同类干净窗口恢复原深蹲计数器，不重新选择主动作。 */
-    CHECK(device_coordinator_push_inference(
-              &coordinator,
-              logits,
-              1290ULL,
-              0U,
-              &effects) == DEVICE_COORDINATOR_OK);
-    /* 主动作仍为深蹲，实时动作重新一致。 */
-    CHECK((coordinator.workout.selected_action == (uint8_t)FITNESS_ACTION_SQUAT) &&
-          (coordinator.workout.inferred_action == (uint8_t)FITNESS_ACTION_SQUAT));
-    /* 恢复窗口重新打开计数门。 */
+    /* 输入五个活动点，验证样本门可在 200 ms 内恢复而无需等待模型推理。 */
+    for (uint8_t point = 0U; point < WORKOUT_ACTIVITY_MIN_ACTIVE_POINTS; ++point) {
+        /* 80 deg/s 正向运动提供逐点活动证据，但不含反向闭环。 */
+        CHECK(push_point(
+                  &coordinator,
+                  3010ULL + ((uint64_t)point * 40ULL),
+                  80.0F,
+                  1.0F,
+                  &effects) == 0);
+    }
+    /* 5/25 活动点和整体方差同时过门后自动恢复。 */
     CHECK(coordinator.workout.classification_consistent);
-    /* 手表恢复“训练中”状态。 */
+    /* 手表恢复训练状态，诊断类别仍可保留静坐而不影响业务。 */
     CHECK(effects.ui.view.counting_enabled);
-
-    /* 只送休息前半周期的后半段，验证恢复边界确实清空旧相位。 */
-    CHECK(push_point(&coordinator, 1330ULL, -80.0F, 1.0F, &effects) == 0);
-    /* 第二个反向点仍缺少新的 PRIMARY，不能计数。 */
-    CHECK(push_point(&coordinator, 1370ULL, -65.0F, 1.0F, &effects) == 0);
-    /* 第一静止点不能闭合。 */
-    CHECK(push_point(&coordinator, 1410ULL, 0.0F, 1.0F, &effects) == 0);
-    /* 第二静止点仍不能闭合。 */
-    CHECK(push_point(&coordinator, 1450ULL, 0.0F, 1.0F, &effects) == 0);
-    /* 半周期拼接被拒绝，累计保持零。 */
-    CHECK(coordinator.workout.fitness_session.repetitions == 0ULL);
-
-    /* 再次进入静坐，明确结束刚才用于验证的无效后半周期。 */
-    make_logits(logits, FITNESS_ACTION_SIT);
-    /* 第二次休息窗口再次关闭门并清空全部未完成相位。 */
-    CHECK(device_coordinator_push_inference(
-              &coordinator,
-              logits,
-              1490ULL,
-              0U,
-              &effects) == DEVICE_COORDINATOR_OK);
-    /* 480 ms 后用新的深蹲窗口恢复，模拟真实重叠推理步长。 */
-    make_logits(logits, FITNESS_ACTION_SQUAT);
-    /* 干净同类窗口重新建立计数许可。 */
-    CHECK(device_coordinator_push_inference(
-              &coordinator,
-              logits,
-              1970ULL,
-              0U,
-              &effects) == DEVICE_COORDINATOR_OK);
+    /* 在开始新完整周期前显式切断刚才恢复探针形成的 PRIMARY 半周期。 */
+    workout_engine_reset_bout_evidence(&coordinator.workout);
     /* 从下一相邻 25 Hz 点开始生成一个全新的完整深蹲周期。 */
-    CHECK(emit_one_squat_rep(&coordinator, 2010ULL, &effects) == 0);
+    CHECK(emit_one_squat_rep(&coordinator, 3210ULL, &effects) == 0);
     /* 恢复后完整周期必须且只能增加一次。 */
     CHECK(coordinator.workout.fitness_session.repetitions == 1ULL);
     /* 对外 MetricEvent 与领域累计一致。 */
@@ -352,12 +356,6 @@ static int test_complete_session_and_fact_chain(void)
     CHECK(effects.summary.metric_total == 1ULL);
     /* Event 和摘要共用同一 event_seq 幂等键。 */
     CHECK(effects.summary.last_event_seq == effects.metric_event.event_seq);
-    /* 每次 REP 必须仅有一次 30 ms 振动。 */
-    CHECK((effects.haptic_count == 1U) &&
-          (effects.haptics[0].reason == FITNESS_HAPTIC_REASON_REPETITION) &&
-          (effects.haptics[0].on_ms == 30U) &&
-          (effects.haptics[0].repeat_count == 1U));
-
     /* 创建固定容量内存介质，完整覆盖双槽摘要。 */
     static uint8_t storage_bytes[SESSION_STORE_REQUIRED_BACKEND_SIZE];
     /* 创建内存后端上下文。 */
@@ -404,10 +402,6 @@ static int test_complete_session_and_fact_chain(void)
     CHECK((effects.summary.flags & DEVICE_SUMMARY_FLAG_COMPLETED) != 0U);
     /* 最终摘要仍保持一次。 */
     CHECK(effects.summary.metric_total == 1ULL);
-    /* 结束反馈是一次 40 ms。 */
-    CHECK((effects.haptic_count == 1U) &&
-          (effects.haptics[0].reason == FITNESS_HAPTIC_REASON_PAUSE_OR_END) &&
-          (effects.haptics[0].on_ms == 40U));
     /* 模拟存储成功确认。 */
     CHECK(device_coordinator_handle_control(
               &coordinator,
@@ -433,9 +427,9 @@ static int test_jumping_jack_gap_reset_commits_and_recovers(void)
     device_effects_t effects;
     /* 用两个高置信窗口锁定开合跳。 */
     CHECK(start_and_lock(&coordinator, FITNESS_ACTION_JUMPING_JACK, 10ULL, &effects) == 0);
-    /* 构造首个干净六轴点，三个加速度轴均建立时间线。 */
+    /* 构造首个干净六轴点，主动作相位检测器建立时间线。 */
     motion_phase_sample_t sample = make_sample(1000ULL, 0.0F, 1.0F);
-    /* ax、ay 也写入有限 g 值，三轴峰谷链必须同时有效。 */
+    /* ax、ay 也写入有限 g 值，确保模长和质量检查均有效。 */
     sample.axis[3] = 0.2F;
     /* ay 使用不同幅值，防止测试依赖三个轴完全相同。 */
     sample.axis[4] = -0.1F;
@@ -478,11 +472,10 @@ static int test_jumping_jack_gap_reset_commits_and_recovers(void)
               true,
               0U,
               &effects) == DEVICE_COORDINATOR_OK);
-    /* 三个轴都必须以当前点建立新的时间基准。 */
-    for (uint8_t axis = 0U; axis < WORKOUT_JUMPING_JACK_AXIS_COUNT; ++axis) {
-        /* 防止任一轴仍停留在缺口前 1000 ms。 */
-        CHECK(coordinator.workout.jumping_jack_pair_detectors[axis].last_timestamp_ms == 1200ULL);
-    }
+    /* 主动作相位检测器必须以当前点建立新的时间基准。 */
+    CHECK(coordinator.workout.phase_detector.has_timestamp);
+    /* 防止检测器仍停留在缺口前 1000 ms。 */
+    CHECK(coordinator.workout.phase_detector.last_timestamp_ms == 1200ULL);
     /* 测试通过。 */
     return 0;
 }
@@ -490,13 +483,6 @@ static int test_jumping_jack_gap_reset_commits_and_recovers(void)
 /* 验证锁类补算的每条 MetricEvent 都进入同一次 effect，并保留原始 IMU 时刻。 */
 static int test_prelock_replay_events_reach_effects(void)
 {
-    /* 一个开合跳周期固定 20 点、0.8 秒；X/Y 作为两个一致可信轴。 */
-    static const float cycle[20] = {
-        0.0F, 0.31F, 0.59F, 0.81F, 0.95F,
-        1.0F, 0.95F, 0.81F, 0.59F, 0.31F,
-        0.0F, -0.31F, -0.59F, -0.81F, -0.95F,
-        -1.0F, -0.95F, -0.81F, -0.59F, -0.31F
-    };
     /* 创建独立协调器，使用新会话 43 避免其它事件序号影响。 */
     device_coordinator_t coordinator;
     /* 从满电 Home 初始化。 */
@@ -509,39 +495,33 @@ static int test_prelock_replay_events_reach_effects(void)
               DEVICE_CONTROL_START,
               10ULL,
               &effects) == DEVICE_COORDINATOR_OK);
-    /* time_ms 从首个合法 40 ms 样本开始，严格晚于开始时刻。 */
+    /* time_ms 从首个合法 40 ms 样本开始，严格晚于开始命令。 */
     uint64_t time_ms = 40ULL;
-    /* 前 20 点提供 11+5 双均值预热基线。 */
-    for (uint8_t point = 0U; point < 20U; ++point) {
-        /* 三轴动态量为零，只填充准备缓存。 */
-        motion_phase_sample_t sample = make_sample(time_ms, 0.0F, 0.0F);
-        /* ax 和 ay 显式保持零。 */
-        sample.axis[3] = 0.0F;
-        /* 提交 PREPARING 点，协调器必须原子保存且不发业务事件。 */
-        CHECK(device_coordinator_push_sample(
-                  &coordinator,
-                  &sample,
-                  true,
-                  0U,
-                  &effects) == DEVICE_COORDINATOR_OK);
-        /* 准备点没有 BLE Event。 */
-        CHECK((effects.flags & DEVICE_EFFECT_BLE_EVENT) == 0U);
-        /* 推进一个 25 Hz 周期。 */
-        time_ms += MOTION_PHASE_SAMPLE_PERIOD_MS;
-    }
-    /* 在锁类前缓存两个完整动作周期。 */
+    /* 在锁类前缓存两个完整手腕往返周期。 */
     for (uint8_t repetition = 0U; repetition < 2U; ++repetition) {
-        /* 当前周期逐点写入三个加速度轴。 */
-        for (uint8_t point = 0U; point < 20U; ++point) {
-            /* 先构造零角速度、Z 小幅反相的六轴点。 */
+        /* 每个自然周期固定 30 点，即 1.2 秒。 */
+        for (uint8_t point = 0U; point < 30U; ++point) {
+            /* 默认保持低幅主向运动，避免过渡段被解释为新端点。 */
+            float gyro_x_dps = 12.0F;
+            /* 周期开头三点形成手臂上行主向端点。 */
+            if (point < 3U) {
+                /* 两个周期使用轻微不同幅度，验证回放不依赖完全标准动作。 */
+                gyro_x_dps = 85.0F + (float)repetition * 5.0F;
+            } else if ((point >= 10U) && (point < 13U)) {
+                /* 中段三点形成手臂下行回向端点。 */
+                gyro_x_dps = -90.0F + (float)repetition * 4.0F;
+            } else if ((point >= 13U) && (point < 25U)) {
+                /* 回向过渡保持低幅负值，避免重复端点。 */
+                gyro_x_dps = -12.0F;
+            } else if ((point >= 25U) && (point < 28U)) {
+                /* 返回主向端点，闭合一次完整开合跳。 */
+                gyro_x_dps = 88.0F - (float)repetition * 3.0F;
+            }
+            /* 加速度保持约 1 g，证明计数来自手腕完整周期，不依赖落地冲击。 */
             motion_phase_sample_t sample = make_sample(
                 time_ms,
-                0.0F,
-                -cycle[point] * 0.15F);
-            /* X 轴保存主周期，单位 g。 */
-            sample.axis[3] = cycle[point];
-            /* Y 轴保存 0.9 倍同相周期，单位 g。 */
-            sample.axis[4] = cycle[point] * 0.9F;
+                gyro_x_dps,
+                1.05F);
             /* 准备态只缓存，不允许提前产生 Event effect。 */
             CHECK(device_coordinator_push_sample(
                       &coordinator,
@@ -554,29 +534,6 @@ static int test_prelock_replay_events_reach_effects(void)
             /* 推进一个采样周期。 */
             time_ms += MOTION_PHASE_SAMPLE_PERIOD_MS;
         }
-    }
-    /* 追加十个上升点，使滤波延迟确认第二个波谷。 */
-    for (uint8_t point = 0U; point < 10U; ++point) {
-        /* 构造下一周期前半段。 */
-        motion_phase_sample_t sample = make_sample(
-            time_ms,
-            0.0F,
-            -cycle[point] * 0.15F);
-        /* 写入 X 轴主周期。 */
-        sample.axis[3] = cycle[point];
-        /* 写入 Y 轴同相周期。 */
-        sample.axis[4] = cycle[point] * 0.9F;
-        /* 尾部点进入准备缓存。 */
-        CHECK(device_coordinator_push_sample(
-                  &coordinator,
-                  &sample,
-                  true,
-                  0U,
-                  &effects) == DEVICE_COORDINATOR_OK);
-        /* 锁类前仍不发布。 */
-        CHECK((effects.flags & DEVICE_EFFECT_BLE_EVENT) == 0U);
-        /* 推进时间。 */
-        time_ms += MOTION_PHASE_SAMPLE_PERIOD_MS;
     }
 
     /* 构造开合跳高置信 logits。 */
@@ -631,27 +588,26 @@ static int test_low_battery_start_gate(void)
     CHECK(initialize_ready(&coordinator, 50U, 0ULL) == 0);
     /* 保存 effect。 */
     device_effects_t effects;
-    /* 先下降到 15% 验证低电提醒。 */
+    /* 先下降到 15% 验证低电图标与 UI 快照。 */
     CHECK(device_coordinator_update_battery(
               &coordinator,
               15U,
               false,
               5ULL,
               &effects) == DEVICE_COORDINATOR_OK);
-    /* 15% 第一次进入产生两次 40 ms 低电振动。 */
-    CHECK((effects.haptic_count == 1U) &&
-          (effects.haptics[0].reason == FITNESS_HAPTIC_REASON_LOW_BATTERY) &&
-          (effects.haptics[0].on_ms == 40U) &&
-          (effects.haptics[0].repeat_count == 2U));
-    /* 继续下降到 14% 不得重复提醒。 */
+    /* 15% 必须立即更新 UI 中的真实电量。 */
+    CHECK(((effects.flags & DEVICE_EFFECT_UI_RENDER) != 0U) &&
+          (effects.ui.view.battery_percent == 15U));
+    /* 继续下降到 14% 仍应更新常驻电池图标。 */
     CHECK(device_coordinator_update_battery(
               &coordinator,
               14U,
               false,
               6ULL,
               &effects) == DEVICE_COORDINATOR_OK);
-    /* 同一低电区间只提醒一次。 */
-    CHECK((effects.flags & DEVICE_EFFECT_HAPTIC) == 0U);
+    /* 第二次更新同样只产生 UI/BLE/电源事实，不存在马达 effect。 */
+    CHECK(((effects.flags & DEVICE_EFFECT_UI_RENDER) != 0U) &&
+          (effects.ui.view.battery_percent == 14U));
     /* 把电量更新到 8% 且未充电。 */
     CHECK(device_coordinator_update_battery(
               &coordinator,
@@ -703,12 +659,12 @@ static int test_critical_battery_persist_then_shutdown(void)
     CHECK(start_and_lock(&coordinator, FITNESS_ACTION_SQUAT, 10ULL, &effects) == 0);
     /* 生成一次事件，使临界摘要含幂等键。 */
     CHECK(emit_one_squat_rep(&coordinator, 1010ULL, &effects) == 0);
-    /* 更新到 5% 且未充电。 */
+    /* 完整周期最后保持点位于 1810 ms；40 ms 后更新到 5%，保持全局时间严格递增。 */
     CHECK(device_coordinator_update_battery(
               &coordinator,
               5U,
               false,
-              1800ULL,
+              1850ULL,
               &effects) == DEVICE_COORDINATOR_OK);
     /* 必须同时产生摘要和“落盘后关机”指令。 */
     CHECK((effects.flags & (DEVICE_EFFECT_SUMMARY_WRITE |
@@ -832,8 +788,8 @@ static int emit_walk_peak(
     return 0;
 }
 
-/* 验证 walk/trot 仅每 10 步一次 30 ms 振动，sit 整秒事件不振动。 */
-static int test_step_batch_and_sit_haptics(void)
+/* 验证 walk 逐步累计和 sit 整秒事件都只产生权威指标。 */
+static int test_step_and_sit_metrics(void)
 {
     /* 初始化 walk 设备。 */
     device_coordinator_t walk;
@@ -851,17 +807,10 @@ static int test_step_batch_and_sit_haptics(void)
         CHECK(emit_walk_peak(&walk, step_base_ms, &effects) == 0);
         /* 检查权威总步数。 */
         CHECK(effects.metric_event.total_value == (uint64_t)(step_index + 1U));
-        /* 前 9 步不振动。 */
-        if (step_index < 9U) {
-            /* 检查振动 effect 缺失。 */
-            CHECK((effects.flags & DEVICE_EFFECT_HAPTIC) == 0U);
-        }
     }
-    /* 第 10 步产生一次 30 ms 振动。 */
-    CHECK((effects.haptic_count == 1U) &&
-          (effects.haptics[0].reason == FITNESS_HAPTIC_REASON_STEP_BATCH) &&
-          (effects.haptics[0].on_ms == 30U) &&
-          (effects.haptics[0].repeat_count == 1U));
+    /* 第 10 步必须保持连续事件序号和权威总步数。 */
+    CHECK((effects.metric_event.event_seq == 10U) &&
+          (effects.metric_event.total_value == 10ULL));
 
     /* 初始化 sit 设备。 */
     device_coordinator_t sit;
@@ -875,14 +824,12 @@ static int test_step_batch_and_sit_haptics(void)
     for (uint64_t time_ms = 1010ULL; time_ms <= 2610ULL; time_ms += 40ULL) {
         /* 提交静态 1 g 样本。 */
         CHECK(push_point(&sit, time_ms, 0.0F, 1.0F, &effects) == 0);
-        /* 仅 MetricEvent 时检查 sit 振动规则。 */
+        /* 仅 MetricEvent 时检查 sit 持续时间规则。 */
         if ((effects.flags & DEVICE_EFFECT_BLE_EVENT) != 0U) {
             /* 标记已看到持续时间事件。 */
             saw_sit_event = true;
             /* 必须是毫秒持续指标。 */
             CHECK(effects.metric_event.metric_kind == FITNESS_METRIC_DURATION_MS);
-            /* sit 事件不允许振动。 */
-            CHECK((effects.flags & DEVICE_EFFECT_HAPTIC) == 0U);
         }
     }
     /* 至少 1 s 后必须产生事件。 */
@@ -1114,12 +1061,12 @@ static int test_goal_progress_projection(void)
     CHECK(emit_one_squat_rep(&coordinator, 1010ULL, &effects) == 0);
     /* 一次除以两次等于 50%。 */
     CHECK(effects.live_state.goal_percent == 50U);
-    /* 生成第二次数；起点承接上一周期末点后 40 ms。 */
-    CHECK(emit_one_squat_rep(&coordinator, 1810ULL, &effects) == 0);
+    /* 生成第二次数；第一周期结束于 1810 ms，新周期从 1850 ms 开始。 */
+    CHECK(emit_one_squat_rep(&coordinator, 1850ULL, &effects) == 0);
     /* 达到目标后饱和 100%。 */
     CHECK(effects.live_state.goal_percent == 100U);
-    /* 继续第三次也不能超过 100；仍保持严格 25 Hz 连续样本。 */
-    CHECK(emit_one_squat_rep(&coordinator, 2610ULL, &effects) == 0);
+    /* 继续第三次也不能超过 100；第二周期结束于 2650 ms，新周期从 2690 ms 开始。 */
+    CHECK(emit_one_squat_rep(&coordinator, 2690ULL, &effects) == 0);
     /* 校验饱和值。 */
     CHECK(effects.live_state.goal_percent == 100U);
     /* 设置 10 秒目标。 */
@@ -1251,8 +1198,8 @@ int main(void)
     CHECK(test_critical_battery_persist_then_shutdown() == 0);
     /* 验证暂停排除热量。 */
     CHECK(test_pause_excludes_calories() == 0);
-    /* 验证步批振动和 sit 无振动。 */
-    CHECK(test_step_batch_and_sit_haptics() == 0);
+    /* 验证 walk 逐步累计和 sit 持续时间。 */
+    CHECK(test_step_and_sit_metrics() == 0);
     /* 验证 UI/BLE 映射和连接状态。 */
     CHECK(test_control_mapping_and_ble_state() == 0);
     /* 验证错误输入事务性。 */

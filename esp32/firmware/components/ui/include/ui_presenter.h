@@ -44,12 +44,8 @@ typedef enum {
     UI_COMMAND_BACK,
     /* 设置页按 15/35/60/100% 循环亮度并持久化。 */
     UI_COMMAND_CYCLE_BRIGHTNESS,
-    /* 设置页切换计次振动开关并持久化。 */
-    UI_COMMAND_TOGGLE_HAPTIC,
     /* 诊断页按 15/30/60/120 秒循环熄屏门槛并持久化。 */
     UI_COMMAND_CYCLE_TIMEOUT,
-    /* 诊断页触发一次 30 ms 马达自检；不改变次数、热量或会话。 */
-    UI_COMMAND_TEST_HAPTIC,
     /* 设置页删除全部 BLE 绑定并断开当前电脑；由 main 应用任务执行本地事务。 */
     UI_COMMAND_FORGET_COMPUTER,
     /* 熄屏页收到任意有效触摸后请求恢复进入熄屏前页面。 */

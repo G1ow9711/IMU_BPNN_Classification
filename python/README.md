@@ -9,6 +9,8 @@
 - `verify_dual_m0_c.py`：编译实际 C99 头并逐值核对 297 项特征、两个 M0、融合、动作段累计和类别索引；
 - `test_dual_m0_export.py`：双模型工件、维度、哈希、生成 C 合同和异常输入测试；
 - `evaluate_fixed_ensemble.py`：固定双 M0 融合、动作段累计和最终测试/外部留出复现入口，不提供测试集调参开关；
+- `evaluate_validation_generalization.py`：只读取冻结验证文件，对双 M0 执行干净、右腕旋转、动态幅度和持续时间压力评估；禁止构建测试窗口；
+- `evaluate_validation_candidate_grid.py`：同一批冻结特征只构建一次，比较历史/robust 基础 M0 与历史/robust 掩码 M0 的四种组合；先要求干净验证的生产锁类准确率和最弱类别召回均不退化，再按六条件最弱类别、最差整体、平均整体、强制锁定数和确认窗数选模；
 - `test_train_export.py`：核心行为和导出合同测试；
 - `prepare_finals_dataset.py`：按清单校验并准备决赛新增会话；
 - `finals_jumping_squat_manifest.json`：新增会话哈希、行数和训练/盲测角色；
@@ -34,6 +36,18 @@
 ## 训练、隔离与消融接口
 
 `--validation-only` 用于测试隔离的消融训练：保留逐 epoch 日志和验证指标，但不构建测试窗口、不输出测试指标、不触发 ESP32 头文件导出。验证结果保存在 `validation_report.json`。
+
+`--augmentation-profile baseline` 是历史复现默认值，保持六轴同步 ±35° 旋转、轻微局部时间扭曲和传感器噪声。`--augmentation-profile robust` 用于跨人右腕泛化候选，增加三类物理一致扰动：
+
+- 六轴同步刚体旋转扩大到 ±60°，只覆盖右腕合理佩戴角度，不引入左右手镜像；
+- 动态幅度缩放为 `0.70～1.30`，陀螺整体缩放，加速度只缩放相对窗口均值的动态分量，保持平均重力；
+- 固定 62 点和 25 Hz 合同不变，在窗内执行 `0.80～1.25` 持续时间缩放，并加入最大 0.05 的局部非匀速扭曲。
+
+robust 候选必须先用 `evaluate_validation_generalization.py` 审计单一组合，或用 `evaluate_validation_candidate_grid.py` 对预声明四组合执行冻结选择。四组合选择首先要求 clean 生产锁类准确率和 clean 最弱类别文件召回均不低于历史双 M0；合格候选再按六种条件的最弱类别、最差整体和平均整体排序。外部真板 CSV 只在候选冻结后运行一次，不参与增强范围、模型选择或阈值调整。
+
+`--suppress-absolute-axis-stats` 是跨腕角结构消融开关：训练输入把索引 `0:48` 的 `gx/gy/gz/ax/ay/az` 单轴统计固定为零，并在恢复最佳 checkpoint 后把首层对应权重永久剪为零。推理因此只依赖其余 249 项模长、重力相对、周期、频谱、冲击和换向特征；ESP32 不增加运行时掩码、RAM 或分支。该开关默认关闭，不能与 `--primary-artifact-dir` 组合，必须从头训练并重新通过冻结验证。
+
+`evaluate_validation_tri_m0.py` 只比较三个预声明方案：robust 基础 85% + 历史掩码 15%、不变轴基础 85% + 历史掩码 15%、以及 robust/不变轴各 42.5% + 历史掩码 15%。完全同分继续保留双 M0，禁止为外部单次会话搜索融合权重。
 
 `--extra-train-dir` 中的文件只追加到原文件级训练划分；`--external-holdout-dir` 仅在非验证模式、验证候选已经选定后加载。外部盲测结果单独写入 `external_holdout`，不参与 11 类 ESP32 发布门槛。
 

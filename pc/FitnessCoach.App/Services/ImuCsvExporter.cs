@@ -48,7 +48,7 @@ public sealed record ImuExportSample(
     double AyG,
     // 加速度 Z 轴物理量，单位 g。
     double AzG,
-    // 设备质量位原值；振动污染、丢样或重采样异常均不得在导出时丢失。
+    // 设备质量位原值；旧固件替代样本、丢样或重采样异常均不得在导出时丢失。
     ushort QualityFlags,
     // 当前样本所属设备持久化会话序号；零表示尚未收到权威状态。
     uint SessionSequence,

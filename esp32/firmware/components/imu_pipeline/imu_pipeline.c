@@ -86,20 +86,6 @@ static void imu_pipeline_reset_contiguity(
     pipeline->stats.resampler_resets += 1U;
 }
 
-/* 返回时间戳是否落入带前后保护的马达污染区间。 */
-static bool imu_pipeline_timestamp_is_haptic(
-    const imu_pipeline_t *pipeline,
-    uint64_t timestamp_us)
-{
-    /* 区间未注册时任何点都不受马达标记。 */
-    if (!pipeline->haptic_interval_valid) {
-        return false;
-    }
-    /* 使用闭区间，端点采样也视为可能受机械振动污染。 */
-    return (timestamp_us >= pipeline->haptic_start_us) &&
-           (timestamp_us <= pipeline->haptic_end_us);
-}
-
 /* 把任意时刻向上对齐到 40,000 微秒网格；溢出时返回 false。 */
 static bool imu_pipeline_ceil_output_grid(uint64_t timestamp_us, uint64_t *aligned_us)
 {
@@ -367,10 +353,6 @@ static imu_pipeline_result_t imu_pipeline_pump(imu_pipeline_t *pipeline)
         output.axes[IMU_AXIS_AZ] = accel_xyz[2];
         /* 合并两路端点和此前间断质量。 */
         output.quality_flags = accel_quality | gyro_quality | pipeline->pending_quality_flags;
-        /* 目标时刻落在马达区间时显式增加污染位。 */
-        if (imu_pipeline_timestamp_is_haptic(pipeline, target_us)) {
-            output.quality_flags |= IMU_QUALITY_HAPTIC_CONTAMINATED;
-        }
         /* 间断质量只附着新连续段首点，环形窗仍会把它传播到相应窗口。 */
         pipeline->pending_quality_flags = IMU_QUALITY_OK;
         /* 累加输出点统计。 */
@@ -467,11 +449,13 @@ static imu_pipeline_result_t imu_pipeline_push_source_raw(
     }
     /* 计算与上一原始帧间隔；首帧没有可比较间隔。 */
     uint64_t delta_us = 0ULL;
+    /* 保存当前原始点最终质量；可恢复短缺口只在该点追加源缺口位。 */
+    uint32_t point_quality_flags = sample->quality_flags;
     /* 有上一帧时执行丢样检测。 */
     if (stream->filter_initialized) {
         /* 单调检查已通过，减法不会下溢。 */
         delta_us = sample->timestamp_us - stream->last_raw_timestamp_us;
-        /* 超过 1.5 个名义周期视为至少丢一帧，避免跨缺口线性插值。 */
+        /* 超过 1.5 个名义周期视为至少丢一帧，先保留统计和质量事实。 */
         if (delta_us > (expected_period_us + expected_period_us / 2ULL)) {
             /* 以最接近的周期数估算缺失数量。 */
             const uint64_t interval_count =
@@ -488,12 +472,20 @@ static imu_pipeline_result_t imu_pipeline_push_source_raw(
             } else {
                 pipeline->stats.gyro_raw_dropped += missing_count;
             }
-            /* 当前流从本帧重新启动滤波和插值。 */
-            imu_stream_reset(stream);
-            /* 清空旧 62 点连续窗口，并把间断质量传播到新段。 */
-            imu_pipeline_reset_contiguity(pipeline, gap_flag);
-            /* 重置后本帧按首帧处理，不使用跨缺口 delta。 */
-            delta_us = 0ULL;
+            /* 当前点携带源缺口位，CSV、窗口和统计均可审计实际漏帧。 */
+            point_quality_flags |= gap_flag;
+            /*
+             * 只有缺口超过 25 Hz 的 40 ms 输出周期才失去安全插值边界。
+             * 16～40 ms 小缺口继续用真实 delta 更新 RC 低通并线性插值，不清空模型历史。
+             */
+            if (delta_us > IMU_PIPELINE_RAW_GAP_RESET_THRESHOLD_US) {
+                /* 当前流从本帧重新启动滤波和插值。 */
+                imu_stream_reset(stream);
+                /* 清空旧 62 点连续窗口，并把间断质量传播到新段。 */
+                imu_pipeline_reset_contiguity(pipeline, gap_flag);
+                /* 重置后本帧按首帧处理，不使用跨长缺口 delta。 */
+                delta_us = 0ULL;
+            }
         }
     }
     /* 把原始整数换算为三轴物理量。 */
@@ -533,12 +525,8 @@ static imu_pipeline_result_t imu_pipeline_push_source_raw(
     point.timestamp_us = sample->timestamp_us;
     /* 复制三轴滤波值。 */
     (void)memcpy(point.xyz, stream->filtered_xyz, sizeof(point.xyz));
-    /* 继承驱动质量位。 */
-    point.quality_flags = sample->quality_flags;
-    /* 当前原始时刻落入马达保护区时增加污染标志。 */
-    if (imu_pipeline_timestamp_is_haptic(pipeline, sample->timestamp_us)) {
-        point.quality_flags |= IMU_QUALITY_HAPTIC_CONTAMINATED;
-    }
+    /* 继承驱动质量位及本入口检测到的可恢复原始缺口位。 */
+    point.quality_flags = point_quality_flags;
     /* 把低通点放入异步时间队列。 */
     imu_stream_enqueue(pipeline, stream, source, &point);
     /* 两路队列可能已共同覆盖多个目标时刻，立即尽量输出。 */
@@ -596,12 +584,6 @@ void imu_pipeline_reset_session(imu_pipeline_t *pipeline)
     pipeline->points_since_last_window = 0U;
     /* 新会话窗口序号从零开始。 */
     pipeline->next_window_sequence = 0U;
-    /* 清除上一会话马达区间。 */
-    pipeline->haptic_interval_valid = false;
-    /* 清除马达起点。 */
-    pipeline->haptic_start_us = 0ULL;
-    /* 清除马达终点。 */
-    pipeline->haptic_end_us = 0ULL;
 }
 
 /* 提交加速度 QMI 原始点。 */
@@ -652,30 +634,6 @@ imu_pipeline_result_t imu_pipeline_report_source_drop(
     }
     /* 未知数据源拒绝。 */
     return IMU_PIPELINE_ERR_ARGUMENT;
-}
-
-/* 注册带 20 ms 前后保护的马达污染区间。 */
-imu_pipeline_result_t imu_pipeline_mark_haptic_interval(
-    imu_pipeline_t *pipeline,
-    uint64_t start_timestamp_us,
-    uint64_t end_timestamp_us)
-{
-    /* 流水线必须初始化，结束时刻不得早于开始时刻。 */
-    if ((pipeline == NULL) || !pipeline->initialized ||
-        (end_timestamp_us < start_timestamp_us)) {
-        return IMU_PIPELINE_ERR_ARGUMENT;
-    }
-    /* 起点不足 20 ms 时饱和到零，避免无符号下溢。 */
-    pipeline->haptic_start_us = start_timestamp_us > IMU_PIPELINE_HAPTIC_GUARD_US ?
-        start_timestamp_us - IMU_PIPELINE_HAPTIC_GUARD_US : 0ULL;
-    /* 终点加保护前检查 uint64 溢出。 */
-    pipeline->haptic_end_us = end_timestamp_us >
-        (UINT64_MAX - IMU_PIPELINE_HAPTIC_GUARD_US) ?
-        UINT64_MAX : end_timestamp_us + IMU_PIPELINE_HAPTIC_GUARD_US;
-    /* 标记区间有效。 */
-    pipeline->haptic_interval_valid = true;
-    /* 返回成功。 */
-    return IMU_PIPELINE_OK;
 }
 
 /* 返回累计统计只读指针。 */

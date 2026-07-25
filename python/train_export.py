@@ -88,6 +88,18 @@ PATIENCE = 45
 DROPOUT = 0.10
 AUGMENT_TIMES = 2
 MAX_ROTATION_DEGREES = 35.0
+# 两个增强档固定为历史复现与跨人鲁棒训练；命令行只允许从该元组选择。
+AUGMENTATION_PROFILES = ("baseline", "robust")
+# 鲁棒档把右腕佩戴姿态范围扩展到每轴 ±60°，但不做左右手镜像。
+ROBUST_MAX_ROTATION_DEGREES = 60.0
+# 鲁棒档动态幅度下限为 70%，覆盖动作幅度较小、疲劳或力量差异。
+ROBUST_AMPLITUDE_SCALE_MIN = 0.70
+# 鲁棒档动态幅度上限为 130%，覆盖动作幅度较大或冲击较强用户。
+ROBUST_AMPLITUDE_SCALE_MAX = 1.30
+# 鲁棒档动作历时下限为原动作 80%，表示较快但仍非爆发式节奏。
+ROBUST_DURATION_SCALE_MIN = 0.80
+# 鲁棒档动作历时上限为原动作 125%，表示较慢且可控的健身节奏。
+ROBUST_DURATION_SCALE_MAX = 1.25
 EXPORT_WHEN_BELOW_TARGET = False
 SUPCON_WEIGHT = 0.05
 HARD_PAIR_WEIGHT = 0.25
@@ -139,6 +151,10 @@ IMPACT_DISTRIBUTION_FEATURES = [
 NORMALIZED_PHASE_MODEL_START = 184
 # 归一化四阶段组包含 4 个信号×4 阶段×3 统计量，共 48 维，半开区间终点为 232。
 NORMALIZED_PHASE_MODEL_END = 232
+# 绝对轴统计从 gx 开始，覆盖 gx、gy、gz、ax、ay、az 六轴各 8 项统计量。
+ABSOLUTE_AXIS_MODEL_START = 0
+# 半开区间终点 48 之后均为模长、重力相对分解、周期、频谱或冲击特征。
+ABSOLUTE_AXIS_MODEL_END = 48
 WEAK_CLASS_FEATURE_NAMES = [
     "acc_delta_mag_spectral_mid_band_ratio",
     "acc_vertical_spectral_high_band_ratio",
@@ -2258,16 +2274,112 @@ def time_warp_window(
     return warped
 
 
-def augment_window(window: np.ndarray, rng: np.random.Generator) -> np.ndarray:
-    max_angle = math.radians(MAX_ROTATION_DEGREES)
+def scale_imu_dynamic_amplitude(window: np.ndarray, scale: float) -> np.ndarray:
+    """保持平均重力并缩放六轴动态分量；输入输出均为 `[时间点,6]`。"""
+    # data 转成 float32 视图，通道顺序固定 gx、gy、gz、ax、ay、az。
+    data = np.asarray(window, dtype=np.float32)
+    # 训练窗口必须是非空二维六轴矩阵，防止平均重力对空数组产生 NaN。
+    if data.ndim != 2 or data.shape[1] != 6 or len(data) == 0:
+        # 精确报告实际形状，调用方不得静默修补错误输入。
+        raise ValueError(f"Expected non-empty [N,6] IMU window, got {data.shape}")
+    # scale 必须为正有限值；零或负数不代表合理人体动作幅度。
+    if not math.isfinite(scale) or scale <= 0.0:
+        # 拒绝 NaN、Inf、零和负比例。
+        raise ValueError("Dynamic amplitude scale must be positive and finite")
+    # scaled 建立独立副本，禁止增强过程原地修改训练原窗口。
+    scaled = data.copy()
+    # 三轴角速度本身就是动态量，统一乘比例，单位仍为 deg/s。
+    scaled[:, 0:3] *= np.float32(scale)
+    # gravity 保存整窗三轴平均加速度，形状 `[1,3]`、单位 g，近似当前右腕重力方向。
+    gravity = np.mean(data[:, 3:6], axis=0, keepdims=True, dtype=np.float64).astype(np.float32)
+    # 只缩放相对平均重力的动态加速度，禁止把静态 1 g 错误缩成 0.7 g 或 1.3 g。
+    scaled[:, 3:6] = gravity + ((data[:, 3:6] - gravity) * np.float32(scale))
+    # 返回保持 `[N,6]`、float32 和原物理单位的窗口。
+    return scaled
+
+
+def resample_imu_duration_fixed_window(
+    window: np.ndarray,
+    duration_scale: float,
+) -> np.ndarray:
+    """在固定点数内改变动作历时；大于 1 变慢，小于 1 变快。"""
+    # data 转成 float32，形状必须为 `[时间点,6]`。
+    data = np.asarray(window, dtype=np.float32)
+    # 至少两个点才能执行一维线性插值，六轴宽度必须保持部署合同。
+    if data.ndim != 2 or data.shape[1] != 6 or len(data) < 2:
+        # 错误输入不得退化成不可审计的复制。
+        raise ValueError(f"Expected [N>=2,6] IMU window, got {data.shape}")
+    # 动作历时比例必须为正有限值。
+    if not math.isfinite(duration_scale) or duration_scale <= 0.0:
+        # 拒绝无物理意义的时间比例。
+        raise ValueError("Duration scale must be positive and finite")
+    # timeline 是固定输出窗口的归一化时间轴，点数与输入完全一致。
+    timeline = np.linspace(0.0, 1.0, len(data), dtype=np.float64)
+    # source_timeline 围绕窗口中心缩放；>1 只遍历中间部分形成较慢动作，<1 提前到达边界。
+    source_timeline = 0.5 + ((timeline - 0.5) / float(duration_scale))
+    # 超出原窗口的较快动作使用端点保持，避免周期外推制造非物理振铃。
+    source_timeline = np.clip(source_timeline, 0.0, 1.0)
+    # resampled 保存固定 `[N,6]` float32 输出。
+    resampled = np.empty_like(data)
+    # 六轴独立线性插值，禁止不同物理通道互相混合。
+    for axis in range(6):
+        # 当前通道按统一时间映射插值并显式恢复 float32。
+        resampled[:, axis] = np.interp(source_timeline, timeline, data[:, axis]).astype(np.float32)
+    # 返回点数、通道顺序和单位均不变的速度扰动窗口。
+    return resampled
+
+
+def augment_window(
+    window: np.ndarray,
+    rng: np.random.Generator,
+    augmentation_profile: str = "baseline",
+) -> np.ndarray:
+    """按历史或跨人鲁棒档增强一个 `[N,6]` 六轴窗口。"""
+    # 增强档必须来自固定枚举，避免拼写错误静默落到另一套训练分布。
+    if augmentation_profile not in AUGMENTATION_PROFILES:
+        # 报告未知档位及合法选择。
+        raise ValueError(f"Unknown augmentation profile: {augmentation_profile}")
+    # baseline 完全保留历史 ±35°；robust 扩展到 ±60°右腕旋转。
+    max_rotation_degrees = (
+        MAX_ROTATION_DEGREES
+        if augmentation_profile == "baseline"
+        else ROBUST_MAX_ROTATION_DEGREES
+    )
+    # 把角度上限从度转换为弧度供三轴欧拉旋转。
+    max_angle = math.radians(max_rotation_degrees)
+    # 三轴独立采样同一上限范围，随机源由文件级训练种子固定。
     angles = rng.uniform(-max_angle, max_angle, size=3)
+    # 构造右手正交旋转；不包含左右手镜像或非刚性缩放。
     rotation = euler_rotation_matrix(float(angles[0]), float(angles[1]), float(angles[2]))
+    # 同一旋转同时作用到陀螺与加速度三轴，保持坐标合同。
     augmented = rotate_imu_window(window, rotation)
-    augmented = time_warp_window(augmented, rng, max_displacement=0.03)
+    # robust 档额外采样动作历时和动态幅度，显式覆盖跨人自然差异。
+    if augmentation_profile == "robust":
+        # duration_scale 位于 [0.80,1.25]，固定种子保证 A/B 可复现。
+        duration_scale = float(
+            rng.uniform(ROBUST_DURATION_SCALE_MIN, ROBUST_DURATION_SCALE_MAX)
+        )
+        # 固定窗口内改变动作速度，不改变模型窗口点数和采样率合同。
+        augmented = resample_imu_duration_fixed_window(augmented, duration_scale)
+        # amplitude_scale 位于 [0.70,1.30]，覆盖幅度与力量差异。
+        amplitude_scale = float(
+            rng.uniform(ROBUST_AMPLITUDE_SCALE_MIN, ROBUST_AMPLITUDE_SCALE_MAX)
+        )
+        # 保持平均重力，只缩放动态角速度和动态加速度。
+        augmented = scale_imu_dynamic_amplitude(augmented, amplitude_scale)
+    # baseline 使用历史 0.03 局部扭曲；robust 扩到 0.05 但仍保持端点和单调时间。
+    warp_displacement = 0.03 if augmentation_profile == "baseline" else 0.05
+    # 施加平滑局部速度变化，模拟同一动作内部非匀速。
+    augmented = time_warp_window(augmented, rng, max_displacement=warp_displacement)
+    # 陀螺噪声标准差 0.25 deg/s，远低于动作幅值且与历史训练一致。
     gyro_noise = rng.normal(0.0, 0.25, size=augmented[:, 0:3].shape).astype(np.float32)
+    # 加速度噪声标准差 0.003 g，模拟 QMI8658 小扰动且不改变动作结构。
     acc_noise = rng.normal(0.0, 0.003, size=augmented[:, 3:6].shape).astype(np.float32)
+    # 三轴陀螺加入独立小噪声，单位仍为 deg/s。
     augmented[:, 0:3] += gyro_noise
+    # 三轴加速度加入独立小噪声，单位仍为 g。
     augmented[:, 3:6] += acc_noise
+    # 返回增强后的固定六轴窗口。
     return augmented
 
 
@@ -2280,6 +2392,7 @@ def build_samples(
     augment: bool,
     rng: np.random.Generator,
     progress_label: Optional[str] = None,
+    augmentation_profile: str = "baseline",
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, int]]:
     features: List[np.ndarray] = []
     labels: List[int] = []
@@ -2332,7 +2445,12 @@ def build_samples(
             record_kept += 1
             if augment:
                 for _ in range(AUGMENT_TIMES):
-                    features.append(extract_features(augment_window(window, rng)))
+                    # 按显式增强档生成跨姿态/幅度/速度窗口并提取同一 297 维特征。
+                    features.append(
+                        extract_features(
+                            augment_window(window, rng, augmentation_profile)
+                        )
+                    )
                     labels.append(record.label_idx)
                     file_ids.append(file_id)
                     skipped["kept_windows"] += 1
@@ -2392,8 +2510,9 @@ def standardize(
 def apply_model_feature_mask(
     standardized_features: np.ndarray,
     suppress_normalized_phase: bool,
+    suppress_absolute_axis_stats: bool = False,
 ) -> np.ndarray:
-    """按候选配置把冗余归一化阶段组替换为训练均值对应的零标准分。"""
+    """按候选配置把指定输入组替换为训练均值对应的零标准分。"""
     # values 必须是形状 [样本数,297] 的无量纲标准化特征。
     values = np.asarray(standardized_features, dtype=np.float32)
     # 二维和固定特征维度是多分支切片及 ESP32 模型合同的前提。
@@ -2405,14 +2524,50 @@ def apply_model_feature_mask(
         )
     # masked 是独立副本，避免训练、验证和后续消融共享数组时产生隐式修改。
     masked = values.copy()
-    # 开关关闭时保持 Round29 基线输入完全不变。
-    if not suppress_normalized_phase:
+    # 两个开关均关闭时保持 Round29 基线输入完全不变。
+    if not suppress_normalized_phase and not suppress_absolute_axis_stats:
         # 返回副本，调用方可安全原地处理而不影响上游标准化数组。
         return masked
-    # 48 个归一化阶段标准分设为 0，等价于把原始特征替换为训练集均值。
-    masked[:, NORMALIZED_PHASE_MODEL_START:NORMALIZED_PHASE_MODEL_END] = 0.0
+    # 归一化阶段开关只影响索引 184:232，不改变其它物理组。
+    if suppress_normalized_phase:
+        # 48 个归一化阶段标准分设为 0，等价于把原始特征替换为训练集均值。
+        masked[:, NORMALIZED_PHASE_MODEL_START:NORMALIZED_PHASE_MODEL_END] = 0.0
+    # 绝对轴开关用于跨腕角候选，禁止模型依赖固定传感器 XYZ 姿态。
+    if suppress_absolute_axis_stats:
+        # 六轴各 8 项统计量共 48 维设为零，模长和重力相对特征保持原值。
+        masked[:, ABSOLUTE_AXIS_MODEL_START:ABSOLUTE_AXIS_MODEL_END] = 0.0
     # 返回形状不变的 [样本数,297] 输入，模型参数和分支边界无需改变。
     return masked
+
+
+def prune_absolute_axis_input_weights(model: nn.Module) -> None:
+    """把模型首层对应绝对 XYZ 统计的权重永久置零，推理端无需额外分支。"""
+    # flat BP 的首个 Linear 直接接收全部 297 维输入。
+    if isinstance(model, BPNet):
+        # input_layer 指向 [隐藏维度,297] 的首层权重矩阵。
+        input_layer = model.net[0]
+    # M0/M1 多分支的第一个分支接收索引 0:112，其中前 48 维为绝对轴统计。
+    elif isinstance(model, (MultiBranchBPNet, DeepNarrowMultiBranchBPNet)):
+        # input_layer 指向统计分支的 [分支输出维度,112] 首层矩阵。
+        input_layer = model.branches[0][0]
+    else:
+        # 未知模型结构无法证明列索引对应关系，必须停止而非静默输出错误工件。
+        raise TypeError(f"Unsupported model type for absolute-axis pruning: {type(model)!r}")
+    # 模型合同要求首层是 Linear，才能按输入列永久消除绝对轴依赖。
+    if not isinstance(input_layer, nn.Linear):
+        # 抛出明确结构错误，防止未来重构后掩码失效。
+        raise TypeError("Model input layer is not linear")
+    # 首层至少必须覆盖 48 个待删除输入列。
+    if input_layer.weight.shape[1] < ABSOLUTE_AXIS_MODEL_END:
+        # 报告实际列数便于定位旧特征或错误分支。
+        raise ValueError(
+            "Model input layer is too narrow for absolute-axis pruning: "
+            f"{input_layer.weight.shape[1]}"
+        )
+    # no_grad 防止该确定性部署转换进入训练计算图。
+    with torch.no_grad():
+        # 永久清零首层 0:48 列；后续任意原始输入在这些列上的贡献严格为零。
+        input_layer.weight[:, ABSOLUTE_AXIS_MODEL_START:ABSOLUTE_AXIS_MODEL_END] = 0.0
 
 
 def family_subset(
@@ -3051,6 +3206,122 @@ def load_primary_artifacts(
     return model, mean, std
 
 
+def load_primary_sampling_contract(
+    artifact_dir: Path,
+    expected_window_len: int,
+    expected_step_len: int,
+) -> Dict[str, object]:
+    """读取冻结主模型的数据划分、窗口过滤和输入掩码合同。"""
+    # artifact_dir 统一为 Path，后续配置和报告必须来自同一工件目录。
+    artifact_dir = Path(artifact_dir)
+    # config_path 必须与主模型标准化参数来自同一工件目录。
+    config_path = artifact_dir / "scaler_and_config.npz"
+    # 只允许无 pickle 的数值和 Unicode 数组，避免加载可执行对象。
+    with np.load(config_path, allow_pickle=False) as config:
+        # saved_window_len 是模型实际训练的输入点数，单位为点。
+        saved_window_len = int(np.asarray(config["window_len"]).reshape(-1)[0])
+        # saved_step_len 是离线训练窗口步长，单位为点；它决定验证窗口集合。
+        saved_step_len = int(np.asarray(config["step_len"]).reshape(-1)[0])
+        # rest_threshold 是冻结训练域的窗口活动分数下限，无量纲。
+        rest_threshold = float(np.asarray(config["rest_threshold"]).reshape(-1)[0])
+        # active_point_threshold 是逐点活动证据门，无量纲。
+        active_point_threshold = float(
+            np.asarray(config["active_point_threshold"]).reshape(-1)[0]
+        )
+        # 旧工件没有归一化阶段掩码字段时按历史默认 false 解释。
+        suppress_normalized_phase = bool(
+            np.asarray(config["suppress_normalized_phase"]).reshape(-1)[0]
+        ) if "suppress_normalized_phase" in config.files else False
+        # 旧工件没有绝对轴掩码字段时按历史默认 false 解释。
+        suppress_absolute_axis_stats = bool(
+            np.asarray(config["suppress_absolute_axis_stats"]).reshape(-1)[0]
+        ) if "suppress_absolute_axis_stats" in config.files else False
+    # validation_report_path 保存主模型选模时的数据划分随机种子和验证文件集合。
+    validation_report_path = artifact_dir / "validation_report.json"
+    # 旧工件缺少报告时保留调用方随机种子兼容路径，但不能伪造验证文件合同。
+    split_seed: Optional[int] = None
+    # validation_file_keys 使用“类别目录/文件名”表示验证身份，允许数据根目录迁移。
+    validation_file_keys: Tuple[str, ...] = ()
+    # 只有报告真实存在时才恢复文件级划分；解析失败应显式阻断候选训练。
+    if validation_report_path.is_file():
+        # report 仅解析 UTF-8 JSON 数据，不加载任何可执行对象。
+        report = json.loads(validation_report_path.read_text(encoding="utf-8"))
+        # split_seed 决定 sklearn 文件级分层切分，必须沿用主模型选模值。
+        split_seed = int(report["seed"])
+        # experiments 保存不同窗口实验；只选择与当前模型点数和步长均一致的一项。
+        experiments = list(report.get("all_experiments", []))
+        # matching_experiments 理论上只含主模型对应的一个窗口规格。
+        matching_experiments = [
+            experiment
+            for experiment in experiments
+            if int(experiment.get("window_len", -1)) == saved_window_len
+            and int(experiment.get("step_len", -1)) == saved_step_len
+        ]
+        # 找不到唯一实验时无法确认主模型验证身份，拒绝继续训练专家。
+        if len(matching_experiments) != 1:
+            # 错误包含匹配数量，便于发现旧报告缺字段或重复窗口工件。
+            raise ValueError(
+                "Primary artifact validation report must contain exactly one "
+                f"matching experiment, got {len(matching_experiments)}"
+            )
+        # validation_paths 是主模型选模时的文件级验证清单，不读取文件内容。
+        validation_paths = list(matching_experiments[0].get("val_files", []))
+        # 空验证清单不能证明专家与主模型使用同一验证域。
+        if not validation_paths:
+            # 明确拒绝缺失文件身份的报告，避免只对齐样本数量仍换了文件。
+            raise ValueError("Primary artifact validation file list is empty")
+        # 每个键只保留类别目录名和文件名，使相同数据集搬迁后仍可复现划分。
+        validation_file_keys = tuple(
+            sorted(
+                f"{Path(path).parent.name}/{Path(path).name}"
+                for path in validation_paths
+            )
+        )
+        # 重复键会让集合比较隐藏报告错误，必须在进入训练前拒绝。
+        if len(validation_file_keys) != len(set(validation_file_keys)):
+            # 验证文件身份必须一一对应，重复项表示报告损坏或目录冲突。
+            raise ValueError("Primary artifact validation file list contains duplicates")
+    # 窗口长度漂移会使同一权重读取不同时间范围，必须立即拒绝。
+    if saved_window_len != expected_window_len:
+        # 错误文本同时报告工件值和当前请求值，便于定位命令行错误。
+        raise ValueError(
+            f"Primary artifact window_len={saved_window_len} does not match "
+            f"requested window_len={expected_window_len}"
+        )
+    # 步长漂移会改变验证窗数量和动作段累计，不能伪装成专家收益。
+    if saved_step_len != expected_step_len:
+        # 明确拒绝不一致的验证采样合同。
+        raise ValueError(
+            f"Primary artifact step_len={saved_step_len} does not match "
+            f"requested step_len={expected_step_len}"
+        )
+    # 两个活动门必须是有限非负数；NaN、Inf 或负值会污染窗口集合。
+    if (not math.isfinite(rest_threshold)) or rest_threshold < 0.0:
+        # 非法静止门不能用于构建训练或验证样本。
+        raise ValueError("Primary artifact rest_threshold must be finite and nonnegative")
+    # 逐点门执行相同数值保护。
+    if (not math.isfinite(active_point_threshold)) or active_point_threshold < 0.0:
+        # 非法逐点门不能用于活动占比计算。
+        raise ValueError(
+            "Primary artifact active_point_threshold must be finite and nonnegative"
+        )
+    # 返回不可变语义字典；调用方只读这些值构建与主模型相同的样本集合。
+    return {
+        # 窗口活动分数门保持工件精度。
+        "rest_threshold": rest_threshold,
+        # 逐点活动门保持工件精度。
+        "active_point_threshold": active_point_threshold,
+        # 归一化阶段输入掩码必须沿用冻结模型合同。
+        "suppress_normalized_phase": suppress_normalized_phase,
+        # 绝对轴输入掩码必须沿用冻结模型合同。
+        "suppress_absolute_axis_stats": suppress_absolute_axis_stats,
+        # 划分随机种子为空仅表示兼容无报告旧工件；新工件必须恢复该值。
+        "split_seed": split_seed,
+        # 验证文件身份用于训练前逐项核对，不参与特征或标签计算。
+        "validation_file_keys": validation_file_keys,
+    }
+
+
 def train_one_experiment(
     window_seconds: float,
     records: Sequence[ImuRecord],
@@ -3071,17 +3342,84 @@ def train_one_experiment(
     supcon_weight: float = SUPCON_WEIGHT,
     dropout: float = DROPOUT,
     suppress_normalized_phase: bool = False,
+    suppress_absolute_axis_stats: bool = False,
+    augmentation_profile: str = "baseline",
 ) -> Dict[str, object]:
+    # window_len 和 step_len 是端侧窗口与离线滑窗的固定点数合同。
     window_len, step_len = window_lengths(window_seconds)
+    # 复用主模型时先读取冻结划分；新模型才直接使用调用方 seed。
+    primary_sampling_contract: Optional[Dict[str, object]] = (
+        load_primary_sampling_contract(
+            primary_artifact_dir,
+            expected_window_len=window_len,
+            expected_step_len=step_len,
+        )
+        if primary_artifact_dir is not None
+        else None
+    )
+    # split_seed 只控制文件级训练/验证/测试身份，不改变专家初始化随机流。
+    split_seed = (
+        int(primary_sampling_contract["split_seed"])
+        if primary_sampling_contract is not None
+        and primary_sampling_contract["split_seed"] is not None
+        else seed
+    )
+    # 按冻结或新训练随机种子执行一次文件级分层切分。
     train_records, val_records, test_records = split_records_for_experiment(
         records,
         extra_train_records,
-        seed,
+        split_seed,
     )
-    rest_threshold = estimate_rest_threshold(train_records, window_len, step_len)
-    active_point_threshold = estimate_active_point_threshold(
-        train_records, window_len, step_len
-    )
+    # 新工件存在验证清单时逐项确认文件身份，禁止候选偷换验证集。
+    if primary_sampling_contract is not None:
+        # expected_validation_keys 从主模型报告恢复，路径根目录变化不影响比较。
+        expected_validation_keys = tuple(
+            primary_sampling_contract["validation_file_keys"]
+        )
+        # 空元组仅兼容没有 validation_report.json 的旧工件。
+        if expected_validation_keys:
+            # actual_validation_keys 使用当前扫描记录生成相同“类别/文件名”键。
+            actual_validation_keys = tuple(
+                sorted(
+                    f"{record.path.parent.name}/{record.path.name}"
+                    for record in val_records
+                )
+            )
+            # 任一文件不同都会改变验证分布和窗口数量，必须立即停止训练。
+            if actual_validation_keys != expected_validation_keys:
+                # 错误明确指出文件级划分漂移，不把它误报成模型精度变化。
+                raise ValueError(
+                    "Current validation files do not match primary artifact contract"
+                )
+    # 新训练默认使用当前训练文件估计活动门；复用模型时会被工件合同覆盖。
+    # 新训练候选沿用命令行显式输入掩码。
+    effective_suppress_normalized_phase = suppress_normalized_phase
+    # 绝对轴候选同样只在新训练时读取命令行开关。
+    effective_suppress_absolute_axis_stats = suppress_absolute_axis_stats
+    # 没有冻结主模型时，按当前训练角色文件估计两个活动门。
+    if primary_artifact_dir is None:
+        # 窗口活动分数门只由训练记录估计，验证与测试不可参与。
+        rest_threshold = estimate_rest_threshold(train_records, window_len, step_len)
+        # 逐点活动门使用同一训练角色和窗口合同。
+        active_point_threshold = estimate_active_point_threshold(
+            train_records, window_len, step_len
+        )
+    else:
+        # 读取主模型冻结窗口活动门，不再对同一训练目录重新估计。
+        assert primary_sampling_contract is not None
+        rest_threshold = float(primary_sampling_contract["rest_threshold"])
+        # 读取主模型冻结逐点活动门，保证验证窗逐项一致。
+        active_point_threshold = float(
+            primary_sampling_contract["active_point_threshold"]
+        )
+        # 已冻结主模型的归一化阶段掩码优先于当前命令行默认值。
+        effective_suppress_normalized_phase = bool(
+            primary_sampling_contract["suppress_normalized_phase"]
+        )
+        # 已冻结主模型的绝对轴掩码同样必须自动恢复。
+        effective_suppress_absolute_axis_stats = bool(
+            primary_sampling_contract["suppress_absolute_axis_stats"]
+        )
     rng = np.random.default_rng(seed + int(window_seconds * 100))
 
     train_x_raw, train_y, train_file_ids, train_stats = build_samples(
@@ -3093,6 +3431,7 @@ def train_one_experiment(
         augment=True,
         rng=rng,
         progress_label=f"window={window_seconds:.1f}s split=train",
+        augmentation_profile=augmentation_profile,
     )
     val_x_raw, val_y, _, val_stats = build_samples(
         val_records,
@@ -3131,11 +3470,23 @@ def train_one_experiment(
             train_x_raw, val_x_raw, test_x_raw
         )
         # 主模型训练输入先应用候选掩码，保证被屏蔽列在全部优化步骤中恒为零。
-        train_x = apply_model_feature_mask(train_x, suppress_normalized_phase)
+        train_x = apply_model_feature_mask(
+            train_x,
+            effective_suppress_normalized_phase,
+            effective_suppress_absolute_axis_stats,
+        )
         # 验证输入使用同一掩码，早停和模型选择不能依赖训练时不可见的列。
-        val_x = apply_model_feature_mask(val_x, suppress_normalized_phase)
+        val_x = apply_model_feature_mask(
+            val_x,
+            effective_suppress_normalized_phase,
+            effective_suppress_absolute_axis_stats,
+        )
         # 完整模式测试输入和验证模式空数组均保持同一 [样本数,297] 合同。
-        test_x = apply_model_feature_mask(test_x, suppress_normalized_phase)
+        test_x = apply_model_feature_mask(
+            test_x,
+            effective_suppress_normalized_phase,
+            effective_suppress_absolute_axis_stats,
+        )
         model, train_meta = train_model(
             train_x,
             train_y,
@@ -3155,6 +3506,10 @@ def train_one_experiment(
             supcon_weight=supcon_weight,
             dropout=dropout,
         )
+        # 绝对轴候选把首层对应列永久置零，使生成 C 模型无需运行时掩码也严格忽略 XYZ 姿态。
+        if suppress_absolute_axis_stats:
+            # 清零操作发生在最佳 checkpoint 恢复后、首次正式评估前。
+            prune_absolute_axis_input_weights(model)
     else:
         model, mean, std = load_primary_artifacts(
             primary_artifact_dir,
@@ -3168,11 +3523,30 @@ def train_one_experiment(
         val_x = ((val_x_raw - mean) / std).astype(np.float32)
         test_x = ((test_x_raw - mean) / std).astype(np.float32)
         # 加载主模型时也按当前显式开关处理训练输入，供后续专家流程和一致性检查使用。
-        train_x = apply_model_feature_mask(train_x, suppress_normalized_phase)
+        train_x = apply_model_feature_mask(
+            train_x,
+            suppress_normalized_phase,
+            suppress_absolute_axis_stats,
+        )
         # 固定主模型验证输入执行相同掩码。
-        val_x = apply_model_feature_mask(val_x, suppress_normalized_phase)
+        val_x = apply_model_feature_mask(
+            val_x,
+            suppress_normalized_phase,
+            suppress_absolute_axis_stats,
+        )
         # 固定主模型测试输入执行相同掩码；验证模式下数组为空但维度合法。
-        test_x = apply_model_feature_mask(test_x, suppress_normalized_phase)
+        test_x = apply_model_feature_mask(
+            test_x,
+            suppress_normalized_phase,
+            suppress_absolute_axis_stats,
+        )
+        # 加载路径只用于旧专家实验；绝对轴剪枝不能事后施加到已冻结主模型。
+        if suppress_absolute_axis_stats:
+            # 明确拒绝会改变历史模型函数的命令行组合。
+            raise ValueError(
+                "--suppress-absolute-axis-stats cannot be combined with "
+                "--primary-artifact-dir"
+            )
         train_meta = {"loaded_from": str(Path(primary_artifact_dir).resolve())}
         print(
             f"primary_model_loaded={Path(primary_artifact_dir).resolve()}",
@@ -3295,6 +3669,8 @@ def train_one_experiment(
         "window_seconds": window_seconds,
         "window_len": window_len,
         "step_len": step_len,
+        # split_seed 记录实际文件级划分来源；复用主模型时可能不同于专家训练 seed。
+        "split_seed": split_seed,
         "rest_threshold": rest_threshold,
         "active_point_threshold": active_point_threshold,
         "ema_decay": ema_decay,
@@ -3306,7 +3682,11 @@ def train_one_experiment(
         "pk_prior_corrected_ce": pk_prior_corrected_ce,
         "supcon_weight": supcon_weight,
         "dropout": dropout,
-        "suppress_normalized_phase": suppress_normalized_phase,
+        "suppress_normalized_phase": effective_suppress_normalized_phase,
+        # 记录首层 0:48 已永久清零；推理端不需要额外输入掩码。
+        "suppress_absolute_axis_stats": effective_suppress_absolute_axis_stats,
+        # 保存训练增强档，验证报告和部署工件必须能区分历史与鲁棒候选。
+        "augmentation_profile": augmentation_profile,
         "model": model,
         "specialist_model": specialist_model,
         "specialist_mean": specialist_mean,
@@ -3401,6 +3781,7 @@ def evaluate_external_holdout(
     x = apply_model_feature_mask(
         x,
         bool(best_result.get("suppress_normalized_phase", False)),
+        bool(best_result.get("suppress_absolute_axis_stats", False)),
     )
     model = best_result["model"]
     # 外部留出集允许评估平铺 BP 或多分支候选，两者均实现 nn.Module 前向接口。
@@ -6476,6 +6857,8 @@ def serializable_experiment(result: Dict[str, object]) -> Dict[str, object]:
         "ema_decay",
         "label_smoothing",
         "suppress_normalized_phase",
+        "suppress_absolute_axis_stats",
+        "augmentation_profile",
         "val_acc",
         "val_f1",
         "val_weak_recall",
@@ -6597,6 +6980,15 @@ def save_outputs(
         "suppress_normalized_phase": np.asarray(
             [bool(best_result.get("suppress_normalized_phase", False))], dtype=np.bool_
         ),
+        # 记录首层绝对轴列已永久清零，供后续工件审计；C 前向无需动态判断。
+        "suppress_absolute_axis_stats": np.asarray(
+            [bool(best_result.get("suppress_absolute_axis_stats", False))],
+            dtype=np.bool_,
+        ),
+        # 记录训练增强档；baseline 兼容历史工件，robust 表示包含跨人旋转/幅度/速度扰动。
+        "augmentation_profile": np.asarray(
+            [str(best_result.get("augmentation_profile", "baseline"))]
+        ),
     }
     if isinstance(specialist_model, BPNet):
         scaler_config.update(
@@ -6627,6 +7019,14 @@ def save_outputs(
         "feature_names": list(feature_names),
         "suppress_normalized_phase": bool(
             best_result.get("suppress_normalized_phase", False)
+        ),
+        # 报告绝对轴统计是否已从首层权重中永久删除。
+        "suppress_absolute_axis_stats": bool(
+            best_result.get("suppress_absolute_axis_stats", False)
+        ),
+        # 记录训练增强来源；旧工件缺失时按 baseline 解释。
+        "augmentation_profile": str(
+            best_result.get("augmentation_profile", "baseline")
         ),
         "best_window_seconds": best_result["window_seconds"],
         "best_window_len": best_result["window_len"],
@@ -6684,52 +7084,113 @@ def save_validation_outputs(
     model = best_result["model"]
     # 验证候选允许保存任意 PyTorch 主模型；正式 ESP32 导出仍由门槛和专用导出器控制。
     assert isinstance(model, nn.Module)
-    torch.save(model.state_dict(), output_dir / "best_model.pt")
-    np.savez(
-        output_dir / "scaler_and_config.npz",
-        mean=np.asarray(best_result["mean"], dtype=np.float32),
-        std=np.asarray(best_result["std"], dtype=np.float32),
-        class_names=np.asarray(class_names),
-        feature_names=np.asarray(feature_names),
-        window_len=np.asarray([int(best_result["window_len"])]),
-        step_len=np.asarray([int(best_result["step_len"])]),
-        sample_rate=np.asarray([SAMPLE_RATE]),
-        rest_threshold=np.asarray(
+    # specialist_model 为空表示普通候选；BPNet 表示局部形态专家与主模型组成一个原子工件。
+    specialist_model = best_result.get("specialist_model")
+    # has_specialist 只接受已知平铺 BP 专家，避免保存无法恢复的任意模块。
+    has_specialist = isinstance(specialist_model, BPNet)
+    # 主模型类型进入 npz 和报告，后续加载不得凭 state_dict 键名猜结构。
+    primary_model_type = (
+        "deep_narrow_multi_branch"
+        if isinstance(model, DeepNarrowMultiBranchBPNet)
+        else "multi_branch"
+        if isinstance(model, MultiBranchBPNet)
+        else "flat_bp"
+    )
+    # 专家存在时把两套 state_dict 写入同一文件，防止只复制主模型导致路由不可复现。
+    if has_specialist:
+        # 类型缩窄后 specialist_model 一定是 BPNet，可安全读取参数字典。
+        assert isinstance(specialist_model, BPNet)
+        # 两个固定键与完整训练输出格式一致，加载方可明确区分主模型和专家。
+        torch.save(
+            {
+                "primary": model.state_dict(),
+                "family_specialist": specialist_model.state_dict(),
+            },
+            output_dir / "best_model.pt",
+        )
+    else:
+        # 无专家候选保持历史单 state_dict 格式，兼容现有双 M0 导出器。
+        torch.save(model.state_dict(), output_dir / "best_model.pt")
+    # scaler_config 保存主模型的标准化、窗口、活动门和结构合同。
+    scaler_config: Dict[str, np.ndarray] = {
+        # 主模型均值形状固定为 [297]，与生产特征顺序一致。
+        "mean": np.asarray(best_result["mean"], dtype=np.float32),
+        # 主模型标准差形状固定为 [297]，已包含除零保护结果。
+        "std": np.asarray(best_result["std"], dtype=np.float32),
+        # 类别顺序决定主模型 logits 到动作枚举的映射。
+        "class_names": np.asarray(class_names),
+        # 特征名顺序用于 Python/C 合同和专家索引审计。
+        "feature_names": np.asarray(feature_names),
+        # 窗口点数固定模型时间范围。
+        "window_len": np.asarray([int(best_result["window_len"])]),
+        # 滑窗步长固定验证样本集合和部署推理间隔。
+        "step_len": np.asarray([int(best_result["step_len"])]),
+        # 原始采样率单位 Hz，当前端侧固定 25 Hz。
+        "sample_rate": np.asarray([SAMPLE_RATE]),
+        # 整窗活动门为无量纲数值。
+        "rest_threshold": np.asarray(
             [float(best_result["rest_threshold"])], dtype=np.float32
         ),
-        active_point_threshold=np.asarray(
+        # 逐点活动证据门为无量纲数值。
+        "active_point_threshold": np.asarray(
             [float(best_result["active_point_threshold"])], dtype=np.float32
         ),
-        ema_decay=np.asarray(
+        # EMA 衰减只记录训练合同，不影响已冻结前向。
+        "ema_decay": np.asarray(
             [float(best_result.get("ema_decay", 0.0))], dtype=np.float32
         ),
-        label_smoothing=np.asarray(
+        # 标签平滑系数只记录训练合同。
+        "label_smoothing": np.asarray(
             [float(best_result.get("label_smoothing", 0.0))], dtype=np.float32
         ),
         # 保存候选掩码，防止后续把权重按未屏蔽输入加载。
-        suppress_normalized_phase=np.asarray(
+        "suppress_normalized_phase": np.asarray(
             [bool(best_result.get("suppress_normalized_phase", False))], dtype=np.bool_
         ),
-        # 保存验证候选模型类型，避免后续把 M1 state_dict 误加载到 M0。
-        model_type=np.asarray(
-            [
-                "deep_narrow_multi_branch"
-                if isinstance(model, DeepNarrowMultiBranchBPNet)
-                else "multi_branch"
-                if isinstance(model, MultiBranchBPNet)
-                else "flat_bp"
-            ]
+        # 验证候选保留首层剪枝事实，选模和双 M0 导出可进行来源审计。
+        "suppress_absolute_axis_stats": np.asarray(
+            [bool(best_result.get("suppress_absolute_axis_stats", False))],
+            dtype=np.bool_,
         ),
-    )
+        # 保存训练增强档字符串，后续双 M0 导出可审计两模型是否来自同一策略。
+        "augmentation_profile": np.asarray(
+            [str(best_result.get("augmentation_profile", "baseline"))]
+        ),
+        # 保存验证候选模型类型，避免后续把 M1 state_dict 误加载到 M0。
+        "model_type": np.asarray([primary_model_type]),
+    }
+    # 专家存在时把其独立标准化、类别顺序和 297 维索引写入同一 npz。
+    if has_specialist:
+        # 专家均值形状为 [专家输入维度]。
+        scaler_config["specialist_mean"] = np.asarray(
+            best_result["specialist_mean"], dtype=np.float32
+        )
+        # 专家标准差与均值同形，禁止复用主模型标准化。
+        scaler_config["specialist_std"] = np.asarray(
+            best_result["specialist_std"], dtype=np.float32
+        )
+        # 局部类别顺序决定专家 logits 映射回 11 类的全局索引。
+        scaler_config["specialist_class_names"] = np.asarray(
+            best_result["specialist_class_names"]
+        )
+        # 特征索引从完整 297 维原始特征中选择专家输入列。
+        scaler_config["specialist_feature_indices"] = np.asarray(
+            best_result["specialist_feature_indices"], dtype=np.int64
+        )
+    # 单次 np.savez 保证主模型与专家配置来自同一候选结果。
+    np.savez(output_dir / "scaler_and_config.npz", **scaler_config)
     validation_keys = {
         "window_seconds",
         "window_len",
         "step_len",
+        "split_seed",
         "rest_threshold",
         "active_point_threshold",
         "ema_decay",
         "label_smoothing",
         "suppress_normalized_phase",
+        "suppress_absolute_axis_stats",
+        "augmentation_profile",
         "multi_branch",
         "deep_narrow",
         "val_acc",
@@ -6749,20 +7210,31 @@ def save_validation_outputs(
     }
     report = {
         "mode": "validation_only",
-        "seed": SEED,
+        # 报告记录实际文件级划分 seed，而非模块默认值或专家初始化 seed。
+        "seed": int(best_result.get("split_seed", SEED)),
         "sample_rate": SAMPLE_RATE,
         "class_names": list(class_names),
         "feature_names": list(feature_names),
         "suppress_normalized_phase": bool(
             best_result.get("suppress_normalized_phase", False)
         ),
-        # 分类器类型明确区分 24 维 M1、32 维 M0 和平铺 BP。
+        # 顶层同步记录绝对轴首层剪枝，便于候选网格核对来源和部署合同。
+        "suppress_absolute_axis_stats": bool(
+            best_result.get("suppress_absolute_axis_stats", False)
+        ),
+        # 验证报告顶层记录本轮增强档，避免仅从目录名猜测。
+        "augmentation_profile": str(
+            best_result.get("augmentation_profile", "baseline")
+        ),
+        # 分类器类型同时标明主模型结构和是否包含局部专家。
         "classifier_type": (
-            "deep_narrow_multi_branch"
-            if isinstance(model, DeepNarrowMultiBranchBPNet)
-            else "multi_branch"
-            if isinstance(model, MultiBranchBPNet)
-            else "flat_bp"
+            f"{primary_model_type}_plus_family_bp_specialist"
+            if has_specialist
+            else primary_model_type
+        ),
+        # 局部类别清单为空表示本候选不含专家。
+        "family_specialist_class_names": list(
+            best_result.get("specialist_class_names", [])
         ),
         "best_window_seconds": best_result["window_seconds"],
         "val_acc": best_result["val_acc"],
@@ -6822,6 +7294,12 @@ def parse_dropout(value: str) -> float:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train IMU BP model and export ESP32 header.")
     parser.add_argument("--dataset-dir", type=Path, default=None)
+    # baseline 完整复现历史增强；robust 增加右腕旋转、动态幅度和全局速度个体差异。
+    parser.add_argument(
+        "--augmentation-profile",
+        choices=AUGMENTATION_PROFILES,
+        default="baseline",
+    )
     parser.add_argument("--extra-train-dir", type=Path, default=None)
     parser.add_argument("--external-holdout-dir", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR)
@@ -6844,6 +7322,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--auxiliary-heads", action="store_true")
     # 将 48 个归一化四阶段特征在标准化后设为训练均值零分，用于 Round36 证据候选。
     parser.add_argument("--suppress-normalized-phase", action="store_true")
+    # 屏蔽六个绝对传感器轴的 48 项统计量，强制候选只使用腕角不变或重力相对特征。
+    parser.add_argument("--suppress-absolute-axis-stats", action="store_true")
     parser.add_argument(
         "--validation-only",
         action="store_true",
@@ -6896,6 +7376,13 @@ def main() -> None:
     # 先验修正只对均匀 P×K 采样有定义，其他采样方式不能启用。
     if args.pk_prior_corrected_ce and not args.pk_batches:
         raise ValueError("--pk-prior-corrected-ce requires --pk-batches")
+    # 已冻结主模型不能事后删除输入列；该候选必须从头训练并由验证集重新选择。
+    if args.suppress_absolute_axis_stats and args.primary_artifact_dir is not None:
+        # 在扫描数据和构建窗口前尽早拒绝错误组合。
+        raise ValueError(
+            "--suppress-absolute-axis-stats cannot be combined with "
+            "--primary-artifact-dir"
+        )
     global MAX_EPOCHS
     MAX_EPOCHS = args.max_epochs
     set_seed(args.seed)
@@ -6919,9 +7406,16 @@ def main() -> None:
         f"external_holdout_loaded=false"
     )
     print(f"class_names={class_names}")
+    # 日志必须显示当前增强档真实使用的旋转上限，避免 robust 运行仍打印历史 ±35°造成审计误解。
+    effective_max_rotation_degrees = (
+        MAX_ROTATION_DEGREES
+        if args.augmentation_profile == "baseline"
+        else ROBUST_MAX_ROTATION_DEGREES
+    )
     print(
         f"window_seconds={args.window_seconds} augment_times={AUGMENT_TIMES} "
-        f"max_rotation_degrees={MAX_ROTATION_DEGREES:.1f} "
+        f"max_rotation_degrees={effective_max_rotation_degrees:.1f} "
+        f"augmentation_profile={args.augmentation_profile} "
         f"supcon_weight={args.supcon_weight:.3f} hard_pair_weight={HARD_PAIR_WEIGHT:.3f} "
         f"ema_decay={args.ema_decay:.3f} "
         f"label_smoothing={args.label_smoothing:.3f} "
@@ -6932,6 +7426,7 @@ def main() -> None:
         f"pk_prior_corrected_ce={args.pk_prior_corrected_ce} "
         f"auxiliary_heads={args.auxiliary_heads} "
         f"suppress_normalized_phase={args.suppress_normalized_phase} "
+        f"suppress_absolute_axis_stats={args.suppress_absolute_axis_stats} "
         f"dropout={args.dropout:.3f} "
         f"validation_only={args.validation_only}"
     )
@@ -6958,6 +7453,8 @@ def main() -> None:
             supcon_weight=args.supcon_weight,
             dropout=args.dropout,
             suppress_normalized_phase=args.suppress_normalized_phase,
+            suppress_absolute_axis_stats=args.suppress_absolute_axis_stats,
+            augmentation_profile=args.augmentation_profile,
         )
         all_results.append(result)
 

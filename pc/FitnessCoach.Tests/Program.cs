@@ -650,7 +650,7 @@ internal static class Program
             // 建立 Mock 链路后才能同步开发者模式偏好。
             await device.ConnectAsync();
             // 开启开发者模式，满足 RawStream 命令权限合同。
-            await ((IDeviceConfigurationSession)device).SetPreferencesAsync(new DevicePreferencesV1(75, true, false, 30, 1U, true));
+            await ((IDeviceConfigurationSession)device).SetPreferencesAsync(new DevicePreferencesV1(75, false, 30, 1U, true));
             // 通过诊断页开启 RawStream，使 ViewModel 建立三份严格对齐的十分钟缓冲。
             await viewModel.ToggleRawStreamCommand.ExecuteAsync();
             // 启动训练，Mock 在活动态持续发布六轴记录。
@@ -793,7 +793,7 @@ internal static class Program
             diagnosticsViewModel.ProtocolErrorText == "校验错误=0；分片错误=0",
             "诊断页未显示完整 Mock 链路指标。");
         // 先把开发者模式偏好同步到 Mock，模拟设备对命令 11 的权限检查。
-        await ((IDeviceConfigurationSession)device).SetPreferencesAsync(new DevicePreferencesV1(75, true, false, 30, 1U, true));
+        await ((IDeviceConfigurationSession)device).SetPreferencesAsync(new DevicePreferencesV1(75, false, 30, 1U, true));
         // 通过诊断页显式开启 RawStream。
         await diagnosticsViewModel.ToggleRawStreamCommand.ExecuteAsync();
         // 启动训练，Mock 只在活动设备状态下发布确定性原始样本。

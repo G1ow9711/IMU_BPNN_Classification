@@ -12,37 +12,25 @@
 #define MOTION_TWO_WAIT_SECONDARY (1U)
 /* 两相位内部阶段 2：已看到反向峰，等待返回正峰或稳定基线闭合周期。 */
 #define MOTION_TWO_WAIT_REST (2U)
-
-/* 跳跃内部阶段 0：等待起跳推进。 */
-#define MOTION_JUMP_WAIT_TAKEOFF (0U)
-/* 跳跃内部阶段 1：等待低支持力腾空。 */
-#define MOTION_JUMP_WAIT_FLIGHT (1U)
-/* 跳跃内部阶段 2：等待落地冲击。 */
-#define MOTION_JUMP_WAIT_LANDING (2U)
-/* 跳跃内部阶段 3：等待冲击恢复。 */
-#define MOTION_JUMP_WAIT_RECOVERY (3U)
-/* 跳跃内部阶段 4：等待稳定基线闭合周期。 */
-#define MOTION_JUMP_WAIT_REST (4U)
+/* 真实连续端点候选 0：当前没有待确认端点。 */
+#define MOTION_TRANSITION_NONE (0U)
+/* 真实连续端点候选 1：等待第二个 PRIMARY 原始点。 */
+#define MOTION_TRANSITION_PRIMARY (1U)
+/* 真实连续端点候选 2：等待第二个 SECONDARY 原始点。 */
+#define MOTION_TRANSITION_SECONDARY (2U)
+/* 真实连续端点候选 3：连续动作已返回主向端点。 */
+#define MOTION_TRANSITION_CONTINUOUS_REST (3U)
+/* 真实连续端点候选 4：慢动作已回到低运动稳定点。 */
+#define MOTION_TRANSITION_STATIC_REST (4U)
 
 /* 步峰慢基线的一阶更新系数；25 Hz 下时间常数约 2 秒。 */
 #define MOTION_STEP_BASELINE_ALPHA (0.02F)
-/* 起跳除加速度外要求的角速度门槛，单位 deg/s。 */
-#define MOTION_TAKEOFF_GYRO_MIN_DPS (28.0F)
 /* 相邻极值类型 0 表示尚无候选。 */
 #define MOTION_PERIODIC_EXTREMUM_NONE (0U)
 /* 相邻极值类型 1 表示局部波峰。 */
 #define MOTION_PERIODIC_EXTREMUM_PEAK (1U)
 /* 相邻极值类型 2 表示局部波谷。 */
 #define MOTION_PERIODIC_EXTREMUM_VALLEY (2U)
-
-/* 判断动作是否属于需要腕部支持力五阶段的三个跳跃类。 */
-static bool motion_action_is_jump(const fitness_action_t action)
-{
-    /* 跳跃弓步、跳深蹲和抱膝跳共用起跳、腾空、落地、恢复检测。 */
-    return (action == FITNESS_ACTION_JUMPING_LUNGE) ||
-           (action == FITNESS_ACTION_JUMPING_SQUAT) ||
-           (action == FITNESS_ACTION_TUCK_JUMP);
-}
 
 /* 判断动作是否使用 walk/trot 局部冲击峰。 */
 static bool motion_action_is_step(const fitness_action_t action)
@@ -54,11 +42,14 @@ static bool motion_action_is_step(const fitness_action_t action)
 /* 判断动作是否使用主向/回向两相位。 */
 static bool motion_action_is_two_phase(const fitness_action_t action)
 {
-    /* 开合跳按手臂张开/合拢腕部回摆计数，其余四类同样属于往返动作。 */
+    /* 八类重复动作都按手腕主向、回向和闭合周期计数；腕部不可靠提供脚底支持力五阶段。 */
     return (action == FITNESS_ACTION_GOOD_MORNING) ||
            (action == FITNESS_ACTION_JUMPING_JACK) ||
+           (action == FITNESS_ACTION_JUMPING_LUNGE) ||
+           (action == FITNESS_ACTION_JUMPING_SQUAT) ||
            (action == FITNESS_ACTION_LUNGE) ||
            (action == FITNESS_ACTION_SQUAT) ||
+           (action == FITNESS_ACTION_TUCK_JUMP) ||
            (action == FITNESS_ACTION_WAVE);
 }
 
@@ -128,7 +119,162 @@ static bool motion_is_rest(
            (gyro_magnitude_dps <= MOTION_PHASE_REST_GYRO_DPS);
 }
 
-/* 处理开合跳及普通往返动作的主向、回向和稳定闭合。 */
+/* 把 value 限制到 [minimum,maximum]，避免自适应门被极端峰值带出有效范围。 */
+static float motion_clamp_float(
+    const float value,
+    const float minimum,
+    const float maximum)
+{
+    /* 低于下限时返回下限。 */
+    if (value < minimum) {
+        /* 返回最低允许值。 */
+        return minimum;
+    }
+    /* 高于上限时返回上限。 */
+    if (value > maximum) {
+        /* 返回最高允许值。 */
+        return maximum;
+    }
+    /* 合法范围内保持原值。 */
+    return value;
+}
+
+/* 清空尚未达到两个真实连续点的端点候选，不改变已确认方向和动作阶段。 */
+static void motion_reset_transition_candidate(motion_phase_detector_t *detector)
+{
+    /* 候选类型恢复为空。 */
+    detector->transition_candidate = MOTION_TRANSITION_NONE;
+    /* 连续点数恢复为零。 */
+    detector->transition_candidate_count = 0U;
+}
+
+/*
+ * 用两个真实连续 25 Hz 点确认离散端点。
+ * 首点只缓存候选；第二个同类点才发布相位，随后沿用旧接口再保持一次，供领域层稳定消费。
+ */
+static bool motion_confirm_transition(
+    motion_phase_detector_t *detector,
+    const uint8_t transition,
+    const fitness_motion_phase_t phase,
+    const bool condition,
+    motion_phase_observation_t *observation)
+{
+    /* 条件中断时立即丢弃单点候选，禁止跨噪声或静止拼接。 */
+    if (!condition) {
+        /* 清空不完整端点。 */
+        motion_reset_transition_candidate(detector);
+        /* 当前没有确认相位。 */
+        return false;
+    }
+    /* 新端点类型从连续点 1 开始，不能继承上一类型的点数。 */
+    if (detector->transition_candidate != transition) {
+        /* 保存当前端点类型。 */
+        detector->transition_candidate = transition;
+        /* 当前样本是第一个真实点。 */
+        detector->transition_candidate_count = 1U;
+        /* 尚未达到两个连续点。 */
+        return false;
+    }
+    /* 同类候选未满上限时增加真实连续点数。 */
+    if (detector->transition_candidate_count < MOTION_PHASE_TRANSITION_CONFIRM_SAMPLES) {
+        /* 累计第二个真实点。 */
+        detector->transition_candidate_count += 1U;
+    }
+    /* 少于两个点时继续等待。 */
+    if (detector->transition_candidate_count < MOTION_PHASE_TRANSITION_CONFIRM_SAMPLES) {
+        /* 当前仍未确认。 */
+        return false;
+    }
+    /* 端点已经由真实信号确认，清空候选供下一阶段使用。 */
+    motion_reset_transition_candidate(detector);
+    /* 发布一次相位并保持一个接口点，让领域层的两次稳定相位防线继续生效。 */
+    motion_emit_phase(detector, phase, observation);
+    /* 告知调用方可以切换内部阶段。 */
+    return true;
+}
+
+/* 计算六轴样本当前角速度在已确认主方向上的有符号投影，单位 deg/s。 */
+static float motion_project_gyro(
+    const motion_phase_detector_t *detector,
+    const motion_phase_sample_t *sample)
+{
+    /* 三轴点积保持正负方向；单位向量保证结果仍是 deg/s。 */
+    return (sample->axis[0] * detector->learned_gyro_direction[0]) +
+           (sample->axis[1] * detector->learned_gyro_direction[1]) +
+           (sample->axis[2] * detector->learned_gyro_direction[2]);
+}
+
+/* 根据活动段角速度包络生成幅度自适应主向/回向迟滞门，单位 deg/s。 */
+static float motion_active_direction_threshold(const motion_phase_detector_t *detector)
+{
+    /* 未建立包络时使用最低门；正常路径会在方向候选首点写入包络。 */
+    const float scaled_threshold =
+        detector->motion_scale_dps * MOTION_PHASE_DIRECTION_ACTIVE_RATIO;
+    /* 上下限共同避免小动作落入静止噪声，也避免猛烈峰值锁死后续动作。 */
+    return motion_clamp_float(
+        scaled_threshold,
+        MOTION_PHASE_DIRECTION_ACTIVE_MIN_DPS,
+        MOTION_PHASE_DIRECTION_ACTIVE_MAX_DPS);
+}
+
+/*
+ * 用与当前轴夹角较小的运动缓慢更新方向和幅度包络。
+ * 负向样本先翻转到主方向半球，因此只改变轴线、不颠倒 PRIMARY/SECONDARY 语义。
+ */
+static void motion_adapt_direction(
+    motion_phase_detector_t *detector,
+    const motion_phase_sample_t *sample,
+    const float gyro_magnitude_dps)
+{
+    /* 低于方向学习下限的点只属于回程或静止，不参与方向和幅度学习。 */
+    if (gyro_magnitude_dps < MOTION_PHASE_DIRECTION_LEARN_DPS) {
+        /* 保持当前模型。 */
+        return;
+    }
+    /* projected_dps 是当前方向上的有符号角速度。 */
+    const float projected_dps = motion_project_gyro(detector, sample);
+    /* alignment 是夹角余弦绝对值，范围理论上 [0,1]。 */
+    const float alignment = fabsf(projected_dps) / gyro_magnitude_dps;
+    /* 交叉轴分量过大时视为噪声或过渡，不让它旋转主轴。 */
+    if (alignment < MOTION_PHASE_DIRECTION_ALIGNMENT_MIN) {
+        /* 保持当前方向和包络。 */
+        return;
+    }
+    /* 高于旧包络时快速上升，低于旧包络时缓慢下降以适应疲劳。 */
+    const float scale_alpha =
+        (gyro_magnitude_dps > detector->motion_scale_dps) ?
+        MOTION_PHASE_SCALE_RISE_ALPHA : MOTION_PHASE_SCALE_FALL_ALPHA;
+    /* 指数更新后的包络仍以 deg/s 表示。 */
+    detector->motion_scale_dps +=
+        scale_alpha * (gyro_magnitude_dps - detector->motion_scale_dps);
+    /* sign 把负向样本翻转到当前主方向半球，防止方向更新 180 度反转。 */
+    const float sign = (projected_dps >= 0.0F) ? 1.0F : -1.0F;
+    /* blended_x 混合旧单位轴和当前同半球单位样本。 */
+    const float blended_x =
+        ((1.0F - MOTION_PHASE_DIRECTION_ADAPT_ALPHA) * detector->learned_gyro_direction[0]) +
+        (MOTION_PHASE_DIRECTION_ADAPT_ALPHA * sign * sample->axis[0] / gyro_magnitude_dps);
+    /* blended_y 混合 y 分量。 */
+    const float blended_y =
+        ((1.0F - MOTION_PHASE_DIRECTION_ADAPT_ALPHA) * detector->learned_gyro_direction[1]) +
+        (MOTION_PHASE_DIRECTION_ADAPT_ALPHA * sign * sample->axis[1] / gyro_magnitude_dps);
+    /* blended_z 混合 z 分量。 */
+    const float blended_z =
+        ((1.0F - MOTION_PHASE_DIRECTION_ADAPT_ALPHA) * detector->learned_gyro_direction[2]) +
+        (MOTION_PHASE_DIRECTION_ADAPT_ALPHA * sign * sample->axis[2] / gyro_magnitude_dps);
+    /* blended_norm 理论上大于零；夹角门保证不会把两个相反单位向量直接抵消。 */
+    const float blended_norm = motion_vector_magnitude(blended_x, blended_y, blended_z);
+    /* 仅在有限正模长下写回，防止除零或 NaN 污染会话。 */
+    if (isfinite(blended_norm) && (blended_norm > 1.0e-6F)) {
+        /* 写回归一化 x 分量。 */
+        detector->learned_gyro_direction[0] = blended_x / blended_norm;
+        /* 写回归一化 y 分量。 */
+        detector->learned_gyro_direction[1] = blended_y / blended_norm;
+        /* 写回归一化 z 分量。 */
+        detector->learned_gyro_direction[2] = blended_z / blended_norm;
+    }
+}
+
+/* 处理八类重复动作的主向、回向和稳定闭合；不要求逐点匹配标准动作模板。 */
 static void motion_process_two_phase(
     motion_phase_detector_t *detector,
     const motion_phase_sample_t *sample,
@@ -136,145 +282,132 @@ static void motion_process_two_phase(
     const float gyro_magnitude_dps,
     motion_phase_observation_t *observation)
 {
-    /* 尚未建立投影轴时，用第一次显著旋转的单位向量定义正方向。 */
-    if ((detector->stage == MOTION_TWO_WAIT_PRIMARY) &&
-        !detector->direction_valid &&
-        (gyro_magnitude_dps >= MOTION_PHASE_DIRECTION_LEARN_DPS)) {
-        /* 三个分量除以非零模长，得到与手表佩戴坐标一致的单位方向。 */
-        detector->learned_gyro_direction[0] = sample->axis[0] / gyro_magnitude_dps;
-        /* 保存 y 方向分量。 */
-        detector->learned_gyro_direction[1] = sample->axis[1] / gyro_magnitude_dps;
-        /* 保存 z 方向分量。 */
-        detector->learned_gyro_direction[2] = sample->axis[2] / gyro_magnitude_dps;
-        /* 标记投影方向可用。 */
-        detector->direction_valid = true;
-        /* 后续等待沿相反方向的回摆。 */
-        detector->stage = MOTION_TWO_WAIT_SECONDARY;
-        /* 发布 PRIMARY 两点稳定事件。 */
-        motion_emit_phase(detector, FITNESS_PHASE_PRIMARY, observation);
-        /* 当前样本已处理。 */
+    /* 初次活动尚无确认轴时，用首个明显旋转保存临时单位方向。 */
+    if (!detector->direction_valid) {
+        /* 没有候选且当前角速度足够时建立第一个 PRIMARY 原始点。 */
+        if ((detector->transition_candidate == MOTION_TRANSITION_NONE) &&
+            (gyro_magnitude_dps >= MOTION_PHASE_DIRECTION_LEARN_DPS)) {
+            /* 临时 x 单位分量。 */
+            detector->learned_gyro_direction[0] = sample->axis[0] / gyro_magnitude_dps;
+            /* 临时 y 单位分量。 */
+            detector->learned_gyro_direction[1] = sample->axis[1] / gyro_magnitude_dps;
+            /* 临时 z 单位分量。 */
+            detector->learned_gyro_direction[2] = sample->axis[2] / gyro_magnitude_dps;
+            /* 首点同时建立该活动段角速度包络。 */
+            detector->motion_scale_dps = gyro_magnitude_dps;
+            /* 保存 PRIMARY 候选类型。 */
+            detector->transition_candidate = MOTION_TRANSITION_PRIMARY;
+            /* 当前只是第一个真实点，不向领域层发布。 */
+            detector->transition_candidate_count = 1U;
+            /* 等待下一原始点确认同方向。 */
+            return;
+        }
+        /* 已有临时 PRIMARY 候选时，用第二个点在临时轴上的投影检查连续性。 */
+        if (detector->transition_candidate == MOTION_TRANSITION_PRIMARY) {
+            /* 临时投影单位为 deg/s。 */
+            const float provisional_projection = motion_project_gyro(detector, sample);
+            /* 临时门同样按首点包络缩放。 */
+            const float provisional_threshold = motion_active_direction_threshold(detector);
+            /* 第二点必须越过正门且本身达到最低学习幅值。 */
+            const bool primary_confirmed =
+                (gyro_magnitude_dps >= MOTION_PHASE_DIRECTION_LEARN_DPS) &&
+                (provisional_projection >= provisional_threshold);
+            /* 两个真实连续点成立时发布 PRIMARY。 */
+            if (motion_confirm_transition(
+                    detector,
+                    MOTION_TRANSITION_PRIMARY,
+                    FITNESS_PHASE_PRIMARY,
+                    primary_confirmed,
+                    observation)) {
+                /* 方向从此成为活动段模型。 */
+                detector->direction_valid = true;
+                /* 允许第二点微调包络和方向。 */
+                motion_adapt_direction(detector, sample, gyro_magnitude_dps);
+                /* 下一阶段等待反向端点。 */
+                detector->stage = MOTION_TWO_WAIT_SECONDARY;
+                /* 当前点已确认并发布。 */
+                return;
+            }
+            /* 连续性失败会清空候选；下一显著点必须重新学习方向。 */
+            if (!primary_confirmed) {
+                /* 清除临时幅度包络，防止失败尖峰影响下一候选。 */
+                detector->motion_scale_dps = 0.0F;
+            }
+        }
+        /* 未确认方向时不得检查其它阶段。 */
         return;
     }
 
-    /* 已学习方向时计算当前角速度在主旋转方向上的有符号投影。 */
-    if (detector->direction_valid) {
-        /* 点积单位为 deg/s；负值表示与首次动作方向相反。 */
-        const float projected_dps =
-            (sample->axis[0] * detector->learned_gyro_direction[0]) +
-            (sample->axis[1] * detector->learned_gyro_direction[1]) +
-            (sample->axis[2] * detector->learned_gyro_direction[2]);
-        /* 开合跳完成首周期后保留会话投影轴；再次越过正门槛即可开启下一周期。 */
-        if ((detector->stage == MOTION_TWO_WAIT_PRIMARY) &&
-            (projected_dps >= MOTION_PHASE_DIRECTION_ACTIVE_DPS)) {
-            /* 下一阶段等待沿同一固定投影轴的反向手臂运动。 */
+    /* 用可信同轴样本缓慢更新方向和幅度包络。 */
+    motion_adapt_direction(detector, sample, gyro_magnitude_dps);
+    /* 更新后的投影单位为 deg/s；负值表示反向回摆。 */
+    const float projected_dps = motion_project_gyro(detector, sample);
+    /* 当前活动段的幅度自适应门。 */
+    const float active_threshold_dps = motion_active_direction_threshold(detector);
+    /* 等待主向阶段必须有两个真实连续正投影点。 */
+    if (detector->stage == MOTION_TWO_WAIT_PRIMARY) {
+        /* primary_condition 排除单点尖峰和低于自适应门的细小抖动。 */
+        const bool primary_condition = projected_dps >= active_threshold_dps;
+        /* 确认后进入反向等待。 */
+        if (motion_confirm_transition(
+                detector,
+                MOTION_TRANSITION_PRIMARY,
+                FITNESS_PHASE_PRIMARY,
+                primary_condition,
+                observation)) {
+            /* 下一阶段等待 SECONDARY。 */
             detector->stage = MOTION_TWO_WAIT_SECONDARY;
-            /* 发布 PRIMARY 两点稳定事件，交叉轴能量不改变会话主方向。 */
-            motion_emit_phase(detector, FITNESS_PHASE_PRIMARY, observation);
-            /* 当前样本已处理。 */
-            return;
         }
-        /* 等待回向时，足够强的负投影确认 SECONDARY。 */
-        if ((detector->stage == MOTION_TWO_WAIT_SECONDARY) &&
-            (projected_dps <= -MOTION_PHASE_DIRECTION_ACTIVE_DPS)) {
-            /* 下一阶段等待低运动稳定点。 */
+        /* 当前阶段只处理主向。 */
+        return;
+    }
+    /* 等待回向阶段必须有两个真实连续负投影点。 */
+    if (detector->stage == MOTION_TWO_WAIT_SECONDARY) {
+        /* secondary_condition 使用与主向相同绝对幅度门，消除个人动作尺度偏差。 */
+        const bool secondary_condition = projected_dps <= -active_threshold_dps;
+        /* 确认后进入闭合等待。 */
+        if (motion_confirm_transition(
+                detector,
+                MOTION_TRANSITION_SECONDARY,
+                FITNESS_PHASE_SECONDARY,
+                secondary_condition,
+                observation)) {
+            /* 下一阶段等待回到主向或稳定基线。 */
             detector->stage = MOTION_TWO_WAIT_REST;
-            /* 发布 SECONDARY 两点稳定事件。 */
-            motion_emit_phase(detector, FITNESS_PHASE_SECONDARY, observation);
-            /* 当前样本已处理。 */
-            return;
         }
-        /* 连续动作不会整机静止；回到主方向说明手臂已完成回程并开始下一周期。 */
-        if ((detector->stage == MOTION_TWO_WAIT_REST) &&
-            (projected_dps >= MOTION_PHASE_DIRECTION_ACTIVE_DPS)) {
-            /* 开合跳的返回正峰同时是下一周期起点，直接等待下一负峰；其它动作重新等待 PRIMARY。 */
-            detector->stage = (detector->action == FITNESS_ACTION_JUMPING_JACK) ?
-                              MOTION_TWO_WAIT_SECONDARY :
-                              MOTION_TWO_WAIT_PRIMARY;
-            /* 开合跳整场保留首次主投影轴；慢动作仍逐周期重学以适应缓慢姿态变化。 */
-            detector->direction_valid = detector->action == FITNESS_ACTION_JUMPING_JACK;
-            /* 发布 REST 两点稳定事件；下游仍检查动作最短周期和不应期。 */
-            motion_emit_phase(detector, FITNESS_PHASE_REST, observation);
-            /* 开合跳把当前返回正峰保存在内部阶段中作为下一周期起点；事件层只发布一次 REST，避免同点重复事件。 */
-            return;
-        }
+        /* 当前阶段只处理回向。 */
+        return;
     }
-
-    /* 慢动作在回程后停住时，低运动稳定点仍可闭合一次往返周期。 */
-    if ((detector->stage == MOTION_TWO_WAIT_REST) &&
-        motion_is_rest(acceleration_magnitude_g, gyro_magnitude_dps)) {
-        /* 开合跳静止端点也作为下一周期主端；其它慢动作回到等待新 PRIMARY。 */
-        detector->stage = (detector->action == FITNESS_ACTION_JUMPING_JACK) ?
-                          MOTION_TWO_WAIT_SECONDARY :
-                          MOTION_TWO_WAIT_PRIMARY;
-        /* 开合跳整场保留首次主投影轴；其它慢动作在静止端点重新学习方向。 */
-        detector->direction_valid = detector->action == FITNESS_ACTION_JUMPING_JACK;
-        /* 发布 REST 两点稳定事件。 */
-        motion_emit_phase(detector, FITNESS_PHASE_REST, observation);
+    /* 连续动作回到主向时，优先按正投影闭合并把该端点作为下一周期起点。 */
+    if (projected_dps >= active_threshold_dps) {
+        /* 两个连续返回点确认完整正反周期。 */
+        if (motion_confirm_transition(
+                detector,
+                MOTION_TRANSITION_CONTINUOUS_REST,
+                FITNESS_PHASE_REST,
+                true,
+                observation)) {
+            /* 当前主向端点同时开始下一周期，直接等待下一 SECONDARY。 */
+            detector->stage = MOTION_TWO_WAIT_SECONDARY;
+        }
+        /* 正投影候选期间不能同时累计静止候选。 */
+        return;
+    }
+    /* 慢动作在回程后停住时，两个真实稳定点也可闭合一次往返周期。 */
+    const bool static_rest = motion_is_rest(acceleration_magnitude_g, gyro_magnitude_dps);
+    /* 静止闭合与连续正峰使用不同候选类型，禁止一动一静拼成两个连续点。 */
+    if (motion_confirm_transition(
+            detector,
+            MOTION_TRANSITION_STATIC_REST,
+            FITNESS_PHASE_REST,
+            static_rest,
+            observation)) {
+        /* 静止没有提供下一周期主端点，恢复等待显式 PRIMARY。 */
+        detector->stage = MOTION_TWO_WAIT_PRIMARY;
     }
 }
 
-/* 处理三个高动态跳跃类的起跳、腾空、落地、恢复和稳定闭合。 */
-static void motion_process_jump(
-    motion_phase_detector_t *detector,
-    const float acceleration_magnitude_g,
-    const float gyro_magnitude_dps,
-    motion_phase_observation_t *observation)
-{
-    /* 起跳要求支持力上升，且有手腕运动或更强加速度冲击。 */
-    const bool takeoff =
-        (acceleration_magnitude_g >= MOTION_PHASE_TAKEOFF_MIN_G) &&
-        ((gyro_magnitude_dps >= MOTION_TAKEOFF_GYRO_MIN_DPS) ||
-         (acceleration_magnitude_g >= MOTION_PHASE_LANDING_MIN_G));
-    /* 等待起跳时，满足推进条件后进入腾空等待。 */
-    if ((detector->stage == MOTION_JUMP_WAIT_TAKEOFF) && takeoff) {
-        /* 更新内部阶段。 */
-        detector->stage = MOTION_JUMP_WAIT_FLIGHT;
-        /* 发布 TAKEOFF 两点稳定事件。 */
-        motion_emit_phase(detector, FITNESS_PHASE_TAKEOFF, observation);
-        /* 当前样本已处理。 */
-        return;
-    }
-    /* 低支持力加速度确认腾空。 */
-    if ((detector->stage == MOTION_JUMP_WAIT_FLIGHT) &&
-        (acceleration_magnitude_g <= MOTION_PHASE_FLIGHT_MAX_G)) {
-        /* 更新为等待落地。 */
-        detector->stage = MOTION_JUMP_WAIT_LANDING;
-        /* 发布 FLIGHT 两点稳定事件。 */
-        motion_emit_phase(detector, FITNESS_PHASE_FLIGHT, observation);
-        /* 当前样本已处理。 */
-        return;
-    }
-    /* 腾空后出现大于 1.30 g 的冲击，确认落地。 */
-    if ((detector->stage == MOTION_JUMP_WAIT_LANDING) &&
-        (acceleration_magnitude_g >= MOTION_PHASE_LANDING_MIN_G)) {
-        /* 更新为等待冲击恢复。 */
-        detector->stage = MOTION_JUMP_WAIT_RECOVERY;
-        /* 发布 LANDING 两点稳定事件。 */
-        motion_emit_phase(detector, FITNESS_PHASE_LANDING, observation);
-        /* 当前样本已处理。 */
-        return;
-    }
-    /* 落地后首次恢复到稳定范围，标记 RECOVERY。 */
-    if ((detector->stage == MOTION_JUMP_WAIT_RECOVERY) &&
-        motion_is_rest(acceleration_magnitude_g, gyro_magnitude_dps)) {
-        /* 下一阶段再要求一个稳定事件，避免同一冲击边沿直接计数。 */
-        detector->stage = MOTION_JUMP_WAIT_REST;
-        /* 发布 RECOVERY 两点稳定事件。 */
-        motion_emit_phase(detector, FITNESS_PHASE_RECOVERY, observation);
-        /* 当前样本已处理。 */
-        return;
-    }
-    /* 恢复事件结束后仍保持稳定，闭合完整跳跃周期。 */
-    if ((detector->stage == MOTION_JUMP_WAIT_REST) &&
-        motion_is_rest(acceleration_magnitude_g, gyro_magnitude_dps)) {
-        /* 回到等待下一次起跳。 */
-        detector->stage = MOTION_JUMP_WAIT_TAKEOFF;
-        /* 发布 REST 两点稳定事件。 */
-        motion_emit_phase(detector, FITNESS_PHASE_REST, observation);
-    }
-}
-
-/* 处理 walk/trot 三点局部冲击峰；下游仍负责生理不应期去重。 */
+/* 处理 walk/trot 三点局部冲击峰；高门触发、低门重武装，避免慢速宽峰重复输出。 */
 static void motion_process_step(
     motion_phase_detector_t *detector,
     const float acceleration_magnitude_g,
@@ -293,6 +426,11 @@ static void motion_process_step(
     /* 去除慢基线后得到脚步动态冲击，单位 g。 */
     const float dynamic_acceleration_g =
         acceleration_magnitude_g - detector->acceleration_baseline_g;
+    /* 当前动态量已经回落到低门时重新武装；负值同样表示冲击已结束。 */
+    if (dynamic_acceleration_g <= MOTION_PHASE_STEP_REARM_DELTA_G) {
+        /* 下一次独立高门局部峰可以公开一个新步事件。 */
+        detector->step_peak_armed = true;
+    }
     /* 已有前两个点时，检查中间点是否高于两侧且超过 0.16 g。 */
     if (detector->step_history_ready) {
         /* 中间点严格高于左侧且不低于右侧，避免平台峰重复输出。 */
@@ -300,10 +438,16 @@ static void motion_process_step(
             (detector->previous_dynamic_acceleration_g >
              detector->previous_previous_dynamic_acceleration_g) &&
             (detector->previous_dynamic_acceleration_g >= dynamic_acceleration_g);
-        /* 同时满足幅值门槛才发布步峰。 */
+        /* 只有低门回落后已重新武装，且局部峰达到高门时才发布一个步峰。 */
         observation->step_peak =
+            detector->step_peak_armed &&
             local_peak &&
             (detector->previous_dynamic_acceleration_g >= MOTION_PHASE_STEP_PEAK_DELTA_G);
+        /* 接受高门峰后立即解除武装；宽峰内后续波瓣必须等真实回落后才能再触发。 */
+        if (observation->step_peak) {
+            /* 锁住当前物理步，防止单靠固定毫秒不应期依赖人的步速。 */
+            detector->step_peak_armed = false;
+        }
     }
     /* 左移三点历史：上一个点成为上上点。 */
     detector->previous_previous_dynamic_acceleration_g =
@@ -576,58 +720,6 @@ void motion_periodic_pair_reset_cycle(
     detector->total_pairs = total_pairs;
 }
 
-motion_phase_status_t motion_periodic_pair_skip_transient(
-    motion_periodic_pair_detector_t *detector,
-    const uint64_t monotonic_ms)
-{
-    /* 检测器必须有效且已经建立 11+5 均值与峰谷静态状态。 */
-    if ((detector == NULL) || !detector->initialized) {
-        /* 空对象或未初始化对象不能维护时间线。 */
-        return MOTION_PHASE_ERR_ARGUMENT;
-    }
-    /* 已有时间基准时必须继续执行严格递增与真实断流检查。 */
-    if (detector->has_timestamp) {
-        /* 重复或倒退时间不能伪装成马达污染点。 */
-        if (monotonic_ms <= detector->last_timestamp_ms) {
-            /* 拒绝该时刻且不修改已有检测状态。 */
-            return MOTION_PHASE_ERR_TIMESTAMP;
-        }
-        /* gap_ms 表示当前污染点与上一原始 25 Hz 点的间隔，单位 ms。 */
-        const uint64_t gap_ms = monotonic_ms - detector->last_timestamp_ms;
-        /* 超过 120 ms 仍属于真实采样断流，不能仅靠时间占位跨过。 */
-        if (gap_ms > MOTION_PHASE_MAX_GAP_MS) {
-            /* 清空滤波与未完成峰谷，但保留该轴已经发布的累计次数。 */
-            motion_periodic_pair_reset_cycle(detector);
-            /* 当前污染点作为新连续段的时间起点，幅值仍不进入滤波器。 */
-            detector->has_timestamp = true;
-            /* 保存新时间起点，下一点继续按真实相邻间隔检查。 */
-            detector->last_timestamp_ms = monotonic_ms;
-            /* 通知上层同步清空其它轴未完成周期。 */
-            return MOTION_PHASE_GAP_RESET;
-        }
-    }
-    /* 第五个连续污染点已超过单次振动保护上限，禁止跨长污染拼接峰谷。 */
-    if (detector->transient_skip_count >=
-        MOTION_PERIODIC_MAX_TRANSIENT_SKIP_SAMPLES) {
-        /* 清空滤波、未完成峰谷和连续污染计数，但保留已完成累计。 */
-        motion_periodic_pair_reset_cycle(detector);
-        /* 当前污染点作为新连续段时间起点，幅值仍不进入滤波器。 */
-        detector->has_timestamp = true;
-        /* 保存当前时刻供下一点检查。 */
-        detector->last_timestamp_ms = monotonic_ms;
-        /* 超长污染按断流处理。 */
-        return MOTION_PHASE_GAP_RESET;
-    }
-    /* 当前点只成为下一点的时间基准，不改变任何滤波样本或极值端点。 */
-    detector->has_timestamp = true;
-    /* 保存马达污染点的单调毫秒，保持 25 Hz 时间线连续。 */
-    detector->last_timestamp_ms = monotonic_ms;
-    /* 连续污染计数增加一，用于限制跨污染拼接的最长时间。 */
-    detector->transient_skip_count += 1U;
-    /* 短暂污染已安全跳过。 */
-    return MOTION_PHASE_OK;
-}
-
 motion_phase_status_t motion_periodic_pair_push(
     motion_periodic_pair_detector_t *detector,
     const uint64_t monotonic_ms,
@@ -688,8 +780,6 @@ motion_phase_status_t motion_periodic_pair_push(
     detector->has_timestamp = true;
     /* 保存当前单调时间，单位 ms。 */
     detector->last_timestamp_ms = monotonic_ms;
-    /* 干净幅值终止连续污染段，下一次振动从零重新计数。 */
-    detector->transient_skip_count = 0U;
     /* long_mean_g 接收 11 点级输出，单位 g。 */
     float long_mean_g = 0.0F;
     /* 偶数启动点没有输出时正常等待。 */
@@ -745,6 +835,8 @@ motion_phase_status_t motion_phase_init(
     detector->initialized = true;
     /* 初始输出事件设为 REST。 */
     detector->held_phase = FITNESS_PHASE_REST;
+    /* walk/trot 首个合法高门峰允许触发；其它动作不读取该字段。 */
+    detector->step_peak_armed = true;
     /* 返回成功。 */
     return MOTION_PHASE_OK;
 }
@@ -804,6 +896,8 @@ void motion_phase_reset(motion_phase_detector_t *detector)
     detector->initialized = true;
     /* 恢复安全相位哨兵。 */
     detector->held_phase = FITNESS_PHASE_REST;
+    /* 时间线或休息边界后只接受一个全新高门峰。 */
+    detector->step_peak_armed = true;
     /* 恢复当前检测器固定轴有效标志。 */
     detector->fixed_gyro_axis_valid = fixed_gyro_axis_valid;
     /* 恢复轴编号；无固定轴时零值仅为确定性哨兵。 */
@@ -883,18 +977,7 @@ motion_phase_status_t motion_phase_push(
         return MOTION_PHASE_OK;
     }
 
-    /* 高动态跳跃类执行五阶段检测；开合跳走腕部两相位分支。 */
-    if (motion_action_is_jump(detector->action)) {
-        /* 用支持力和角速度检测起跳、腾空、落地与恢复。 */
-        motion_process_jump(
-            detector,
-            acceleration_magnitude_g,
-            gyro_magnitude_dps,
-            observation);
-        /* 返回成功。 */
-        return MOTION_PHASE_OK;
-    }
-    /* 开合跳和四个普通往返动作执行主旋转方向检测。 */
+    /* 八类腕戴重复动作执行主旋转方向检测。 */
     if (motion_action_is_two_phase(detector->action)) {
         /* 用三轴投影检测主向、回向与稳定闭合。 */
         motion_process_two_phase(

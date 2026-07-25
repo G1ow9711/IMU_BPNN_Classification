@@ -34,8 +34,6 @@
                     <TextBlock Text="每日卡路里目标（0 表示关闭）" Foreground="{StaticResource SecondaryTextBrush}" />
                     <!-- 每日目标输入。 -->
                     <TextBox Text="{Binding DailyCalorieGoal, UpdateSourceTrigger=PropertyChanged}" Margin="0,5,0,13" />
-                    <!-- 振动开关固定对应 30 毫秒有效计次反馈。 -->
-                    <CheckBox Content="有效计次振动 30 毫秒" IsChecked="{Binding HapticEnabled}" />
                     <!-- 提示音开关。 -->
                     <CheckBox Content="开始、目标和错误提示音" IsChecked="{Binding SoundEnabled}" />
                     <!-- 开发者模式是诊断六轴流的显式安全门，普通使用保持关闭。 -->

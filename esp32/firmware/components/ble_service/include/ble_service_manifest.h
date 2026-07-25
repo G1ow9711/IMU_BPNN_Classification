@@ -16,7 +16,7 @@ extern "C" {
 
 /* 当前 Manifest 特征合同版本为 1，对应固定 297 维顺序；维度或公式变化时必须递增。 */
 #define BLE_SERVICE_MANIFEST_FEATURE_VERSION UINT16_C(1)
-/* 当前卡路里表版本为 1，对应 docs/计数卡路里与振动算法.md 的固定 milliMET 表。 */
+/* 当前卡路里表版本为 1，对应 docs/计数与卡路里算法.md 的固定 milliMET 表。 */
 #define BLE_SERVICE_MANIFEST_CALORIE_TABLE_VERSION UINT16_C(1)
 /* SHA-256 原始摘要固定为 32 字节；线上不发送 64 字节十六进制文本。 */
 #define BLE_SERVICE_MANIFEST_SHA256_BYTES ((size_t)32U)
@@ -51,8 +51,8 @@ typedef enum ble_service_manifest_tag {
 
 /* 能力位只允许声明已接入主应用并通过软件测试的功能。 */
 typedef enum ble_service_manifest_capability {
-    /* 每次有效重复动作可触发板载马达振动反馈。 */
-    BLE_SERVICE_MANIFEST_CAPABILITY_HAPTIC_FEEDBACK = 1U << 0,
+    /* 历史马达能力保留位；当前硬件没有马达，正式 Manifest 不得置位。 */
+    BLE_SERVICE_MANIFEST_CAPABILITY_LEGACY_HAPTIC_RESERVED = 1U << 0,
     /* 最近会话摘要可通过 BLE LIST/GET 分页补传。 */
     BLE_SERVICE_MANIFEST_CAPABILITY_SESSION_HISTORY = 1U << 1,
     /* 会话摘要已使用内部 Flash LittleFS 双槽持久化。 */

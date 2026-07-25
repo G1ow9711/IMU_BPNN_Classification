@@ -238,9 +238,6 @@ public sealed class DiagnosticsViewModel : ObservableObject, IDisposable
     /// <summary>产品固定电源策略。</summary>
     public string PowerPolicyText => "原配电池容量 400 毫安时；15% 告警、8% 禁止新会话、5% 保存并关机。";
 
-    /// <summary>产品固定振动策略。</summary>
-    public string HapticPolicyText => "每次有效计次后振动 30 毫秒；非计次状态不应连续振动。";
-
     /// <summary>模型和推理说明。</summary>
     public string ModelText => "设备端运行两个轻量六分支网络和 297 维特征；上位机只显示设备权威动作和累计值，不重复推理。";
 

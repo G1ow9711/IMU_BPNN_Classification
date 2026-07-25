@@ -428,30 +428,6 @@ static device_coordinator_status_t device_emit_snapshots(
     return DEVICE_COORDINATOR_OK;
 }
 
-/* 从 workout FIFO 取最多 4 个请求，保留原始业务顺序。 */
-static void device_drain_haptics(
-    device_coordinator_t *coordinator,
-    device_effects_t *effects)
-{
-    /* 在 effect 容量内消费 FIFO。 */
-    while (effects->haptic_count < DEVICE_COORDINATOR_MAX_HAPTIC_EFFECTS) {
-        /* 指向下一个按值输出槽。 */
-        fitness_haptic_request_t *request = &effects->haptics[effects->haptic_count];
-        /* FIFO 空时结束。 */
-        if (!workout_engine_pop_haptic(&coordinator->workout, request)) {
-            /* 跳出循环。 */
-            break;
-        }
-        /* 记录一个有效请求。 */
-        effects->haptic_count += 1U;
-    }
-    /* 存在任何请求时置 effect 位。 */
-    if (effects->haptic_count > 0U) {
-        /* 标记振动 effect 有效。 */
-        effects->flags |= DEVICE_EFFECT_HAPTIC;
-    }
-}
-
 /* 从 workout 权威字段构造会话摘要，不重算指标。 */
 static device_coordinator_status_t device_build_summary(
     const device_coordinator_t *coordinator,
@@ -745,8 +721,6 @@ static device_coordinator_status_t device_stop_session(
         /* PREPARING 取消没有动作摘要，直接回到 Idle 与 HOME 对齐。 */
         workout_engine_return_idle(&coordinator->workout);
     }
-    /* 将结束振动交给非阻塞任务。 */
-    device_drain_haptics(coordinator, effects);
     /* 停止成功。 */
     return DEVICE_COORDINATOR_OK;
 }
@@ -914,13 +888,11 @@ device_coordinator_status_t device_coordinator_handle_control(
                 /* 返回错误。 */
                 return status;
             }
-            /* 新会话不继承上一次低电提醒。 */
-            candidate.low_battery_warning_sent = false;
             /* 完成开始分支。 */
             break;
         }
         case DEVICE_CONTROL_PAUSE: {
-            /* 重复暂停不产生第二次振动或修订。 */
+            /* 重复暂停不产生第二次状态修订。 */
             if (candidate.workout.state == WORKOUT_STATE_PAUSED) {
                 /* 返回安全忽略。 */
                 return DEVICE_COORDINATOR_IGNORED;
@@ -1086,9 +1058,7 @@ device_coordinator_status_t device_coordinator_handle_control(
                 /* 返回错误。 */
                 return status;
             }
-            /* 丢弃时也保留一次结束反馈。 */
-            device_drain_haptics(&candidate, effects);
-            /* 振动已拷贝到 effect 后，清空 workout 到 Idle。 */
+            /* 清空 workout 到 Idle。 */
             workout_engine_return_idle(&candidate.workout);
             /* 完成重置分支。 */
             break;
@@ -1184,8 +1154,6 @@ device_coordinator_status_t device_coordinator_handle_control(
         /* 返回错误。 */
         return status;
     }
-    /* 消费本次控制产生的振动，先前 stop 已取空时安全无操作。 */
-    device_drain_haptics(&candidate, effects);
     /* 生成 UI、LiveState 和电源策略。 */
     status = device_emit_snapshots(&candidate, effects, true);
     /* effect 生成失败时回滚。 */
@@ -1381,8 +1349,6 @@ device_coordinator_status_t device_coordinator_push_inference(
         /* 返回错误。 */
         return ui_status;
     }
-    /* 锁定补算可能产生真实次数振动；不再额外发送会污染首个实时周期的开始振动。 */
-    device_drain_haptics(&candidate, effects);
     /* 生成 UI 和 LiveState；锁定不改变电源状态。 */
     const device_coordinator_status_t effect_status = device_emit_snapshots(
         &candidate,
@@ -1456,6 +1422,9 @@ device_coordinator_status_t device_coordinator_push_sample(
             return DEVICE_COORDINATOR_ERR_ARGUMENT;
         }
     }
+    /* 保存调用前活动门；无 MetricEvent 的休息/恢复边界仍需立即刷新 UI 和 BLE。 */
+    const bool previous_counting_enabled =
+        coordinator->workout.classification_consistent;
     /* 使用局部副本实现事务提交。 */
     device_coordinator_t candidate = *coordinator;
     /* 推进会话活动时长。 */
@@ -1488,8 +1457,39 @@ device_coordinator_status_t device_coordinator_push_sample(
         /* 返回成功，主入口可继续分发空 effect。 */
         return DEVICE_COORDINATOR_OK;
     }
-    /* 没有 MetricEvent 时只提交领域时间/热量，不以 25 Hz 刷 UI/BLE。 */
+    /* 判断本点是否使训练同源活动门开关发生变化。 */
+    const bool counting_state_changed =
+        candidate.workout.classification_consistent != previous_counting_enabled;
+    /* 没有 MetricEvent 且活动门未变化时只提交领域时间/热量，不以 25 Hz 刷 UI/BLE。 */
     if (!emitted) {
+        /* 休息进入或恢复是可见状态变化，必须立即修订 UI/LiveState，但不能伪造次数事件。 */
+        if (counting_state_changed) {
+            /* 为活动门边界分配新的单调状态修订号。 */
+            device_increment_revision(&candidate);
+            /* 从同一 workout 快照同步主动作、累计值和 counting_enabled。 */
+            const device_coordinator_status_t ui_status = device_sync_ui_metrics(
+                &candidate,
+                sample->monotonic_ms);
+            /* UI 状态机拒绝时回滚整点，避免 UI/BLE 状态分叉。 */
+            if (ui_status != DEVICE_COORDINATOR_OK) {
+                /* 清空半成品 effect。 */
+                device_effects_clear(effects);
+                /* 返回精确错误。 */
+                return ui_status;
+            }
+            /* 生成同一修订的 UI 和 BLE LiveState；活动门不改变功耗策略。 */
+            const device_coordinator_status_t snapshot_status = device_emit_snapshots(
+                &candidate,
+                effects,
+                false);
+            /* 任一快照失败都不提交候选状态。 */
+            if (snapshot_status != DEVICE_COORDINATOR_OK) {
+                /* 清空半成品，调用方不会看到只有一侧的状态。 */
+                device_effects_clear(effects);
+                /* 返回精确错误。 */
+                return snapshot_status;
+            }
+        }
         /* 提交内部状态。 */
         *coordinator = candidate;
         /* 返回成功。 */
@@ -1533,8 +1533,6 @@ device_coordinator_status_t device_coordinator_push_sample(
     }
     /* 标记存储更新 effect 有效。 */
     effects->flags |= DEVICE_EFFECT_SUMMARY_WRITE;
-    /* 每 REP 和每 10 STEP 的振动已由同一 MetricEvent 规则入队。 */
-    device_drain_haptics(&candidate, effects);
     /* 生成 UI 和 LiveState，本点不改电源策略。 */
     const device_coordinator_status_t effect_status = device_emit_snapshots(
         &candidate,
@@ -1603,22 +1601,7 @@ device_coordinator_status_t device_coordinator_update_battery(
         /* 返回领域错误。 */
         return DEVICE_COORDINATOR_ERR_DOMAIN;
     }
-    /* 高于 15% 或充电时解除低电提醒锁。 */
-    if ((level == POWER_BATTERY_NORMAL) || charging) {
-        /* 允许下次真正下降再提醒。 */
-        candidate.low_battery_warning_sent = false;
-    }
-    /* 15% 及以下首次进入时入队两次 40 ms 提醒。 */
-    if ((level != POWER_BATTERY_NORMAL) && !charging &&
-        !candidate.low_battery_warning_sent &&
-        (level != POWER_BATTERY_CRITICAL)) {
-        /* 使用 fitness_core 统一振动波形映射。 */
-        (void)fitness_haptic_enqueue_reason(
-            &candidate.workout.haptic_queue,
-            FITNESS_HAPTIC_REASON_LOW_BATTERY);
-        /* 标记本下降区间已提醒。 */
-        candidate.low_battery_warning_sent = true;
-    }
+    /* 低电量只通过常驻电池图标和页面状态提示；真表没有振动马达。 */
     /* 非充电且 5% 及以下必须保存后关机。 */
     if ((level == POWER_BATTERY_CRITICAL) && !charging) {
         /* 活动会话先生成临界中断摘要。 */
@@ -1662,12 +1645,6 @@ device_coordinator_status_t device_coordinator_update_battery(
         }
         /* 主程序必须先落盘，再执行 PMIC 关机。 */
         effects->flags |= DEVICE_EFFECT_SHUTDOWN_AFTER_PERSIST;
-        /* 临界 5% 关机优先保留能量，丢弃 stop 入队的振动反馈。 */
-        effects->flags &= ~((uint32_t)DEVICE_EFFECT_HAPTIC);
-        /* 清零振动数量，马达任务不得访问无效槽。 */
-        effects->haptic_count = 0U;
-        /* 清零振动值，使诊断内存不残留已取消请求。 */
-        (void)memset(effects->haptics, 0, sizeof(effects->haptics));
     }
     /* 本次电量更新产生新权威快照。 */
     device_increment_revision(&candidate);
@@ -1679,11 +1656,6 @@ device_coordinator_status_t device_coordinator_update_battery(
     if (sync_status != DEVICE_COORDINATOR_OK) {
         /* 返回错误。 */
         return sync_status;
-    }
-    /* 临界关机不再振动，其它低电交付一次提醒。 */
-    if (!((level == POWER_BATTERY_CRITICAL) && !charging)) {
-        /* 消费低电振动请求。 */
-        device_drain_haptics(&candidate, effects);
     }
     /* 生成 UI、LiveState 和最新功耗策略。 */
     const device_coordinator_status_t effect_status = device_emit_snapshots(

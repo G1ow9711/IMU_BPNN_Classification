@@ -84,6 +84,23 @@ const char *ui_action_display_name(uint8_t action_id)
     return "等待识别";
 }
 
+/* 返回动作指标单位；静坐为秒、步态为步，其它动作均为次。 */
+static const char *ui_action_metric_unit(uint8_t action_id)
+{
+    /* 静坐只累计持续时间。 */
+    if (action_id == 5U) {
+        /* 返回秒单位。 */
+        return "秒";
+    }
+    /* 小跑和行走累计步数。 */
+    if ((action_id == 7U) || (action_id == 9U)) {
+        /* 返回步单位。 */
+        return "步";
+    }
+    /* 其它八类动作按完整往返周期累计次数。 */
+    return "次";
+}
+
 /* 格式化通用顶栏状态。 */
 static void ui_format_status(const ui_context_t *context, ui_page_model_t *page)
 {
@@ -150,10 +167,10 @@ bool ui_presenter_build(const ui_context_t *context, ui_page_model_t *page)
     /* 按页面生成标题、指标和按钮。 */
     switch (context->state) {
         case UI_STATE_BOOT:
-            /* 开机页标题显示产品名。 */
-            ui_write_text(page->title, sizeof(page->title), "训练助手");
+            /* 开机页状态胶囊显示系统启动。 */
+            ui_write_text(page->title, sizeof(page->title), "系统启动");
             /* 开机页主区域使用产品状态，不向用户暴露内部联调日期或阶段编号。 */
-            ui_write_text(page->primary, sizeof(page->primary), "正在启动");
+            ui_write_text(page->primary, sizeof(page->primary), "智慧运动助手");
             /* 开机页副区域说明设备正在建立传感器、显示和蓝牙能力。 */
             ui_write_text(page->secondary, sizeof(page->secondary), "正在准备设备");
             /* 开机页脚保持简短，避免重复主状态。 */
@@ -172,15 +189,15 @@ bool ui_presenter_build(const ui_context_t *context, ui_page_model_t *page)
             /* SELF_TEST 页面等待硬件结果，不提供按钮。 */
             break;
         case UI_STATE_HOME:
-            /* 主页显示产品功能名称。 */
-            ui_write_text(page->title, sizeof(page->title), "训练助手");
+            /* 主页状态胶囊显示唯一主功能。 */
+            ui_write_text(page->title, sizeof(page->title), "训练中心");
             /* 主页主区域明确唯一首要操作，避免工程版本号占据视觉中心。 */
-            ui_write_text(page->primary, sizeof(page->primary), "准备训练");
-            /* 副区域固定当前模型的右手腕佩戴合同和可识别动作数量。 */
-            ui_write_text(page->secondary, sizeof(page->secondary), "右手腕 / 11种动作");
+            ui_write_text(page->primary, sizeof(page->primary), "准备开始训练");
+            /* 副区域只保留用户需要执行的右手佩戴和自动识别提示，不暴露内部类别数量。 */
+            ui_write_text(page->secondary, sizeof(page->secondary), "右手佩戴 / 自动识别");
             /* 页脚只保留下一步操作，不显示内部常亮联调状态。 */
-            ui_write_text(page->footer, sizeof(page->footer), "点击开始");
-            /* 第一个按钮启动准备倒计时。 */
+            ui_write_text(page->footer, sizeof(page->footer), "点击开始  自动识别动作");
+            /* 第一个按钮启动即时采样和识别。 */
             ui_set_button(page, 0U, UI_COMMAND_START, "开始", true);
             /* 第二个按钮进入设置页。 */
             ui_set_button(page, 1U, UI_COMMAND_OPEN_SETTINGS, "设置", true);
@@ -190,70 +207,58 @@ bool ui_presenter_build(const ui_context_t *context, ui_page_model_t *page)
             break;
         case UI_STATE_PREPARE:
             /* 准备页直接进入动作识别，不再插入会误导用户等待的倒计时。 */
-            ui_write_text(page->title, sizeof(page->title), "正在识别");
+            ui_write_text(page->title, sizeof(page->title), "动作识别");
             /* 主文案要求用户点击开始后立即做本会话唯一动作。 */
-            ui_write_text(page->primary, sizeof(page->primary), "开始运动");
+            ui_write_text(page->primary, sizeof(page->primary), "开始做动作");
             /* 次文案再次提醒固定右手腕，避免佩戴域变化造成分类偏差。 */
-            ui_write_text(page->secondary, sizeof(page->secondary), "保持右手佩戴");
+            ui_write_text(page->secondary, sizeof(page->secondary), "正在建立动作模型");
             /* 页脚说明识别完成后的自动行为；准备期已经持续采样并缓存。 */
-            ui_write_text(page->footer, sizeof(page->footer), "识别后自动记录");
+            ui_write_text(page->footer, sizeof(page->footer), "右手佩戴  识别后自动记录");
             /* 动作尚未锁定时只允许取消本次会话。 */
             ui_set_button(page, 0U, UI_COMMAND_CANCEL, "取消", true);
             /* 准备页模型构建完成。 */
             break;
         case UI_STATE_RUNNING: {
-            /* sit 使用秒，walk/trot 使用步，其它动作使用次数。 */
-            const char *unit = context->view.action_id == 5U
-                ? "秒"
-                : ((context->view.action_id == 7U) || (context->view.action_id == 9U)
-                    ? "步"
-                    : "次");
-            /* 实时类别有效时显示真实识别动作；未知时使用已有“正在识别”文案。 */
-            const char *live_action_name = context->view.inferred_action_id < UI_ACTION_CLASS_COUNT
-                ? ui_action_display_name(context->view.inferred_action_id)
-                : "正在识别";
-            /* 计数门关闭时明确显示暂停，避免把站立或静坐伪装为持续主动作。 */
+            /* 从固定动作索引取得秒、步或次单位。 */
+            const char *unit = ui_action_metric_unit(context->view.action_id);
+            /* 计数门关闭时明确显示休息；主动作名称和累计始终保持本轮事实。 */
             ui_write_text(
                 page->title,
                 sizeof(page->title),
                 "%s",
-                context->view.counting_enabled ? "训练中" : "计数已暂停");
-            /* 计数允许时显示主动作；冻结时显示最近实时类别，二者角色不再混淆。 */
+                context->view.counting_enabled ? "计数中" : "休息  计数暂停");
+            /* 主区域始终显示首次可靠确认的本轮动作，后续噪声类别只进入诊断日志。 */
             ui_write_text(
                 page->primary,
                 sizeof(page->primary),
                 "%s",
-                context->view.counting_enabled
-                    ? ui_action_display_name(context->view.action_id)
-                    : live_action_name);
-            /* 副区域显示动作对应指标和设备累计卡路里。 */
+                ui_action_display_name(context->view.action_id));
+            /* 副区域只显示大号权威累计，避免动作、热量和次数争夺视觉中心。 */
             ui_write_text(
                 page->secondary,
                 sizeof(page->secondary),
-                "%lu %s   %.3f 千卡",
+                "%lu %s",
                 (unsigned long)(context->view.action_id == 5U
                     ? context->view.elapsed_seconds
                     : context->view.count),
-                unit,
-                (double)context->view.calories_milli_kcal / 1000.0);
+                unit);
             /* 计数状态决定页脚：正常时显示时间/置信度，冻结时说明恢复条件。 */
             if (context->view.counting_enabled) {
                 /* 正常计数页脚显示训练时长和百分之一百分比置信度。 */
                 ui_write_text(
                     page->footer,
                     sizeof(page->footer),
-                    "时间 %02lu:%02lu  置信度 %u.%02u%%",
+                    "%02lu:%02lu  %.3f千卡  置信度%u%%",
                     (unsigned long)(context->view.elapsed_seconds / 60U),
                     (unsigned long)(context->view.elapsed_seconds % 60U),
-                    (unsigned int)(context->view.confidence_centipercent / 100U),
-                    (unsigned int)(context->view.confidence_centipercent % 100U));
+                    (double)context->view.calories_milli_kcal / 1000.0,
+                    (unsigned int)(context->view.confidence_centipercent / 100U));
             } else {
                 /* 使用已有字体字符说明同类恢复后自动继续，不改变本轮计数器类型。 */
                 ui_write_text(
                     page->footer,
                     sizeof(page->footer),
-                    "继续%s后自动记录",
-                    ui_action_display_name(context->view.action_id));
+                    "累计保持  恢复完整动作后继续");
             }
             /* 第一个按钮暂停计数和热量时钟。 */
             ui_set_button(page, 0U, UI_COMMAND_PAUSE, "暂停", true);
@@ -264,13 +269,26 @@ bool ui_presenter_build(const ui_context_t *context, ui_page_model_t *page)
         }
         case UI_STATE_PAUSED:
             /* 暂停页标题明确当前训练被冻结。 */
-            ui_write_text(page->title, sizeof(page->title), "已暂停");
+            ui_write_text(page->title, sizeof(page->title), "训练暂停");
             /* 保留锁定动作名，恢复时不重新猜动作。 */
             ui_write_text(page->primary, sizeof(page->primary), "%s", ui_action_display_name(context->view.action_id));
             /* 显示暂停前权威累计次数和卡路里。 */
-            ui_write_text(page->secondary, sizeof(page->secondary), "%lu 次   %.3f 千卡", (unsigned long)context->view.count, (double)context->view.calories_milli_kcal / 1000.0);
+            ui_write_text(
+                page->secondary,
+                sizeof(page->secondary),
+                "%lu %s",
+                (unsigned long)(context->view.action_id == 5U
+                    ? context->view.elapsed_seconds
+                    : context->view.count),
+                ui_action_metric_unit(context->view.action_id));
             /* 页脚说明暂停期间不计数。 */
-            ui_write_text(page->footer, sizeof(page->footer), "计数已暂停");
+            ui_write_text(
+                page->footer,
+                sizeof(page->footer),
+                "%02lu:%02lu  %.3f千卡  累计保持",
+                (unsigned long)(context->view.elapsed_seconds / 60U),
+                (unsigned long)(context->view.elapsed_seconds % 60U),
+                (double)context->view.calories_milli_kcal / 1000.0);
             /* 第一个按钮恢复原会话。 */
             ui_set_button(page, 0U, UI_COMMAND_RESUME, "继续", true);
             /* 第二个按钮结束并保存当前会话。 */
@@ -290,11 +308,17 @@ bool ui_presenter_build(const ui_context_t *context, ui_page_model_t *page)
             ui_write_text(
                 page->secondary,
                 sizeof(page->secondary),
-                "%lu 次合计   %.3f 千卡",
-                (unsigned long)context->view.count,
-                (double)context->view.calories_milli_kcal / 1000.0);
+                "%lu %s",
+                (unsigned long)(context->view.action_id == 5U
+                    ? context->view.elapsed_seconds
+                    : context->view.count),
+                ui_action_metric_unit(context->view.action_id));
             /* 说明确认会保存摘要。 */
-            ui_write_text(page->footer, sizeof(page->footer), "确认后保存训练记录");
+            ui_write_text(
+                page->footer,
+                sizeof(page->footer),
+                "%.3f千卡  确认后保存记录",
+                (double)context->view.calories_milli_kcal / 1000.0);
             /* 第一个按钮执行真正停止。 */
             ui_set_button(page, 0U, UI_COMMAND_CONFIRM_STOP, "停止", true);
             /* 第二个按钮取消并恢复 RUNNING 或 PAUSED。 */
@@ -303,45 +327,55 @@ bool ui_presenter_build(const ui_context_t *context, ui_page_model_t *page)
             break;
         case UI_STATE_SUMMARY:
             /* 总结页标题。 */
-            ui_write_text(page->title, sizeof(page->title), "训练总结");
+            ui_write_text(page->title, sizeof(page->title), "训练完成");
             /* 主区域显示本次权威累计指标。 */
-            ui_write_text(page->primary, sizeof(page->primary), "%lu 次合计", (unsigned long)context->view.count);
+            ui_write_text(page->primary, sizeof(page->primary), "%s", ui_action_display_name(context->view.action_id));
             /* 副区域显示卡路里和总时长。 */
-            ui_write_text(page->secondary, sizeof(page->secondary), "%.3f 千卡   %02lu:%02lu", (double)context->view.calories_milli_kcal / 1000.0, (unsigned long)(context->view.elapsed_seconds / 60U), (unsigned long)(context->view.elapsed_seconds % 60U));
+            ui_write_text(
+                page->secondary,
+                sizeof(page->secondary),
+                "%lu %s",
+                (unsigned long)(context->view.action_id == 5U
+                    ? context->view.elapsed_seconds
+                    : context->view.count),
+                ui_action_metric_unit(context->view.action_id));
             /* 页脚确认摘要已进入本地保存链。 */
-            ui_write_text(page->footer, sizeof(page->footer), "训练记录已本地保存");
+            ui_write_text(
+                page->footer,
+                sizeof(page->footer),
+                "%02lu:%02lu  %.3f千卡  已保存",
+                (unsigned long)(context->view.elapsed_seconds / 60U),
+                (unsigned long)(context->view.elapsed_seconds % 60U),
+                (double)context->view.calories_milli_kcal / 1000.0);
             /* DONE 返回主页，不重复提交同一摘要。 */
             ui_set_button(page, 0U, UI_COMMAND_DONE, "完成", true);
             /* 总结页模型构建完成。 */
             break;
         case UI_STATE_SETTINGS:
             /* 设置页标题。 */
-            ui_write_text(page->title, sizeof(page->title), "设置");
+            ui_write_text(page->title, sizeof(page->title), "设备设置");
             /* 显示 NVS 恢复或 PC/触屏刚保存的真实亮度。 */
             ui_write_text(
                 page->primary,
                 sizeof(page->primary),
-                "屏幕亮度 %u%%",
+                "%u%% 亮度",
                 (unsigned int)context->view.brightness_percent);
-            /* 同时显示真实振动开关和熄屏秒数。 */
+            /* 同时显示自动熄屏门槛和本机保存状态。 */
             ui_write_text(
                 page->secondary,
                 sizeof(page->secondary),
-                "振动 %s   熄屏 %u秒",
-                context->view.haptic_enabled ? "开" : "关",
+                "%u秒 自动熄屏",
                 (unsigned int)context->view.screen_timeout_seconds);
             /* 显示厂家原配电池和本地保存事实。 */
-            ui_write_text(page->footer, sizeof(page->footer), "已本地保存 / 原配400毫安时");
+            ui_write_text(page->footer, sizeof(page->footer), "配置已本地保存  原配400毫安时");
             /* 第一个按钮循环 AMOLED 用户亮度。 */
             ui_set_button(page, 0U, UI_COMMAND_CYCLE_BRIGHTNESS, "亮度", true);
-            /* 第二个按钮切换振动偏好。 */
-            ui_set_button(page, 1U, UI_COMMAND_TOGGLE_HAPTIC, "振动", true);
-            /* 第三个按钮进入设备诊断。 */
-            ui_set_button(page, 2U, UI_COMMAND_OPEN_DIAGNOSTICS, "诊断", true);
-            /* 第四个按钮请求删除 NimBLE 保存的全部 PC 绑定。 */
-            ui_set_button(page, 3U, UI_COMMAND_FORGET_COMPUTER, "忘记电脑", true);
-            /* 第五个按钮返回主页；安全关机仍保留在主页和实体 PWR 键。 */
-            ui_set_button(page, 4U, UI_COMMAND_BACK, "返回", true);
+            /* 第二个按钮进入设备诊断。 */
+            ui_set_button(page, 1U, UI_COMMAND_OPEN_DIAGNOSTICS, "诊断", true);
+            /* 第三个按钮请求删除 NimBLE 保存的全部 PC 绑定。 */
+            ui_set_button(page, 2U, UI_COMMAND_FORGET_COMPUTER, "忘记电脑", true);
+            /* 第四个按钮返回主页；安全关机仍保留在主页和实体 PWR 键。 */
+            ui_set_button(page, 3U, UI_COMMAND_BACK, "返回", true);
             /* 设置页模型构建完成。 */
             break;
         case UI_STATE_DIAGNOSTICS:
@@ -363,12 +397,10 @@ bool ui_presenter_build(const ui_context_t *context, ui_page_model_t *page)
                 sizeof(page->footer),
                 "设置版本 %lu",
                 (unsigned long)context->view.preferences_revision);
-            /* 第一个按钮发送一次 30 ms 马达测试脉冲。 */
-            ui_set_button(page, 0U, UI_COMMAND_TEST_HAPTIC, "测试振动", true);
-            /* 第二个按钮循环自动熄屏秒数。 */
-            ui_set_button(page, 1U, UI_COMMAND_CYCLE_TIMEOUT, "熄屏", true);
-            /* 第三个按钮返回设置页。 */
-            ui_set_button(page, 2U, UI_COMMAND_BACK, "返回", true);
+            /* 第一个按钮循环自动熄屏秒数。 */
+            ui_set_button(page, 0U, UI_COMMAND_CYCLE_TIMEOUT, "熄屏", true);
+            /* 第二个按钮返回设置页。 */
+            ui_set_button(page, 1U, UI_COMMAND_BACK, "返回", true);
             /* 诊断页模型构建完成。 */
             break;
         case UI_STATE_SCREEN_OFF:
@@ -397,7 +429,7 @@ bool ui_presenter_build(const ui_context_t *context, ui_page_model_t *page)
             break;
         case UI_STATE_SHUTDOWN:
             /* 关机动画保留产品名。 */
-            ui_write_text(page->title, sizeof(page->title), "健身助手");
+            ui_write_text(page->title, sizeof(page->title), "安全关机");
             /* 主区域确认会话已保存。 */
             ui_write_text(page->primary, sizeof(page->primary), "训练记录已保存");
             /* 副区域说明 PMIC 即将断电。 */
@@ -506,11 +538,9 @@ bool ui_command_to_event(ui_command_t command, uint32_t monotonic_ms, ui_event_t
             event->type = UI_EVENT_POWER_LONG_PRESS;
             /* 当前命令映射完成。 */
             break;
-        /* 五个设备设置/诊断命令由 main 应用任务直接处理，不映射为纯页面事件。 */
+        /* 三个设备设置/诊断命令由 main 应用任务直接处理，不映射为纯页面事件。 */
         case UI_COMMAND_CYCLE_BRIGHTNESS:
-        case UI_COMMAND_TOGGLE_HAPTIC:
         case UI_COMMAND_CYCLE_TIMEOUT:
-        case UI_COMMAND_TEST_HAPTIC:
         case UI_COMMAND_FORGET_COMPUTER:
             /* 返回 false 让上层保留命令原值并进入设备配置事务。 */
             return false;

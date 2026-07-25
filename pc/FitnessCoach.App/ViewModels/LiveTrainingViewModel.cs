@@ -252,7 +252,7 @@ public sealed class LiveTrainingViewModel : ObservableObject, IDisposable
     private async Task StartAsync()
     {
         // 使用统一包装把异常显示在页面。
-        await ExecuteDeviceCommandAsync(_deviceSession.StartAsync, "训练已开始；有效计次时设备振动 30 毫秒。 ").ConfigureAwait(true);
+        await ExecuteDeviceCommandAsync(_deviceSession.StartAsync, "训练已开始；正在自动识别动作并实时计数。").ConfigureAwait(true);
     }
 
     // 发送暂停命令。

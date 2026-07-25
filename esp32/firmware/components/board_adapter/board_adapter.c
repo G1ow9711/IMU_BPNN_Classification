@@ -43,8 +43,6 @@ board_profile_t board_profile_from_build(void)
         .imu_interrupt_gpio = 21U,
         /* GPIO39 接 PCF85063 低有效中断；仅支持 Light-sleep GPIO 唤醒。 */
         .rtc_interrupt_gpio = 39U,
-        /* GPIO18 通过驱动级控制振动马达，脉冲期间 IMU 窗口需标记为受扰。 */
-        .motor_gpio = 18U,
         /* GPIO46 控制扬声器功放使能；静音和低功耗状态必须拉到关闭电平。 */
         .speaker_enable_gpio = 46U,
         /* GPIO2 是 microSD 时钟线，休眠前需停止时钟以降低动态功耗。 */
@@ -78,8 +76,8 @@ board_adapter_result_t board_profile_validate(const board_profile_t *profile)
     if ((profile->i2c_sda_gpio != 15U) || (profile->i2c_scl_gpio != 14U)) {
         return BOARD_ADAPTER_ERR_PROFILE;
     }
-    /* 马达与传感器中断脚属于产品合同，错配会破坏振动或 Deep-sleep 唤醒。 */
-    if ((profile->motor_gpio != 18U) || (profile->imu_interrupt_gpio != 21U)) {
+    /* 传感器中断脚属于产品合同，错配会破坏 Deep-sleep 唤醒。 */
+    if (profile->imu_interrupt_gpio != 21U) {
         return BOARD_ADAPTER_ERR_PROFILE;
     }
     /* GPIO38/39 仅是 Light-sleep GPIO 唤醒脚，配置必须与本地原理图一致。 */
@@ -198,30 +196,6 @@ board_adapter_result_t board_adapter_set_display(
         return BOARD_ADAPTER_ERR_IO;
     }
     /* 屏幕电源和亮度均设置完成。 */
-    return BOARD_ADAPTER_OK;
-}
-
-/* 请求马达脉冲；真实实现应在 IMU 采样间隙调度并标记污染样本。 */
-board_adapter_result_t board_adapter_pulse_haptic(
-    board_adapter_t *adapter,
-    uint16_t duration_ms,
-    uint8_t intensity_percent)
-{
-    /* 持续时间限制为 1~500 ms，强度限制为 1~100%，避免 MOSFET 长时间误导通。 */
-    if ((adapter == NULL) || !adapter->initialized ||
-        (duration_ms == 0U) || (duration_ms > 500U) ||
-        (intensity_percent == 0U) || (intensity_percent > 100U)) {
-        return BOARD_ADAPTER_ERR_ARGUMENT;
-    }
-    /* 没有马达回调时明确返回不支持，不能假装振动成功。 */
-    if (adapter->ops.pulse_motor == NULL) {
-        return BOARD_ADAPTER_ERR_UNSUPPORTED;
-    }
-    /* 把持续时间和强度交给 GPIO18/LEDC 或主机 mock 实现。 */
-    if (adapter->ops.pulse_motor(adapter->ops.context, duration_ms, intensity_percent) != 0) {
-        return BOARD_ADAPTER_ERR_IO;
-    }
-    /* 回调接受请求后返回成功；实际脉冲可由独立任务异步完成。 */
     return BOARD_ADAPTER_OK;
 }
 

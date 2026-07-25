@@ -12,6 +12,10 @@ CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y
 CONFIG_SPIRAM_RODATA=y
+# 科技风页面包含大量小型 LVGL 对象；阈值为 0 让普通 malloc 优先使用 PSRAM，避免它们切碎 BLE 和任务栈依赖的片内堆。
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=0
+# 显式保留 32 KiB 片内 RAM，只供 FreeRTOS 内部栈、显示 DMA 与必须在 Flash cache 关闭时访问的数据。
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
 
 # CPU 峰值 240 MHz；电源管理按任务负载在 40~240 MHz 间动态调整。
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
@@ -21,7 +25,7 @@ CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
 # 启用 QMI8658 GPIO21 EXT1 Deep-sleep 唤醒；40 mg/4 样本只是原配电池样机初值，量产前须做佩戴与携带校准。
 CONFIG_BOARD_ENABLE_QMI_DEEP_WAKE=y
 
-# 1 kHz tick 让 30 ms 马达脉冲、LVGL 动画和 BLE 超时具有毫秒级调度粒度。
+# 1 kHz tick 让 LVGL 动画、IMU 节拍和 BLE 超时具有毫秒级调度粒度。
 CONFIG_FREERTOS_HZ=1000
 
 # 只启用低功耗 NimBLE，不启用经典蓝牙；首版设备只允许一个 PC 连接。

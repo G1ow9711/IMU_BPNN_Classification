@@ -52,8 +52,6 @@ void ui_context_init(ui_context_t *context, uint32_t monotonic_ms)
     context->view.screen_timeout_seconds = 30U;
     /* 冻结默认偏好修订从 1 开始。 */
     context->view.preferences_revision = 1U;
-    /* 冻结默认允许计次振动。 */
-    context->view.haptic_enabled = true;
     /* 没有模型输出时置信度为零。 */
     context->view.confidence_centipercent = 0U;
     /* 255 表示 PMIC 尚未完成读取。 */

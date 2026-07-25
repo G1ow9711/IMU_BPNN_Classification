@@ -21,16 +21,13 @@ extern "C" {
 #define BOARD_RUNTIME_QMI8658_LOW_ADDRESS (0x6AU)
 /* 固定 QMI8658 高地址；启动探测允许硬件地址脚选择另一状态。 */
 #define BOARD_RUNTIME_QMI8658_HIGH_ADDRESS (0x6BU)
-/* 固定马达 PWM 频率为 5 kHz，避免低频可闻噪声并支持强度百分比。 */
-#define BOARD_RUNTIME_MOTOR_PWM_HZ (5000U)
-
 /* 描述板级运行时结果；零为成功，负值按失败原因区分。 */
 typedef enum {
     /* 板级操作成功，输出和运行时状态有效。 */
     BOARD_RUNTIME_OK = 0,
     /* 必填指针为空、百分比越界或枚举值非法。 */
     BOARD_RUNTIME_ERR_ARGUMENT = -1,
-    /* 厂家 BSP、GPIO、I2C、LEDC 或定时器返回平台错误。 */
+    /* 厂家 BSP、GPIO 或 I2C 返回平台错误。 */
     BOARD_RUNTIME_ERR_PLATFORM = -2,
     /* 当前后端未注册请求的 QMI、RTC、PMIC 或存储能力。 */
     BOARD_RUNTIME_ERR_UNSUPPORTED = -3,
@@ -106,8 +103,6 @@ typedef struct {
     bool rtc_present;
     /* true 表示 TF 已成功挂载；卡未插入时保持 false。 */
     bool storage_mounted;
-    /* true 表示 GPIO18 马达 PWM 与停止定时器已就绪。 */
-    bool motor_ready;
     /* true 表示 GPIO46 扬声器功放使能脚已配置且当前默认拉低。 */
     bool speaker_gate_ready;
     /* 保存最近平台错误码；零表示最近操作成功。 */
@@ -136,8 +131,6 @@ typedef struct {
     void *platform_touch;
     /* 保存平台 I2C 主总线句柄；真实后端指向 ESP-IDF 总线对象。 */
     void *platform_i2c;
-    /* 保存平台马达停止定时器句柄；真实后端指向 esp_timer。 */
-    void *platform_motor_timer;
     /* 标记初始化完成；未完成时所有操作返回 NOT_READY。 */
     bool initialized;
 } board_runtime_t;

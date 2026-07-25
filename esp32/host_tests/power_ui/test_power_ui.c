@@ -99,12 +99,6 @@ typedef struct {
     bool display_power;
     /* 保存最近亮度百分比。 */
     uint8_t brightness;
-    /* 保存最近马达脉冲时长，单位毫秒。 */
-    uint16_t haptic_duration_ms;
-    /* 保存最近马达强度百分比。 */
-    uint8_t haptic_intensity_percent;
-    /* 保存马达调用次数，验证一次计数只产生一次脉冲。 */
-    uint32_t haptic_call_count;
     /* 保存 mock 电量百分比。 */
     uint8_t battery_percent;
     /* 保存 mock 充电状态。 */
@@ -129,21 +123,6 @@ static int board_mock_set_brightness(void *context, uint8_t percent)
     board_mock_t *mock = (board_mock_t *)context;
     /* 记录亮度。 */
     mock->brightness = percent;
-    /* 返回成功。 */
-    return 0;
-}
-
-/* mock 输出振动脉冲。 */
-static int board_mock_pulse(void *context, uint16_t duration_ms, uint8_t intensity_percent)
-{
-    /* 转换 mock 上下文。 */
-    board_mock_t *mock = (board_mock_t *)context;
-    /* 记录脉冲时长。 */
-    mock->haptic_duration_ms = duration_ms;
-    /* 记录 PWM 强度。 */
-    mock->haptic_intensity_percent = intensity_percent;
-    /* 记录调用次数。 */
-    mock->haptic_call_count += 1U;
     /* 返回成功。 */
     return 0;
 }
@@ -176,8 +155,6 @@ static void test_board_profile_and_probe(void)
     CHECK_EQ_INT(15U, profile.i2c_sda_gpio);
     /* 检查 I2C SCL。 */
     CHECK_EQ_INT(14U, profile.i2c_scl_gpio);
-    /* 检查马达 GPIO。 */
-    CHECK_EQ_INT(18U, profile.motor_gpio);
     /* 检查 QMI 深睡可唤醒 GPIO。 */
     CHECK_EQ_INT(21U, profile.imu_interrupt_gpio);
     /* 检查本地原理图的触摸 Light-sleep 唤醒 GPIO。 */
@@ -210,7 +187,7 @@ static void test_board_profile_and_probe(void)
     CHECK_EQ_INT(BOARD_ADAPTER_ERR_IO, board_detect_touch_controller(mock_probe, &probe, &detected));
 }
 
-/* 验证板级屏幕、马达和电池抽象，不依赖真实 GPIO。 */
+/* 验证板级屏幕和电池抽象，不依赖真实 GPIO。 */
 static void test_board_adapter_operations(void)
 {
     /* 创建有效板型。 */
@@ -222,7 +199,6 @@ static void test_board_adapter_operations(void)
         .context = &mock,
         .set_display_power = board_mock_set_power,
         .set_display_brightness = board_mock_set_brightness,
-        .pulse_motor = board_mock_pulse,
         .read_battery = board_mock_read_battery,
     };
     /* 创建零初始化适配器。 */
@@ -241,16 +217,6 @@ static void test_board_adapter_operations(void)
     CHECK_TRUE(!mock.display_power);
     /* 检查亮度归零。 */
     CHECK_EQ_INT(0U, mock.brightness);
-    /* 请求一次 30 ms、75% 计数反馈，与领域层有效计数波形一致。 */
-    CHECK_EQ_INT(BOARD_ADAPTER_OK, board_adapter_pulse_haptic(&adapter, 30U, 75U));
-    /* 检查仅一次回调。 */
-    CHECK_EQ_INT(1U, mock.haptic_call_count);
-    /* 检查时长。 */
-    CHECK_EQ_INT(30U, mock.haptic_duration_ms);
-    /* 检查强度。 */
-    CHECK_EQ_INT(75U, mock.haptic_intensity_percent);
-    /* 零时长必须拒绝，防止非法 PWM 请求。 */
-    CHECK_EQ_INT(BOARD_ADAPTER_ERR_ARGUMENT, board_adapter_pulse_haptic(&adapter, 0U, 75U));
     /* 准备电池输出。 */
     uint8_t percent = 0U;
     /* 准备充电输出。 */

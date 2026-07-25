@@ -24,9 +24,6 @@ public sealed class UserPreferences
     /// <summary>PC 界面体重显示单位；旧 JSON 缺少该字段时默认公制。</summary>
     public MeasurementUnitSystem UnitSystem { get; set; } = MeasurementUnitSystem.Metric;
 
-    /// <summary>是否启用每次有效计数的振动反馈。</summary>
-    public bool HapticEnabled { get; set; } = true;
-
     /// <summary>是否启用开始、目标和错误提示音。</summary>
     public bool SoundEnabled { get; set; }
 

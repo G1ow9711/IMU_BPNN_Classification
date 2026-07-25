@@ -25,22 +25,32 @@ extern "C" {
 #define MOTION_PHASE_SAMPLE_PERIOD_MS (40U)
 /* 超过 120 ms 表示至少丢失两个 25 Hz 点，当前周期必须重置。 */
 #define MOTION_PHASE_MAX_GAP_MS (120U)
-/* 两相位动作开始学习主旋转方向的角速度门槛，单位 deg/s。 */
-#define MOTION_PHASE_DIRECTION_LEARN_DPS (45.0F)
-/* 学习方向后的主向和回向判定门槛，单位 deg/s。 */
-#define MOTION_PHASE_DIRECTION_ACTIVE_DPS (32.0F)
+/* 两相位动作开始学习主旋转方向的角速度下限，单位 deg/s；活动门已先排除整段静止。 */
+#define MOTION_PHASE_DIRECTION_LEARN_DPS (26.0F)
+/* 自适应主向/回向门的最低值，单位 deg/s；必须高于 22 deg/s 静止门以形成迟滞。 */
+#define MOTION_PHASE_DIRECTION_ACTIVE_MIN_DPS (27.0F)
+/* 自适应主向/回向门的最高值，单位 deg/s；防止一次猛烈冲击让后续正常动作永久失效。 */
+#define MOTION_PHASE_DIRECTION_ACTIVE_MAX_DPS (72.0F)
+/* 主向/回向门取活动角速度包络的 45%，使不同人的动作幅度按比例归一并拒绝次级波纹。 */
+#define MOTION_PHASE_DIRECTION_ACTIVE_RATIO (0.45F)
+/* 新高峰按 25% 更新角速度包络，使大幅动作的判定门在一到两次峰内同步抬升。 */
+#define MOTION_PHASE_SCALE_RISE_ALPHA (0.25F)
+/* 低于包络的有效运动按 1% 缓慢回落，兼顾同一轮中的疲劳和幅度变小。 */
+#define MOTION_PHASE_SCALE_FALL_ALPHA (0.01F)
+/* 新方向与当前方向夹角余弦绝对值至少为 0.60 才参与更新，拒绝交叉轴噪声。 */
+#define MOTION_PHASE_DIRECTION_ALIGNMENT_MIN (0.60F)
+/* 合法同轴运动每点只用 8% 更新方向，允许自然姿态漂移但不跟随瞬时摆腕。 */
+#define MOTION_PHASE_DIRECTION_ADAPT_ALPHA (0.08F)
+/* 离散端点必须由两个真实连续 25 Hz 点确认，禁止把单点峰值人工复制成稳定相位。 */
+#define MOTION_PHASE_TRANSITION_CONFIRM_SAMPLES (2U)
 /* 静止判定角速度模长上限，单位 deg/s。 */
 #define MOTION_PHASE_REST_GYRO_DPS (22.0F)
 /* 静止判定加速度模长相对 1 g 的允许偏差，单位 g。 */
 #define MOTION_PHASE_REST_ACCEL_TOLERANCE_G (0.24F)
-/* 三个高动态跳跃类的腾空判定加速度模长上限，单位 g；开合跳不使用。 */
-#define MOTION_PHASE_FLIGHT_MAX_G (0.78F)
-/* 起跳推进判定加速度模长门槛，单位 g。 */
-#define MOTION_PHASE_TAKEOFF_MIN_G (1.18F)
-/* 落地冲击判定加速度模长门槛，单位 g。 */
-#define MOTION_PHASE_LANDING_MIN_G (1.30F)
 /* walk/trot 局部冲击峰相对慢基线的最小增量，单位 g。 */
 #define MOTION_PHASE_STEP_PEAK_DELTA_G (0.16F)
+/* 步峰接受后必须真正回落到慢基线才重新武装，防止拉长动作把正向次级波瓣拆成第二步。 */
+#define MOTION_PHASE_STEP_REARM_DELTA_G (0.0F)
 /* 每个离散事件至少保持两个 25 Hz 点，满足下游计数器稳定相位合同。 */
 #define MOTION_PHASE_EVENT_HOLD_SAMPLES (2U)
 /* 开合跳参考算法第一级均值窗口为 11 点，25 Hz 下覆盖 0.44 秒。 */
@@ -55,9 +65,6 @@ extern "C" {
 #define MOTION_PERIODIC_MIN_AMPLITUDE_G (1.0F / 14.0F)
 /* 同一轴两次有效峰谷至少相隔 13 点，即 0.52 秒，抑制一个动作内部的次级波纹。 */
 #define MOTION_PERIODIC_AXIS_REFRACTORY_SAMPLES (13U)
-/* 单次振动保护窗最多允许连续跳过 4 个 25 Hz 点，即 160 ms；更长污染按断流重置。 */
-#define MOTION_PERIODIC_MAX_TRANSIENT_SKIP_SAMPLES (4U)
-
 /* 统一结果码；时间间断会重置内部周期并显式返回 GAP。 */
 typedef enum {
     /* 当前样本已处理，输出结构有效。 */
@@ -114,8 +121,6 @@ typedef struct {
     bool has_timestamp;
     /* last_timestamp_ms 保存最近输入时间，单位 ms，必须严格递增。 */
     uint64_t last_timestamp_ms;
-    /* transient_skip_count 保存连续只占时间、不写幅值的马达污染点数，范围 0..4。 */
-    uint8_t transient_skip_count;
     /* long_filter 先执行 11 点均值，压制腕部高频抖动。 */
     motion_periodic_mean_filter_t long_filter;
     /* short_filter 再执行 5 点均值，复现 StepCounter 的 11+5 双均值链。 */
@@ -154,15 +159,21 @@ typedef struct {
     bool has_timestamp;
     /* 上一个已接受样本的单调毫秒。 */
     uint64_t last_timestamp_ms;
-    /* 两相位动作学习到的三轴单位旋转方向；开合跳在本次会话内固定使用。 */
+    /* 两相位动作学习到的三轴单位旋转方向；活动段内只按同轴证据缓慢自适应。 */
     float learned_gyro_direction[3];
-    /* true 表示 learned_gyro_direction 已归一化且可用于投影；开合跳周期闭合后不清除。 */
+    /* true 表示 learned_gyro_direction 已由两个真实连续运动点确认并可用于投影。 */
     bool direction_valid;
+    /* motion_scale_dps 保存活动段角速度包络，单位 deg/s，用于构造幅度自适应迟滞门。 */
+    float motion_scale_dps;
+    /* transition_candidate 保存待确认端点类型：0=空、1=PRIMARY、2=SECONDARY、3/4=两种闭合。 */
+    uint8_t transition_candidate;
+    /* transition_candidate_count 保存当前端点连续真实点数，范围 0..2。 */
+    uint8_t transition_candidate_count;
     /* 开合跳首窗选出的主周期角速度轴，0/1/2 分别表示 gx/gy/gz；其它动作不读取。 */
     uint8_t fixed_gyro_axis;
     /* true 表示开合跳改用 fixed_gyro_axis 的有符号单轴值，禁止三轴点积互相抵消。 */
     bool fixed_gyro_axis_valid;
-    /* 内部阶段；两相位和跳跃模式使用不同编号，外部不得改写。 */
+    /* 内部阶段；两相位重复动作使用等待主向、回向或闭合三个编号，外部不得改写。 */
     uint8_t stage;
     /* 当前需要继续输出的离散事件相位。 */
     fitness_motion_phase_t held_phase;
@@ -176,6 +187,8 @@ typedef struct {
     float previous_previous_dynamic_acceleration_g;
     /* true 表示局部峰检测已有两个历史点。 */
     bool step_history_ready;
+    /* true 表示上一物理步已经回落到低门以下，允许下一个高门局部峰产生一次步事件。 */
+    bool step_peak_armed;
     /* 已收集的步峰历史点数，达到 2 后 step_history_ready=true。 */
     uint8_t step_history_count;
 } motion_phase_detector_t;
@@ -204,13 +217,6 @@ motion_phase_status_t motion_periodic_pair_init(
 /* 清空滤波、未完成峰谷和时间线，但保留 total_pairs 权威轴累计。 */
 void motion_periodic_pair_reset_cycle(
     motion_periodic_pair_detector_t *detector);
-/*
- * 短暂污染点只推进严格单调时间线，不把受污染加速度写入 11+5 均值或峰谷状态。
- * 连续调用可跨过马达保护窗；单次间隔超过 120 ms 时仍清空未完成周期并返回 GAP_RESET。
- */
-motion_phase_status_t motion_periodic_pair_skip_transient(
-    motion_periodic_pair_detector_t *detector,
-    uint64_t monotonic_ms);
 /* 输入一个 25 Hz 单轴加速度点，输出当前点是否完成一个不复用的相邻峰谷对。 */
 motion_phase_status_t motion_periodic_pair_push(
     motion_periodic_pair_detector_t *detector,

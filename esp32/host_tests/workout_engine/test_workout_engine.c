@@ -11,10 +11,8 @@
 /* 保存断言总数。 */
 static unsigned int g_assertions = 0U;
 
-/* 质量位第 4 位与生产 IMU_QUALITY_HAPTIC_CONTAMINATED 一致，表示马达导通污染当前六轴点。 */
-#define TEST_IMU_QUALITY_HAPTIC_CONTAMINATED (UINT16_C(1) << 4U)
-/* 30 ms 马达及前后保护窗在 25 Hz 重采样链中最多覆盖连续四点。 */
-#define TEST_HAPTIC_CONTAMINATED_SAMPLE_COUNT (4U)
+/* 质量位第 7 位表示双 M0 前向失败，不能进入准备态分类累计。 */
+#define TEST_IMU_QUALITY_INFERENCE_FAILED (UINT16_C(1) << 7U)
 
 /* 失败时打印表达式和行号并退出当前测试进程。 */
 #define CHECK(expression)                                                       \
@@ -157,6 +155,57 @@ static int test_preparing_rejects_transient_first_window(void)
     return 0;
 }
 
+/* 验证强错误首窗不能借累计惯性压过随后连续两个一致的独立窗口。 */
+static int test_preparing_confirms_consecutive_independent_windows(void)
+{
+    /* 创建独立训练引擎，避免历史累计 logits 污染本测试。 */
+    workout_engine_t engine;
+    /* 初始化全部会话、分类和计数状态。 */
+    workout_engine_init(&engine);
+    /* 开始一轮右手腕单动作会话；动作真值不预先传给引擎。 */
+    CHECK(workout_engine_start(&engine, 76U, 70000U, 0ULL) == WORKOUT_STATUS_OK);
+    /* logits 保存当前一个 62 点窗口的 11 类融合分数。 */
+    float logits[WORKOUT_CLASS_COUNT];
+    /* locked 标记本次推理是否完成动作确认。 */
+    bool locked = false;
+    /* 第一窗制造极强深蹲起步噪声，目标类 +10，其余类 -10。 */
+    make_scaled_logits(logits, FITNESS_ACTION_SQUAT, 10.0F, -10.0F);
+    /* 单个错误窗口只能成为临时候选，不能锁定整轮。 */
+    CHECK(workout_engine_push_inference(&engine, logits, 0ULL, 0U, &locked) ==
+          WORKOUT_STATUS_IGNORED);
+    /* 第一窗后必须继续准备且尚未选择会话动作。 */
+    CHECK(!locked &&
+          (engine.state == WORKOUT_STATE_PREPARING) &&
+          (engine.selected_action == WORKOUT_ACTION_UNKNOWN));
+    /* 第二窗制造不同的早安式起步噪声，确保错误窗口本身也不连续。 */
+    make_scaled_logits(logits, FITNESS_ACTION_GOOD_MORNING, 8.0F, -8.0F);
+    /* 两个互异窗口不得因第一窗累计优势而提前锁成深蹲。 */
+    CHECK(workout_engine_push_inference(&engine, logits, 480ULL, 0U, &locked) ==
+          WORKOUT_STATUS_IGNORED);
+    /* 引擎仍应处于准备态，并公开当前独立窗口的早安式候选。 */
+    CHECK(!locked &&
+          (engine.state == WORKOUT_STATE_PREPARING) &&
+          (engine.inferred_action == (uint8_t)FITNESS_ACTION_GOOD_MORNING));
+    /* 第三窗切换为真实挥手，建立第一份可信同类证据。 */
+    make_scaled_logits(logits, FITNESS_ACTION_WAVE, 8.0F, -8.0F);
+    /* 第一份挥手证据仍不得锁定。 */
+    CHECK(workout_engine_push_inference(&engine, logits, 960ULL, 0U, &locked) ==
+          WORKOUT_STATUS_IGNORED);
+    /* 当前候选必须纠正为挥手，但会话动作仍未知。 */
+    CHECK(!locked &&
+          (engine.inferred_action == (uint8_t)FITNESS_ACTION_WAVE) &&
+          (engine.selected_action == WORKOUT_ACTION_UNKNOWN));
+    /* 第四窗继续提交挥手，形成两个连续独立窗口。 */
+    CHECK(workout_engine_push_inference(&engine, logits, 1440ULL, 0U, &locked) ==
+          WORKOUT_STATUS_OK);
+    /* 引擎必须按连续独立证据锁定挥手，而非累计惯性中的深蹲。 */
+    CHECK(locked &&
+          (engine.state == WORKOUT_STATE_RUNNING) &&
+          (engine.selected_action == (uint8_t)FITNESS_ACTION_WAVE));
+    /* 测试通过。 */
+    return 0;
+}
+
 /* 验证连续低置信累计证据最迟在第四窗按当前累计类别结束准备态。 */
 static int test_preparing_forces_cumulative_class_at_four_windows(void)
 {
@@ -198,7 +247,7 @@ static int test_preparing_retains_full_four_window_span(void)
 {
     /* 创建独立训练引擎，准备缓存从空状态开始。 */
     workout_engine_t engine;
-    /* 清空全部固定状态和振动队列。 */
+    /* 清空全部固定状态。 */
     workout_engine_init(&engine);
     /* 开始新会话；零时刻对应用户点击手表“开始”。 */
     CHECK(workout_engine_start(&engine, 77U, 70000U, 0ULL) == WORKOUT_STATUS_OK);
@@ -302,16 +351,70 @@ static int test_preparing_timeline_break_preserves_buffer_and_candidate(void)
     return 0;
 }
 
+/* 验证重建后完整 62 点窗可用于锁类，而真正推理失败窗仍必须拒绝。 */
+static int test_preparing_accepts_recovered_windows_only(void)
+{
+    /* 创建独立引擎，避免其它候选窗口污染累计。 */
+    workout_engine_t engine;
+    /* 初始化为空闲。 */
+    workout_engine_init(&engine);
+    /* 开始新会话并进入准备态。 */
+    CHECK(workout_engine_start(&engine, 80U, 70000U, 0ULL) == WORKOUT_STATUS_OK);
+    /* 构造高置信开合跳 logits。 */
+    float logits[WORKOUT_CLASS_COUNT];
+    /* 目标类别固定为开合跳。 */
+    make_logits(logits, (uint8_t)FITNESS_ACTION_JUMPING_JACK);
+    /* locked 保存本窗是否提交主动作。 */
+    bool locked = true;
+    /* 0x41 表示窗口在重采样重建后形成；62 点本身完整，第一窗应成为候选。 */
+    CHECK(workout_engine_push_inference(
+              &engine,
+              logits,
+              2440ULL,
+              UINT16_C(0x0041),
+              &locked) == WORKOUT_STATUS_IGNORED);
+    /* 第一窗不能锁类，但必须累计为一份开合跳证据。 */
+    CHECK(!locked &&
+          (engine.bout_window_count == 1U) &&
+          (engine.candidate_windows == 1U) &&
+          (engine.inferred_action == (uint8_t)FITNESS_ACTION_JUMPING_JACK));
+    /* 第二个重建后完整窗同样可信，应完成两窗确认。 */
+    CHECK(workout_engine_push_inference(
+              &engine,
+              logits,
+              2920ULL,
+              UINT16_C(0x0043),
+              &locked) == WORKOUT_STATUS_OK);
+    /* 会话必须在正常 62+12 点时间尺度内进入运行。 */
+    CHECK(locked &&
+          (engine.state == WORKOUT_STATE_RUNNING) &&
+          (engine.selected_action == (uint8_t)FITNESS_ACTION_JUMPING_JACK));
+
+    /* 创建第二个引擎，单独验证模型失败质量位。 */
+    workout_engine_t failed_engine;
+    /* 初始化为空闲。 */
+    workout_engine_init(&failed_engine);
+    /* 开始独立会话。 */
+    CHECK(workout_engine_start(&failed_engine, 81U, 70000U, 0ULL) ==
+          WORKOUT_STATUS_OK);
+    /* 推理失败窗即使 logits 看似高置信也必须拒绝。 */
+    CHECK(workout_engine_push_inference(
+              &failed_engine,
+              logits,
+              2440ULL,
+              TEST_IMU_QUALITY_INFERENCE_FAILED,
+              &locked) == WORKOUT_STATUS_IGNORED);
+    /* 失败窗不能进入动作段累计或候选连续数。 */
+    CHECK((failed_engine.bout_window_count == 0U) &&
+          (failed_engine.candidate_windows == 0U) &&
+          (failed_engine.state == WORKOUT_STATE_PREPARING));
+    /* 测试通过。 */
+    return 0;
+}
+
 /* 验证准备期补算形成的每次计数都保留原始 IMU 时刻并可按序交给 BLE/CSV。 */
 static int test_prelock_replay_exposes_all_metric_events(void)
 {
-    /* 一个开合跳周期固定 20 点、0.8 秒，峰谷幅值足以越过产品动态门。 */
-    static const float cycle[20] = {
-        0.0F, 0.31F, 0.59F, 0.81F, 0.95F,
-        1.0F, 0.95F, 0.81F, 0.59F, 0.31F,
-        0.0F, -0.31F, -0.59F, -0.81F, -0.95F,
-        -1.0F, -0.95F, -0.81F, -0.59F, -0.31F
-    };
     /* 创建独立训练引擎，准备缓存、回放 FIFO 和权威累计均从零开始。 */
     workout_engine_t engine;
     /* 清空全部固定状态。 */
@@ -324,32 +427,31 @@ static int test_prelock_replay_exposes_all_metric_events(void)
     bool emitted = true;
     /* time_ms 以 25 Hz 的 40 ms 周期严格递增。 */
     uint64_t time_ms = 0ULL;
-    /* 先缓存 20 个平坦点，填满 11+5 双均值预热。 */
-    for (uint8_t point = 0U; point < 20U; ++point) {
-        /* 三轴动态量为零，只建立滤波基线。 */
-        const motion_phase_sample_t sample = make_acceleration_sample(
-            time_ms,
-            0.0F,
-            0.0F,
-            0.0F);
-        /* PREPARING 必须缓存当前点并返回有意忽略。 */
-        CHECK(workout_engine_push_sample(&engine, &sample, true, 0U, &event, &emitted) ==
-              WORKOUT_STATUS_IGNORED);
-        /* 锁类前不能直接产生 UI/BLE 事件。 */
-        CHECK(!emitted);
-        /* 推进一个采样周期。 */
-        time_ms += MOTION_PHASE_SAMPLE_PERIOD_MS;
-    }
-    /* 缓存两个完整开合跳周期，代表锁类等待期已经发生的前两次动作。 */
+    /* 缓存两个完整手腕往返周期，代表锁类等待期已经发生的前两次开合跳。 */
     for (uint8_t repetition = 0U; repetition < 2U; ++repetition) {
-        /* 当前周期逐点写入三轴，其中 X/Y 是一致可信轴。 */
-        for (uint8_t point = 0U; point < 20U; ++point) {
-            /* 构造三轴加速度；Z 使用小幅反相噪声验证中位融合。 */
-            const motion_phase_sample_t sample = make_acceleration_sample(
+        /* 每个自然周期固定 30 点，即 1.2 秒。 */
+        for (uint8_t point = 0U; point < 30U; ++point) {
+            /* 默认保持低幅主向运动，避免把过渡段错误识别为静止。 */
+            float gyro_x_dps = 12.0F;
+            /* 周期开头三点构成手臂上行主向端点。 */
+            if (point < 3U) {
+                /* 两次周期轻微改变幅度，验证回放不依赖完全标准动作。 */
+                gyro_x_dps = 85.0F + (float)repetition * 5.0F;
+            } else if ((point >= 10U) && (point < 13U)) {
+                /* 中段三点构成手臂下行回向端点。 */
+                gyro_x_dps = -90.0F + (float)repetition * 4.0F;
+            } else if ((point >= 13U) && (point < 25U)) {
+                /* 回向过渡使用低幅负值，避免重复端点。 */
+                gyro_x_dps = -12.0F;
+            } else if ((point >= 25U) && (point < 28U)) {
+                /* 返回主向端点闭合一个完整开合跳周期。 */
+                gyro_x_dps = 88.0F - (float)repetition * 3.0F;
+            }
+            /* 加速度保持约 1 g，证明计数来自完整手腕运动而不是落地冲击。 */
+            const motion_phase_sample_t sample = make_sample(
                 time_ms,
-                cycle[point],
-                cycle[point] * 0.9F,
-                -cycle[point] * 0.15F);
+                gyro_x_dps,
+                1.05F);
             /* 准备态仍只缓存，不允许直接发事件。 */
             CHECK(workout_engine_push_sample(&engine, &sample, true, 0U, &event, &emitted) ==
                   WORKOUT_STATUS_IGNORED);
@@ -358,22 +460,6 @@ static int test_prelock_replay_exposes_all_metric_events(void)
             /* 推进一个 40 ms 点。 */
             time_ms += MOTION_PHASE_SAMPLE_PERIOD_MS;
         }
-    }
-    /* 追加十个上升点，使双均值延迟可以确认第二个周期的末尾极值。 */
-    for (uint8_t point = 0U; point < 10U; ++point) {
-        /* 使用下一周期前半段作为有限尾部确认信号。 */
-        const motion_phase_sample_t sample = make_acceleration_sample(
-            time_ms,
-            cycle[point],
-            cycle[point] * 0.9F,
-            -cycle[point] * 0.15F);
-        /* 尾部仍属于准备缓存。 */
-        CHECK(workout_engine_push_sample(&engine, &sample, true, 0U, &event, &emitted) ==
-              WORKOUT_STATUS_IGNORED);
-        /* 尾部点不得提前公开。 */
-        CHECK(!emitted);
-        /* 推进到下一采样时刻。 */
-        time_ms += MOTION_PHASE_SAMPLE_PERIOD_MS;
     }
 
     /* 构造两个一致高置信窗口，第二窗触发本轮唯一动作锁定与历史样本回放。 */
@@ -419,7 +505,7 @@ static int test_prelock_replay_exposes_all_metric_events(void)
     return 0;
 }
 
-/* 验证准备锁定、深蹲完整计数、每次计数 30 ms 振动和暂停时间排除。 */
+/* 验证准备锁定、深蹲完整计数和暂停时间排除。 */
 static int test_repetition_flow(void)
 {
     /* 创建训练引擎。 */
@@ -430,11 +516,6 @@ static int test_repetition_flow(void)
     CHECK(workout_engine_start(&engine, 7U, 70000U, 0ULL) == WORKOUT_STATUS_OK);
     /* 锁定 squat。 */
     CHECK(lock_action(&engine, FITNESS_ACTION_SQUAT, 0ULL) == 0);
-
-    /* 保存后续次数振动输出。 */
-    fitness_haptic_request_t haptic;
-    /* 累计锁定不振动，避免马达污染紧接着的第一个实时动作。 */
-    CHECK(!workout_engine_pop_haptic(&engine, &haptic));
 
     /* 保存 MetricEvent 输出。 */
     fitness_metric_event_t event;
@@ -488,8 +569,13 @@ static int test_repetition_flow(void)
     /* 第一 REST 点不计数。 */
     CHECK(workout_engine_push_sample(&engine, &sample, true, 0U, &event, &emitted) ==
           WORKOUT_STATUS_OK);
-    /* 第二稳定点闭合完整重复。 */
+    /* 第二个真实稳定点确认 REST，但领域层仍等待接口保持事件。 */
     sample = make_sample(1760ULL, 0.0F, 1.0F);
+    /* 当前点只确认物理端点，不应提前生成次数。 */
+    CHECK(workout_engine_push_sample(&engine, &sample, true, 0U, &event, &emitted) ==
+          WORKOUT_STATUS_OK);
+    /* 第三个输入点承载已确认 REST 的接口保持事件。 */
+    sample = make_sample(1800ULL, 0.0F, 1.0F);
     /* 必须生成唯一事件。 */
     CHECK(workout_engine_push_sample(&engine, &sample, true, 0U, &event, &emitted) ==
           WORKOUT_STATUS_OK);
@@ -499,16 +585,10 @@ static int test_repetition_flow(void)
     CHECK((event.action == FITNESS_ACTION_SQUAT) &&
           (event.metric_kind == FITNESS_METRIC_REPETITION) &&
           (event.total_value == 1ULL));
-    /* 每次有效重复必须产生一次 30 ms 请求。 */
-    CHECK(workout_engine_pop_haptic(&engine, &haptic));
-    /* 检查波形。 */
-    CHECK((haptic.reason == FITNESS_HAPTIC_REASON_REPETITION) &&
-          (haptic.on_ms == 30U) &&
-          (haptic.repeat_count == 1U));
     /* 保存暂停前热量。 */
     const uint64_t calories_before_pause = engine.fitness_session.gross_microkcal;
     /* 暂停会话。 */
-    CHECK(workout_engine_pause(&engine, 1800ULL) == WORKOUT_STATUS_OK);
+    CHECK(workout_engine_pause(&engine, 1840ULL) == WORKOUT_STATUS_OK);
     /* 暂停期样本被忽略。 */
     sample = make_sample(5000ULL, 0.0F, 1.0F);
     /* 检查有意忽略。 */
@@ -517,16 +597,16 @@ static int test_repetition_flow(void)
     /* 暂停期热量不变。 */
     CHECK(engine.fitness_session.gross_microkcal == calories_before_pause);
     /* 10 秒后恢复。 */
-    CHECK(workout_engine_resume(&engine, 11800ULL) == WORKOUT_STATUS_OK);
+    CHECK(workout_engine_resume(&engine, 11840ULL) == WORKOUT_STATUS_OK);
     /* 恢复后 40 ms 点正常推进，不含暂停 10 秒。 */
-    sample = make_sample(11840ULL, 0.0F, 1.0F);
+    sample = make_sample(11880ULL, 0.0F, 1.0F);
     /* 处理成功。 */
     CHECK(workout_engine_push_sample(&engine, &sample, true, 0U, &event, &emitted) ==
           WORKOUT_STATUS_OK);
     /* 停止会话。 */
-    CHECK(workout_engine_stop(&engine, 11900ULL) == WORKOUT_STATUS_OK);
+    CHECK(workout_engine_stop(&engine, 11940ULL) == WORKOUT_STATUS_OK);
     /* 重复停止幂等。 */
-    CHECK(workout_engine_stop(&engine, 11900ULL) == WORKOUT_STATUS_OK);
+    CHECK(workout_engine_stop(&engine, 11940ULL) == WORKOUT_STATUS_OK);
     /* 当前状态为总结。 */
     CHECK(engine.state == WORKOUT_STATE_SUMMARY);
     /* 测试通过。 */
@@ -534,243 +614,81 @@ static int test_repetition_flow(void)
 }
 
 
-/* 把指定数量的三轴周期信号送入已锁定开合跳会话，并返回公开次数事件数。 */
-static int push_jumping_jack_acceleration_cycles(
-    workout_engine_t *engine,
-    const uint32_t repetition_count,
-    const bool simulate_haptic_feedback,
-    uint32_t *emitted_count)
+/* 验证开合跳按手腕主向、回向、返回的完整周期计数，不把开合冲击拆成两次。 */
+static int test_jumping_jack_counts_complete_wrist_cycles(void)
 {
-    /* 一个周期 20 点、0.8 秒，峰谷幅值 2 g，明显超过 1/14 g。 */
-    static const float cycle[20] = {
-        0.0F, 0.31F, 0.59F, 0.81F, 0.95F,
-        1.0F, 0.95F, 0.81F, 0.59F, 0.31F,
-        0.0F, -0.31F, -0.59F, -0.81F, -0.95F,
-        -1.0F, -0.95F, -0.81F, -0.59F, -0.31F
-    };
-    /* 公开次数从零累计。 */
-    *emitted_count = 0U;
-    /* time_ms 按 25 Hz 单调推进。 */
-    uint64_t time_ms = 0ULL;
-    /* event 接收唯一 MetricEvent。 */
+    /* 创建独立训练引擎。 */
+    workout_engine_t engine;
+    /* 清空会话、活动门和计数器。 */
+    workout_engine_init(&engine);
+    /* 用户点击开始。 */
+    CHECK(workout_engine_start(&engine, 82U, 70000U, 0ULL) == WORKOUT_STATUS_OK);
+    /* 两个模型窗确认本轮主动作。 */
+    CHECK(lock_action(&engine, FITNESS_ACTION_JUMPING_JACK, 0ULL) == 0);
+    /* event 接收每个完整周期产生的唯一权威事实。 */
     fitness_metric_event_t event;
-    /* emitted 保存当前点是否使三轴中位数增加一次。 */
-    bool emitted = false;
-    /* contaminated_points_remaining 保存计次振动后仍需按污染点提交的 25 Hz 点数。 */
-    uint32_t contaminated_points_remaining = 0U;
-    /* 前 20 点填满 11+5 均值窗口，三轴动态分量均为零。 */
-    for (uint32_t point = 0U; point < 20U; ++point) {
-        /* 构造静止三轴加速度点。 */
-        motion_phase_sample_t sample = make_acceleration_sample(time_ms, 0.0F, 0.0F, 0.0F);
-        /* 静止点只能推进时间和滤波。 */
-        CHECK(workout_engine_push_sample(engine, &sample, true, 0U, &event, &emitted) ==
-              WORKOUT_STATUS_OK);
-        /* 平坦输入不得公开次数。 */
-        CHECK(!emitted);
-        /* 推进 40 ms。 */
-        time_ms += MOTION_PHASE_SAMPLE_PERIOD_MS;
-    }
-    /* 连续输入指定数量动作。 */
-    for (uint32_t repetition = 0U; repetition < repetition_count; ++repetition) {
-        /* 一个动作周期逐点输入。 */
-        for (uint32_t point = 0U; point < 20U; ++point) {
-            /* X/Y 保持同一权威周期，Z 注入较小反相量模拟单轴差异。 */
-            motion_phase_sample_t sample = make_acceleration_sample(
+    /* emitted_count 统计 UI/BLE 应看到的逐次增加。 */
+    uint32_t emitted_count = 0U;
+    /* 十个周期使用 1.2 秒自然节奏，避免依赖最快合成动作。 */
+    for (uint8_t cycle = 0U; cycle < 10U; ++cycle) {
+        /* 每周期 30 个 25 Hz 点。 */
+        for (uint8_t point = 0U; point < 30U; ++point) {
+            /* gx 保存当前手臂方向角速度，单位 deg/s。 */
+            float gyro_x_dps = 12.0F;
+            /* 周期前段是手臂上行主向，连续三点越过自适应门。 */
+            if (point < 3U) {
+                /* 主向幅度允许每轮轻微变化，模拟人的动作差异。 */
+                gyro_x_dps = 85.0F + (float)(cycle % 3U) * 5.0F;
+            } else if ((point >= 10U) && (point < 13U)) {
+                /* 中段手臂回落为反向，连续三点形成真实回向端点。 */
+                gyro_x_dps = -90.0F + (float)(cycle % 2U) * 6.0F;
+            } else if ((point >= 13U) && (point < 25U)) {
+                /* 回向过渡保持低幅负值，不产生第二个回向端点。 */
+                gyro_x_dps = -12.0F;
+            } else if ((point >= 25U) && (point < 28U)) {
+                /* 返回主向端点闭合一次完整开合跳，并成为下一周期起点。 */
+                gyro_x_dps = 88.0F - (float)(cycle % 3U) * 4.0F;
+            }
+            /* 设备时间从 1 秒开始，所有点严格相隔 40 ms。 */
+            const uint64_t time_ms =
+                UINT64_C(1000) +
+                ((uint64_t)cycle * UINT64_C(1200)) +
+                ((uint64_t)point * UINT64_C(40));
+            /* 加速度保持接近 1 g；计数必须来自完整手腕方向而非两次落地冲击。 */
+            const motion_phase_sample_t sample = make_sample(
                 time_ms,
-                cycle[point],
-                cycle[point] * 0.9F,
-                -cycle[point] * 0.15F);
-            /* 当前点只有在马达保护窗外才允许进入峰谷滤波器。 */
-            const bool count_input_valid = contaminated_points_remaining == 0U;
-            /* 污染点携带与生产 IMU 链一致的质量位，干净点为零。 */
-            const uint16_t quality_flags = count_input_valid
-                ? UINT16_C(0)
-                : TEST_IMU_QUALITY_HAPTIC_CONTAMINATED;
-            /* 当前六轴点必须被在线状态机接受；污染点仍推进会话时间但不写峰谷幅值。 */
+                gyro_x_dps,
+                1.05F);
+            /* 默认当前点没有事件。 */
+            bool emitted = false;
+            /* 干净活动点进入生产引擎。 */
             CHECK(workout_engine_push_sample(
-                      engine,
+                      &engine,
                       &sample,
-                      count_input_valid,
-                      quality_flags,
+                      true,
+                      0U,
                       &event,
-                      &emitted) ==
-                  WORKOUT_STATUS_OK);
-            /* 一个污染点已经按 40 ms 时间线提交，递减剩余保护点数。 */
-            if (contaminated_points_remaining > 0U) {
-                /* 下一点继续按剩余值决定是否受马达污染。 */
-                contaminated_points_remaining -= 1U;
-            }
-            /* 中位累计增加时只允许一个事件。 */
+                      &emitted) == WORKOUT_STATUS_OK);
+            /* 完整周期闭合时累计一次。 */
             if (emitted) {
-                /* 事件必须是一次重复动作。 */
-                CHECK((event.metric_kind == FITNESS_METRIC_REPETITION) &&
-                      (event.total_value == (uint64_t)(*emitted_count + 1U)));
-                /* 累计公开次数。 */
-                *emitted_count += 1U;
-                /* 反馈闭环测试必须真实消费训练引擎排入的 30 ms 振动请求。 */
-                if (simulate_haptic_feedback) {
-                    /* haptic 保存刚才次数对应的唯一马达请求。 */
-                    fitness_haptic_request_t haptic;
-                    /* 每次权威重复都必须能够取出一个振动请求。 */
-                    CHECK(workout_engine_pop_haptic(engine, &haptic));
-                    /* 请求参数必须保持产品合同的 30 ms 单脉冲。 */
-                    CHECK((haptic.reason == FITNESS_HAPTIC_REASON_REPETITION) &&
-                          (haptic.on_ms == 30U) &&
-                          (haptic.repeat_count == 1U));
-                    /* 从下一采样点开始模拟马达导通及保护窗污染。 */
-                    contaminated_points_remaining = TEST_HAPTIC_CONTAMINATED_SAMPLE_COUNT;
-                }
-            }
-            /* 推进一个采样周期。 */
-            time_ms += MOTION_PHASE_SAMPLE_PERIOD_MS;
-        }
-    }
-    /* 追加十点上升段，确认双均值延迟中的末尾波谷。 */
-    for (uint32_t point = 0U; point < 10U; ++point) {
-        /* 构造尾部确认点。 */
-        motion_phase_sample_t sample = make_acceleration_sample(
-            time_ms,
-            cycle[point],
-            cycle[point] * 0.9F,
-            -cycle[point] * 0.15F);
-        /* 尾部同样服从振动保护窗，避免测试在周期尾部绕过真实反馈链。 */
-        const bool count_input_valid = contaminated_points_remaining == 0U;
-        /* 按当前保护状态写入生产兼容质量位。 */
-        const uint16_t quality_flags = count_input_valid
-            ? UINT16_C(0)
-            : TEST_IMU_QUALITY_HAPTIC_CONTAMINATED;
-        /* 尾部点正常推进；污染点仍不进入峰谷幅值链。 */
-        CHECK(workout_engine_push_sample(
-                  engine,
-                  &sample,
-                  count_input_valid,
-                  quality_flags,
-                  &event,
-                  &emitted) ==
-              WORKOUT_STATUS_OK);
-        /* 消费一个已经提交的污染点。 */
-        if (contaminated_points_remaining > 0U) {
-            /* 递减后为零表示下一点重新干净。 */
-            contaminated_points_remaining -= 1U;
-        }
-        /* 捕获可能因滤波延迟在尾部完成的最后一次。 */
-        if (emitted) {
-            /* 尾部仍必须是单次重复事件。 */
-            CHECK((event.metric_kind == FITNESS_METRIC_REPETITION) &&
-                  (event.total_value == (uint64_t)(*emitted_count + 1U)));
-            /* 累加该次。 */
-            *emitted_count += 1U;
-            /* 尾部若完成次数，同样验证并启动真实振动污染窗。 */
-            if (simulate_haptic_feedback) {
-                /* haptic 保存尾部次数对应的请求。 */
-                fitness_haptic_request_t haptic;
-                /* 尾部事件也必须有一次马达请求。 */
-                CHECK(workout_engine_pop_haptic(engine, &haptic));
-                /* 尾部请求仍是 30 ms 单脉冲。 */
-                CHECK((haptic.reason == FITNESS_HAPTIC_REASON_REPETITION) &&
-                      (haptic.on_ms == 30U) &&
-                      (haptic.repeat_count == 1U));
-                /* 记录后续污染窗；当前测试结束前无需再消费完毕。 */
-                contaminated_points_remaining = TEST_HAPTIC_CONTAMINATED_SAMPLE_COUNT;
+                /* 每条事件必须是开合跳 repetition 且累计严格递增。 */
+                CHECK((event.action == FITNESS_ACTION_JUMPING_JACK) &&
+                      (event.metric_kind == FITNESS_METRIC_REPETITION) &&
+                      (event.total_value == (uint64_t)emitted_count + 1ULL));
+                /* UI/BLE 可见次数增加一。 */
+                emitted_count += 1U;
             }
         }
-        /* 推进时间。 */
-        time_ms += MOTION_PHASE_SAMPLE_PERIOD_MS;
     }
-    /* 数据送入完成。 */
-    return 0;
-}
-
-/* 验证用户做十次开合跳时，三轴累计中位数输出十次而不是二次或二十次。 */
-static int test_jumping_jack_peak_valley_median_counts_ten(void)
-{
-    /* 创建训练引擎。 */
-    workout_engine_t engine;
-    /* 初始化为空闲。 */
-    workout_engine_init(&engine);
-    /* 开始新会话。 */
-    CHECK(workout_engine_start(&engine, 72U, 70000U, 0ULL) == WORKOUT_STATUS_OK);
-    /* 两个累计高置信窗口锁定本次唯一动作为开合跳。 */
-    CHECK(lock_action(&engine, FITNESS_ACTION_JUMPING_JACK, 0ULL) == 0);
-    /* 三个峰谷检测器都必须初始化，轴累计从零开始。 */
-    for (uint8_t axis = 0U; axis < WORKOUT_JUMPING_JACK_AXIS_COUNT; ++axis) {
-        /* 检查静态状态有效。 */
-        CHECK(engine.jumping_jack_pair_detectors[axis].initialized);
-        /* 检查当前轴尚无配对。 */
-        CHECK(engine.jumping_jack_pair_detectors[axis].total_pairs == 0ULL);
-    }
-    /* emitted_count 保存 UI/BLE 可见 MetricEvent 次数。 */
-    uint32_t emitted_count = 0U;
-    /* 输入十个周期。 */
-    CHECK(push_jumping_jack_acceleration_cycles(&engine, 10U, false, &emitted_count) == 0);
-    /* X/Y 两轴一致形成十次，中位数必须为十。 */
+    /* 十个完整上行回落周期必须恰好输出十次。 */
     CHECK(emitted_count == 10U);
-    /* 权威会话累计必须同为十。 */
+    /* 会话权威累计与事件数一致。 */
     CHECK(engine.fitness_session.repetitions == 10ULL);
-    /* 已发布中位累计必须同为十，防止恢复后重复事件。 */
-    CHECK(engine.jumping_jack_reported_repetitions == 10ULL);
     /* 测试通过。 */
     return 0;
 }
 
-/* 验证每次计数后的真实振动污染不能把后续八个周期漏成仅二次。 */
-static int test_jumping_jack_haptic_feedback_preserves_ten_cycles(void)
-{
-    /* 创建独立训练引擎，避免普通十周期测试残留振动队列。 */
-    workout_engine_t engine;
-    /* 初始化全部会话、检测器和 FIFO。 */
-    workout_engine_init(&engine);
-    /* 开始本次 70 kg 测试会话。 */
-    CHECK(workout_engine_start(&engine, 74U, 70000U, 0ULL) == WORKOUT_STATUS_OK);
-    /* 首个分类窗口把本次唯一动作锁定为开合跳。 */
-    CHECK(lock_action(&engine, FITNESS_ACTION_JUMPING_JACK, 0ULL) == 0);
-    /* 保存 UI、BLE 和振动共用的权威事件数。 */
-    uint32_t emitted_count = 0U;
-    /* 输入十周期，并在每个事件后模拟四个马达污染点。 */
-    CHECK(push_jumping_jack_acceleration_cycles(&engine, 10U, true, &emitted_count) == 0);
-    /* 短暂马达污染只能跳过受污染幅值，不能反复清空 11+5 滤波历史。 */
-    CHECK(emitted_count == 10U);
-    /* 会话权威累计必须与事件数完全一致。 */
-    CHECK(engine.fitness_session.repetitions == 10ULL);
-    /* 三轴中位数发布游标同样必须达到十，防止恢复后补发旧次数。 */
-    CHECK(engine.jumping_jack_reported_repetitions == 10ULL);
-    /* 测试通过。 */
-    return 0;
-}
-
-/* 验证单轴噪声不能越过三轴中位数，两个可信轴仍可持续计数。 */
-static int test_jumping_jack_median_rejects_one_noisy_axis(void)
-{
-    /* 创建独立引擎。 */
-    workout_engine_t engine;
-    /* 初始化为空闲。 */
-    workout_engine_init(&engine);
-    /* 开始新会话。 */
-    CHECK(workout_engine_start(&engine, 73U, 70000U, 0ULL) == WORKOUT_STATUS_OK);
-    /* 锁定开合跳。 */
-    CHECK(lock_action(&engine, FITNESS_ACTION_JUMPING_JACK, 0ULL) == 0);
-    /* 直接制造单轴 Z 噪声累计，X/Y 仍为零。 */
-    engine.jumping_jack_pair_detectors[2].total_pairs = 25ULL;
-    /* reported 仍为零。 */
-    CHECK(engine.jumping_jack_reported_repetitions == 0ULL);
-    /* 输入一个平坦点，让融合层读取 0、0、25。 */
-    motion_phase_sample_t sample = make_acceleration_sample(0ULL, 0.0F, 0.0F, 0.0F);
-    /* 保存事件输出。 */
-    fitness_metric_event_t event;
-    /* 默认设为 true，验证函数明确清零。 */
-    bool emitted = true;
-    /* 平坦点处理成功。 */
-    CHECK(workout_engine_push_sample(&engine, &sample, true, 0U, &event, &emitted) ==
-          WORKOUT_STATUS_OK);
-    /* 中位数为零，单轴 25 次噪声不能公开。 */
-    CHECK(!emitted);
-    /* 权威累计保持零。 */
-    CHECK(engine.fitness_session.repetitions == 0ULL);
-    /* 测试通过。 */
-    return 0;
-}
-
-/* 验证 walk 步峰、权威步数和未到 10 步时不振动。 */
+/* 验证 walk 步峰和权威步数。 */
 static int test_step_flow(void)
 {
     /* 初始化新引擎。 */
@@ -781,10 +699,6 @@ static int test_step_flow(void)
     CHECK(workout_engine_start(&engine, 8U, 60000U, 0ULL) == WORKOUT_STATUS_OK);
     /* 锁定 walk。 */
     CHECK(lock_action(&engine, FITNESS_ACTION_WALK, 0ULL) == 0);
-    /* 保存后续步数振动输出。 */
-    fitness_haptic_request_t haptic;
-    /* 累计锁定不产生开始振动。 */
-    CHECK(!workout_engine_pop_haptic(&engine, &haptic));
     /* 保存事件。 */
     fitness_metric_event_t event;
     /* 保存事件标志。 */
@@ -811,8 +725,6 @@ static int test_step_flow(void)
           WORKOUT_STATUS_OK);
     /* 检查事件。 */
     CHECK(emitted && (event.metric_kind == FITNESS_METRIC_STEP) && (event.total_value == 1ULL));
-    /* 不满 10 步不得有步反馈。 */
-    CHECK(!workout_engine_pop_haptic(&engine, &haptic));
     /* 测试通过。 */
     return 0;
 }
@@ -868,7 +780,127 @@ static int test_prepare_boundaries(void)
     return 0;
 }
 
-/* 验证主动作不换计数器，但实时异类/休息会冻结计数并在恢复后重建周期。 */
+/* 验证运行期模型只保留诊断，不能再以单窗 Top-1 冻结已选动作计数器。 */
+static int test_running_inference_is_diagnostic_only(void)
+{
+    /* 创建独立引擎，避免其它会话的活动窗和相位状态污染本测试。 */
+    workout_engine_t engine;
+    /* 初始化全部静态状态。 */
+    workout_engine_init(&engine);
+    /* 开始一个固定右腕、单动作训练会话。 */
+    CHECK(workout_engine_start(&engine, 81U, 70000U, 0ULL) == WORKOUT_STATUS_OK);
+    /* 用两个干净高置信窗口确认本轮主动作为深蹲。 */
+    CHECK(lock_action(&engine, FITNESS_ACTION_SQUAT, 0ULL) == 0);
+    /* 锁定完成时计数门应允许已经缓存的动作继续推进。 */
+    CHECK(engine.classification_consistent);
+
+    /* logits 保存一个与主动作完全不同的高置信静坐诊断窗。 */
+    float logits[WORKOUT_CLASS_COUNT];
+    /* 静坐写入 +20，其余类别写入 -20，确保旧 Top-1 门必然触发冻结。 */
+    make_scaled_logits(logits, FITNESS_ACTION_SIT, 20.0F, -20.0F);
+    /* RUNNING 不得再次产生动作锁定事件。 */
+    bool locked = true;
+    /* 提交异类诊断窗；它不能重建计数器或修改会话主动作。 */
+    CHECK(workout_engine_push_inference(&engine, logits, 960ULL, 0U, &locked) ==
+          WORKOUT_STATUS_OK);
+    /* 运行期推理只更新诊断，因此不会产生第二次锁定。 */
+    CHECK(!locked);
+    /* 最近模型诊断应如实保留静坐，供 CSV 分析而不参与业务计数。 */
+    CHECK(engine.inferred_action == (uint8_t)FITNESS_ACTION_SIT);
+    /* 本轮主动作必须始终保持深蹲。 */
+    CHECK(engine.selected_action == (uint8_t)FITNESS_ACTION_SQUAT);
+    /* 异类 Top-1 不能关闭计数；后续只由训练域活动门和质量边界控制。 */
+    CHECK(engine.classification_consistent);
+    /* 测试通过。 */
+    return 0;
+}
+
+/* 验证训练集冻结的 25 点活动门独立控制休息和恢复，不等待下一模型窗口。 */
+static int test_activity_gate_freezes_rest_and_recovers_from_samples(void)
+{
+    /* 创建独立引擎，验证活动窗从空状态因果建立。 */
+    workout_engine_t engine;
+    /* 初始化全部静态字段。 */
+    workout_engine_init(&engine);
+    /* 开始固定单动作会话。 */
+    CHECK(workout_engine_start(&engine, 82U, 70000U, 0ULL) == WORKOUT_STATUS_OK);
+    /* 选择普通深蹲计数器。 */
+    CHECK(lock_action(&engine, FITNESS_ACTION_SQUAT, 0ULL) == 0);
+    /* event 接收可能产生的唯一指标事实。 */
+    fitness_metric_event_t event;
+    /* emitted 保存当前点是否闭合完整动作；纯静止阶段必须始终为 false。 */
+    bool emitted = false;
+    /* 先输入完整 25 点明显运动窗，表示用户已经开始本轮动作并武装休息检测。 */
+    for (uint32_t point = 0U; point < 25U; ++point) {
+        /* 每点严格间隔 40 ms；80 deg/s 使整体和逐点活动门均可靠过阈值。 */
+        motion_phase_sample_t sample = make_sample(
+            520ULL + ((uint64_t)point * 40ULL),
+            (point & 1U) == 0U ? 80.0F : -80.0F,
+            1.0F);
+        /* 运动点质量正常并进入活动统计。 */
+        CHECK(workout_engine_push_sample(&engine, &sample, true, 0U, &event, &emitted) ==
+              WORKOUT_STATUS_OK);
+    }
+    /* 首个完整活动窗后计数门保持打开。 */
+    CHECK(engine.classification_consistent);
+
+    /* 再输入完整 25 点 1 g、零角速度静止窗，模拟动作中途休息。 */
+    for (uint32_t point = 0U; point < 25U; ++point) {
+        /* 时间从 1520 ms 连续推进，六轴物理量表示腕表稳定静止。 */
+        motion_phase_sample_t sample = make_sample(
+            1520ULL + ((uint64_t)point * 40ULL),
+            0.0F,
+            1.0F);
+        /* 静止点质量正常，但不得产生动作次数。 */
+        CHECK(workout_engine_push_sample(&engine, &sample, true, 0U, &event, &emitted) ==
+              WORKOUT_STATUS_OK);
+        /* 静止窗不能产生深蹲次数。 */
+        CHECK(!emitted);
+    }
+    /* 满 1 秒静止证据后活动门必须关闭，显示与累计进入休息状态。 */
+    CHECK(!engine.classification_consistent);
+
+    /* 输入五个明显腕部运动点；它们满足训练端 5/25 活动点合同。 */
+    for (uint32_t point = 0U; point < 5U; ++point) {
+        /* 80 deg/s 角速度使逐点活动分数超过冻结训练阈值，时间继续严格单调。 */
+        motion_phase_sample_t sample = make_sample(
+            2520ULL + ((uint64_t)point * 40ULL),
+            80.0F,
+            1.0F);
+        /* 活动样本应被接受；相位尚未完整闭合，不要求产生次数。 */
+        CHECK(workout_engine_push_sample(&engine, &sample, true, 0U, &event, &emitted) ==
+              WORKOUT_STATUS_OK);
+    }
+    /* 滚动窗达到训练域活动条件后必须自动恢复，无需等待 2.48 秒推理窗。 */
+    CHECK(engine.classification_consistent);
+    /* 测试通过。 */
+    return 0;
+}
+
+/* 验证时间线质量边界只清空未完成周期，不把活动门绑回下一次模型推理。 */
+static int test_timeline_break_preserves_activity_gate(void)
+{
+    /* 创建独立引擎。 */
+    workout_engine_t engine;
+    /* 初始化为空闲。 */
+    workout_engine_init(&engine);
+    /* 开始并锁定普通深蹲。 */
+    CHECK(workout_engine_start(&engine, 83U, 70000U, 0ULL) == WORKOUT_STATUS_OK);
+    /* 两窗确认主动作。 */
+    CHECK(lock_action(&engine, FITNESS_ACTION_SQUAT, 0ULL) == 0);
+    /* 锁定后活动门处于可计数状态。 */
+    CHECK(engine.classification_consistent);
+    /* 标记一次真实连续性边界；权威累计与主动作均应保留。 */
+    workout_engine_reset_bout_evidence(&engine);
+    /* 边界只切断半周期，不能等待新的同类模型窗才能恢复。 */
+    CHECK(engine.classification_consistent);
+    /* 主动作保持普通深蹲。 */
+    CHECK(engine.selected_action == (uint8_t)FITNESS_ACTION_SQUAT);
+    /* 测试通过。 */
+    return 0;
+}
+
+/* 验证多个连续异类诊断窗也不能更换主动作或回滚累计。 */
 static int test_running_action_remains_locked(void)
 {
     /* 创建独立训练引擎，验证会话内分类抖动不能改变计数动作。 */
@@ -881,13 +913,8 @@ static int test_running_action_remains_locked(void)
     CHECK(lock_action(&engine, FITNESS_ACTION_SQUAT, 0ULL) == 0);
     /* 稳定动作固定为普通深蹲。 */
     CHECK(engine.inferred_action == (uint8_t)FITNESS_ACTION_SQUAT);
-    /* 锁定后累计类别与计数动作一致。 */
+    /* 锁定后活动门先允许准备期动作继续。 */
     CHECK(engine.classification_consistent);
-    /* 保存振动读取对象。 */
-    fitness_haptic_request_t haptic;
-    /* 累计锁定不产生开始振动。 */
-    CHECK(!workout_engine_pop_haptic(&engine, &haptic));
-
     /* 预置两个已完成重复，验证诊断抖动不改累计。 */
     engine.fitness_session.repetitions = 2ULL;
     /* 构造高置信 tuck_jump 单窗噪声。 */
@@ -896,104 +923,33 @@ static int test_running_action_remains_locked(void)
     make_scaled_logits(logits, FITNESS_ACTION_TUCK_JUMP, 20.0F, -20.0F);
     /* RUNNING 更新不得再次报告动作锁定。 */
     bool locked = true;
-    /* 首个异类窗口携带真板常见的 0x0041 边界位，仍必须参与休息/异类冻结判断。 */
-    CHECK(workout_engine_push_inference(
-              &engine,
-              logits,
-              1440ULL,
-              UINT16_C(0x0041),
-              &locked) ==
-          WORKOUT_STATUS_OK);
-    /* 运行阶段不会产生第二次锁定事件。 */
-    CHECK(!locked);
-    /* 实时类别必须公开当前窗口的收腹跳，不能伪装成仍在深蹲。 */
-    CHECK(engine.inferred_action == (uint8_t)FITNESS_ACTION_TUCK_JUMP);
-    /* 异类窗口必须立即冻结深蹲计数。 */
-    CHECK(!engine.classification_consistent);
-    /* 会话计数动作必须保持普通深蹲，禁止运行中重建计数器。 */
-    CHECK(engine.selected_action == (uint8_t)FITNESS_ACTION_SQUAT);
-    /* fitness_core 的权威会话动作同样必须保持普通深蹲。 */
-    CHECK(engine.fitness_session.action == FITNESS_ACTION_SQUAT);
-    /* 重复计数器动作不得被新分类覆盖。 */
-    CHECK(engine.rep_counter.action == FITNESS_ACTION_SQUAT);
-    /* 诊断异类不得产生任何振动。 */
-    CHECK(!workout_engine_pop_haptic(&engine, &haptic));
-
-    /* 构造一个本来会进入相位检测器的有效六轴点。 */
-    motion_phase_sample_t sample = make_sample(1480ULL, 80.0F, 1.05F);
-    /* 保存事件输出。 */
-    fitness_metric_event_t event;
-    /* 保存是否生成次数事件。 */
-    bool emitted = true;
-    /* 上层质量有效但实时类别不一致时，固定动作相位必须冻结。 */
-    CHECK(workout_engine_push_sample(&engine, &sample, true, 0U, &event, &emitted) ==
-          WORKOUT_STATUS_OK);
-    /* 单个 PRIMARY 点尚未闭合周期，不产生次数。 */
-    CHECK(!emitted);
-    /* 相位检测器不得接受异类窗口后的腕部动作。 */
-    CHECK(!engine.phase_detector.has_timestamp);
-
-    /* 真实设备在推理窗口之间仍持续提交 25 Hz 点，补齐 1520~1880 ms 时间线。 */
-    for (uint64_t time_ms = 1520ULL; time_ms < 1920ULL; time_ms += 40ULL) {
-        /* 使用非静止同向运动，保持当前未闭合深蹲周期。 */
-        sample = make_sample(time_ms, 28.0F, 1.0F);
-        /* 异类诊断期间样本只推进会话时间和热量，不推进相位。 */
-        CHECK(workout_engine_push_sample(&engine, &sample, true, 0U, &event, &emitted) ==
+    /* 连续提交三个异类窗口，覆盖单窗毛刺和持续模型域偏差。 */
+    for (uint8_t window = 0U; window < 3U; ++window) {
+        /* 第二窗携带真板常见质量位，验证质量只进入诊断而不冻结到下一推理。 */
+        const uint16_t quality_flags = window == 1U ? UINT16_C(0x0041) : 0U;
+        /* 每个窗口相隔 480 ms，时间与生产重叠推理一致。 */
+        CHECK(workout_engine_push_inference(
+                  &engine,
+                  logits,
+                  1440ULL + ((uint64_t)window * 480ULL),
+                  quality_flags,
+                  &locked) ==
               WORKOUT_STATUS_OK);
+        /* 运行阶段不会产生第二次锁定事件。 */
+        CHECK(!locked);
+        /* 实时诊断如实保存收腹跳。 */
+        CHECK(engine.inferred_action == (uint8_t)FITNESS_ACTION_TUCK_JUMP);
+        /* 会话、重复计数器和页面主动作均保持深蹲。 */
+        CHECK(engine.selected_action == (uint8_t)FITNESS_ACTION_SQUAT);
+        /* fitness_core 的权威会话动作不得改变。 */
+        CHECK(engine.fitness_session.action == FITNESS_ACTION_SQUAT);
+        /* 重复计数器动作不得被诊断覆盖。 */
+        CHECK(engine.rep_counter.action == FITNESS_ACTION_SQUAT);
+        /* 模型窗口不控制活动门。 */
+        CHECK(engine.classification_consistent);
     }
-    /* 第二个连续 tuck_jump 诊断窗仍不能切换。 */
-    CHECK(workout_engine_push_inference(&engine, logits, 1920ULL, 0U, &locked) ==
-          WORKOUT_STATUS_OK);
-    /* 两窗后主动作仍保持深蹲，但实时计数许可保持冻结。 */
-    CHECK(engine.selected_action == (uint8_t)FITNESS_ACTION_SQUAT);
-    CHECK(!engine.classification_consistent);
-    /* 继续补齐 1960~2360 ms 真实 25 Hz 点，避免人为制造大于 120 ms 的断点。 */
-    for (uint64_t time_ms = 1960ULL; time_ms < 2400ULL; time_ms += 40ULL) {
-        /* 保持普通运动点，不闭合完整重复。 */
-        sample = make_sample(time_ms, 28.0F, 1.0F);
-        /* 冻结期间固定动作计数链不得接收。 */
-        CHECK(workout_engine_push_sample(&engine, &sample, true, 0U, &event, &emitted) ==
-              WORKOUT_STATUS_OK);
-    }
-    /* 第三个连续异类窗同样只能作为诊断噪声。 */
-    CHECK(workout_engine_push_inference(&engine, logits, 2400ULL, 0U, &locked) ==
-          WORKOUT_STATUS_OK);
-    /* 三窗后会话主动作仍为深蹲，实时类别仍为收腹跳。 */
-    CHECK(engine.inferred_action == (uint8_t)FITNESS_ACTION_TUCK_JUMP);
-    CHECK(engine.selected_action == (uint8_t)FITNESS_ACTION_SQUAT);
-    CHECK(engine.fitness_session.action == FITNESS_ACTION_SQUAT);
-    CHECK(engine.rep_counter.action == FITNESS_ACTION_SQUAT);
-    /* 计数许可保持关闭，避免站立/静坐阶段继续闭合旧深蹲周期。 */
-    CHECK(!engine.classification_consistent);
-    /* 会话累计次数必须保留。 */
+    /* 三个异类窗后权威累计仍保持原来的两次。 */
     CHECK(engine.fitness_session.repetitions == 2ULL);
-    /* 切换不重复产生开始振动。 */
-    CHECK(!workout_engine_pop_haptic(&engine, &haptic));
-    /* 构造恢复后的高置信深蹲窗口。 */
-    make_scaled_logits(logits, FITNESS_ACTION_SQUAT, 20.0F, -20.0F);
-    /* 同类但带边界质量位的窗口不能把冻结状态误恢复为可计数。 */
-    CHECK(workout_engine_push_inference(
-              &engine,
-              logits,
-              2880ULL,
-              UINT16_C(0x0041),
-              &locked) == WORKOUT_STATUS_OK);
-    /* 实时类别可显示深蹲，但计数门仍等待干净窗。 */
-    CHECK((engine.inferred_action == (uint8_t)FITNESS_ACTION_SQUAT) &&
-          !engine.classification_consistent);
-    /* 单个干净同类窗口即可恢复本轮主动作计数，不重新选择计数器。 */
-    CHECK(workout_engine_push_inference(&engine, logits, 3360ULL, 0U, &locked) ==
-          WORKOUT_STATUS_OK);
-    /* 实时类别恢复为深蹲且计数许可重新打开。 */
-    CHECK((engine.inferred_action == (uint8_t)FITNESS_ACTION_SQUAT) &&
-          engine.classification_consistent);
-    /* 送一个恢复后的有效点建立全新深蹲相位时间线。 */
-    sample = make_sample(3400ULL, 0.0F, 1.0F);
-    /* 主动作状态应正常处理。 */
-    CHECK(workout_engine_push_sample(&engine, &sample, true, 0U, &event, &emitted) ==
-          WORKOUT_STATUS_OK);
-    /* 恢复后由当前点建立新时间线，不能接续冻结前半周期。 */
-    CHECK(engine.phase_detector.has_timestamp);
     /* 测试通过。 */
     return 0;
 }
@@ -1011,31 +967,22 @@ static int test_bout_evidence_reset_preserves_session(void)
     CHECK(lock_action(&engine, FITNESS_ACTION_SQUAT, 0ULL) == 0);
     /* 模拟已经确认的两个次数，验证证据重置不修改业务累计。 */
     engine.fitness_session.repetitions = 2ULL;
-    /* 清空动作段分类证据，模拟暂停、IMU 间断或设备重连。 */
+    /* 保存质量边界前诊断累计窗口数；RUNNING 不应清除此只读诊断。 */
+    const uint32_t windows_before_reset = engine.bout_window_count;
+    /* 标记 IMU 间断或设备重连。 */
     workout_engine_reset_bout_evidence(&engine);
-    /* 因果累计窗口数必须归零。 */
-    CHECK(engine.bout_window_count == 0U);
+    /* RUNNING 诊断累计不参与计数，边界无需清零或等待新模型窗。 */
+    CHECK(engine.bout_window_count == windows_before_reset);
     /* 证据重置后稳定显示仍保持本次唯一动作。 */
     CHECK(engine.inferred_action == (uint8_t)FITNESS_ACTION_SQUAT);
-    /* 连续性重置后必须冻结，直到新的干净同类窗口确认动作已经恢复。 */
-    CHECK(!engine.classification_consistent);
+    /* 连续性重置只清半周期，当前活动门状态保持。 */
+    CHECK(engine.classification_consistent);
     /* 锁定动作仍是普通深蹲。 */
     CHECK(engine.selected_action == (uint8_t)FITNESS_ACTION_SQUAT);
     /* 权威次数保持为二。 */
     CHECK(engine.fitness_session.repetitions == 2ULL);
     /* 领域会话仍保持活动，避免重新开始导致事件序号或热量丢失。 */
     CHECK(engine.fitness_session.active);
-    /* 构造新的高置信深蹲窗口。 */
-    float logits[WORKOUT_CLASS_COUNT];
-    /* 当前主动作仍为深蹲。 */
-    make_scaled_logits(logits, FITNESS_ACTION_SQUAT, 20.0F, -20.0F);
-    /* locked 在运行态固定为 false。 */
-    bool locked = true;
-    /* 新干净同类窗口恢复计数许可。 */
-    CHECK(workout_engine_push_inference(&engine, logits, 960ULL, 0U, &locked) ==
-          WORKOUT_STATUS_OK);
-    /* 不重新锁类，但实时一致性恢复。 */
-    CHECK(!locked && engine.classification_consistent);
     /* 测试通过。 */
     return 0;
 }
@@ -1045,6 +992,8 @@ int main(void)
 {
     /* 验证首窗误判只作候选，累计稳定后锁定真实动作。 */
     CHECK(test_preparing_rejects_transient_first_window() == 0);
+    /* 验证独立窗口连续性可压过强错误首窗的累计惯性。 */
+    CHECK(test_preparing_confirms_consecutive_independent_windows() == 0);
     /* 验证低置信会话最多等待四个重叠窗口。 */
     CHECK(test_preparing_forces_cumulative_class_at_four_windows() == 0);
     /* 验证一次窗口重建后第四窗锁类前完整 160 点动作都可补算。 */
@@ -1053,18 +1002,22 @@ int main(void)
     CHECK(test_preparing_timeline_break_preserves_buffer_and_candidate() == 0);
     /* 验证锁类补算的每条计数都能按原始时间进入 BLE/CSV。 */
     CHECK(test_prelock_replay_exposes_all_metric_events() == 0);
-    /* 验证重复计数、振动和暂停。 */
+    /* 验证重复计数和暂停。 */
     CHECK(test_repetition_flow() == 0);
-    /* 验证十个相邻峰谷周期公开十次。 */
-    CHECK(test_jumping_jack_peak_valley_median_counts_ten() == 0);
-    /* 验证每次计数振动后的污染窗不会把十次漏成二次。 */
-    CHECK(test_jumping_jack_haptic_feedback_preserves_ten_cycles() == 0);
-    /* 验证三轴中位数拒绝单轴噪声。 */
-    CHECK(test_jumping_jack_median_rejects_one_noisy_axis() == 0);
+    /* 验证十个完整手腕正反周期逐次公开十次。 */
+    CHECK(test_jumping_jack_counts_complete_wrist_cycles() == 0);
+    /* 验证重建后完整窗口可锁类，模型失败窗口仍拒绝。 */
+    CHECK(test_preparing_accepts_recovered_windows_only() == 0);
     /* 验证步数链路。 */
     CHECK(test_step_flow() == 0);
     /* 验证准备异常边界。 */
     CHECK(test_prepare_boundaries() == 0);
+    /* 验证运行期异类推理只进入诊断，不能冻结主动作计数。 */
+    CHECK(test_running_inference_is_diagnostic_only() == 0);
+    /* 验证样本级活动门在静止后冻结并由真实运动自动恢复。 */
+    CHECK(test_activity_gate_freezes_rest_and_recovers_from_samples() == 0);
+    /* 验证质量边界不再把计数恢复绑定到下一模型窗口。 */
+    CHECK(test_timeline_break_preserves_activity_gate() == 0);
     /* 验证运行阶段保持准备态累计锁定动作且不因异类诊断冻结。 */
     CHECK(test_running_action_remains_locked() == 0);
     /* 验证证据重置不破坏已锁定会话。 */

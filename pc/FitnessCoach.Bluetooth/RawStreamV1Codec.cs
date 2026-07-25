@@ -22,7 +22,7 @@ public sealed record RawImuSampleV1(
     short AyRaw,
     // 加速度计 Z 轴固定点诊断码；PC 只解码固定小端字段，不执行第二次滤波。
     short AzRaw,
-    // 质量位用于标记丢样、重采样或振动污染等设备端事实。
+    // 质量位用于标记丢样、重采样或旧固件替代样本等设备端事实。
     ushort QualityFlags);
 
 /// <summary>RawStream 样本事件；发送方回调线程不保证是 WPF UI 线程。</summary>

@@ -17,12 +17,10 @@ public enum DeviceGoalKind : byte
     CaloriesMilliKcal = 3,
 }
 
-/// <summary>保存命令 9 的全部设备偏好；布尔值在线上严格编码为 0 或 1。</summary>
+/// <summary>保存命令 9 的可配置设备偏好；旧马达字段由编码器固定写零。</summary>
 public sealed record DevicePreferencesV1(
     // AMOLED 亮度百分比，合法范围为 5～100。
     byte BrightnessPercent,
-    // true 表示每次有效计数允许振动反馈。
-    bool HapticEnabled,
     // true 表示允许设备提示音。
     bool SoundEnabled,
     // 无操作熄屏时间，单位秒，合法范围为 10～300。
@@ -190,7 +188,7 @@ public static class DeviceConfigurationCodec
         return payload;
     }
 
-    /// <summary>编码命令 9：亮度、振动、声音、熄屏、revision 和开发者模式。</summary>
+    /// <summary>编码命令 9：亮度、旧马达保留位、声音、熄屏、revision 和开发者模式。</summary>
     public static byte[] EncodePreferences(DevicePreferencesV1 preferences)
     {
         // 记录对象不能为空。
@@ -216,8 +214,8 @@ public static class DeviceConfigurationCodec
         int offset = 0;
         // 写入亮度 u8。
         offset = WriteByteItem(payload, offset, 0x01, preferences.BrightnessPercent);
-        // 写入振动 bool。
-        offset = WriteByteItem(payload, offset, 0x02, preferences.HapticEnabled ? (byte)1 : (byte)0);
+        // 旧协议 type=2 是马达开关；当前手表没有马达，固定写零并从公开设置中移除。
+        offset = WriteByteItem(payload, offset, 0x02, 0);
         // 写入声音 bool。
         offset = WriteByteItem(payload, offset, 0x03, preferences.SoundEnabled ? (byte)1 : (byte)0);
         // 写入熄屏 u16LE。

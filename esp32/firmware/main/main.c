@@ -2,12 +2,12 @@
  * ESP32-S3 健身识别手柄生产入口。
  *
  * 线程所有权：QMI 任务只读取芯片并投递原始帧；应用任务独占 imu_pipeline 和
- * device_coordinator；UI、BLE、存储、振动、电源任务只消费按值效果。该边界保证
+ * device_coordinator；UI、BLE、存储和电源任务只消费按值效果。该边界保证
  * 次数、步数、热量只由 workout_engine 产生一次，公式与任务关系见
  * docs/手柄与上位机软件详细设计.md。
  */
 
-/* 引入 Waveshare 板级运行时，提供 BSP 显示、I2C、马达、TF 与 LVGL 锁。 */
+/* 引入 Waveshare 板级运行时，提供 BSP 显示、I2C、TF 与 LVGL 锁。 */
 #include "board_runtime.h"
 /* 引入 QMI8658、AXP2101、PCF85063 独立驱动。 */
 #include "board_sensors.h"
@@ -15,7 +15,7 @@
 #include "ble_service_nimble.h"
 /* 引入正式 Manifest TLV 构建器、标签、能力位和版本合同。 */
 #include "ble_service_manifest.h"
-/* 引入训练控制、UI/BLE/存储/振动/电源统一效果。 */
+/* 引入训练控制、UI/BLE/存储/电源统一效果。 */
 #include "device_coordinator.h"
 /* 引入 Cmd6/7/8/9/11 TLV、配置事务和 CRC32 稳定 blob。 */
 #include "device_config.h"
@@ -63,6 +63,8 @@
 #include "freertos/semphr.h"
 /* 引入多任务创建、延时和删除。 */
 #include "freertos/task.h"
+/* 引入可指定 PSRAM/片内能力的 ESP-IDF 任务创建接口。 */
+#include "freertos/idf_additions.h"
 /* 引入 NVS 初始化；NimBLE 绑定密钥依赖 NVS。 */
 #include "nvs.h"
 /* 引入 NVS 分区初始化；NimBLE 绑定密钥依赖 NVS。 */
@@ -81,12 +83,16 @@
 static const char *const APP_TAG = "imu_handheld";
 /*
  * 阻止编译器把事件边界函数重新内联到 app_event_task。
- * app_event_task 的 FreeRTOS 栈固定为 20 KiB；协调器事务本身需要约 8.4 KiB 候选副本。
+ * app_event_task 的 FreeRTOS 栈固定为 16 KiB；协调器事务本身需要约 8.4 KiB 候选副本。
  * 若 QMI、UI、BLE 三条高层处理链再次内联，Xtensa 会为所有互斥分支一次性预留约 9.5 KiB，
- * START 或首个采样再嵌套协调器时只剩不足 2.2 KiB，可能触发栈溢出并整机复位。
+ * START 或首个采样再嵌套协调器时会耗尽余量，可能触发栈溢出并整机复位。
  * 该属性只改变调用边界，不改变任务、时序、业务状态、模型或显示链。
  */
 #define APP_STACK_BOUNDARY __attribute__((noinline))
+/* 应用任务最深静态链约 10.9 KiB；16 KiB 保留约 5 KiB 中断与库调用余量。 */
+#define APP_OWNER_TASK_STACK_BYTES (16U * 1024U)
+/* UI 渲染任务使用 8 KiB 栈；该任务不执行 Flash/NVS 写入，可安全放入板载 PSRAM。 */
+#define APP_UI_TASK_STACK_BYTES (8U * 1024U)
 /* LittleFS VFS 根目录固定为 /littlefs。 */
 #define APP_LITTLEFS_BASE_PATH "/littlefs"
 /* 双槽摘要文件固定放在内部 Flash LittleFS。 */
@@ -95,8 +101,6 @@ static const char *const APP_TAG = "imu_handheld";
 #define APP_CONFIG_NVS_NAMESPACE "fitness"
 /* CRC32 配置 blob 固定存放在 device_cfg 键。 */
 #define APP_CONFIG_NVS_KEY "device_cfg"
-/* 马达强度固定 75%，单次有效重复的时长仍由领域层固定为 30 ms。 */
-#define APP_HAPTIC_INTENSITY_PERCENT UINT8_C(75)
 /* QMI 活动时每 4 ms 查询一次 DATA_READY，覆盖 125 Hz 与 112.1 Hz 两路 ODR。 */
 #define APP_QMI_POLL_MS UINT32_C(4)
 /* 电池每 30 秒刷新一次；启动阶段另读一次。 */
@@ -127,6 +131,8 @@ static const char *const APP_TAG = "imu_handheld";
 #define APP_STARTUP_FAULT_STORAGE INT32_C(1002)
 /* 1003 表示协调器、IMU 流水线或模型运行域初始化失败。 */
 #define APP_STARTUP_FAULT_DOMAIN INT32_C(1003)
+/* 1004 表示 BLE 启动后无法为全部业务任务分配完整栈。 */
+#define APP_STARTUP_FAULT_TASK_MEMORY INT32_C(1004)
 /* NimBLE 控制回调等待应用任务提交事务的上限。 */
 /* 设置命令包含一次 NVS commit；异步 BLE worker 最多等待 1.5 秒，不阻塞 NimBLE GAP 回调。 */
 #define APP_BLE_COMMAND_TIMEOUT_MS UINT32_C(1500)
@@ -152,6 +158,8 @@ static const char *const APP_TAG = "imu_handheld";
 #define APP_TRANSFER_PUMP_MS UINT32_C(100)
 /* 主应用事件队列容量，覆盖短时 QMI 帧突发及 UI/BLE 事件。 */
 #define APP_EVENT_QUEUE_LENGTH UINT32_C(48)
+/* UI 控制邮箱只保留最新一次触摸命令；长度一允许 xQueueOverwrite 永不因数据队列满而丢失。 */
+#define APP_UI_COMMAND_QUEUE_LENGTH UINT32_C(1)
 /* UI 只需要最新完整快照，长度固定为 1 并使用 overwrite。 */
 #define APP_UI_QUEUE_LENGTH UINT32_C(1)
 /* 电源只需要最新策略，长度固定为 1。 */
@@ -160,8 +168,6 @@ static const char *const APP_TAG = "imu_handheld";
 #define APP_BLE_QUEUE_LENGTH UINT32_C(16)
 /* 摘要队列覆盖动作事件和停止事务。 */
 #define APP_STORAGE_QUEUE_LENGTH UINT32_C(12)
-/* 振动队列与领域层固定 FIFO 容量一致。 */
-#define APP_HAPTIC_QUEUE_LENGTH FITNESS_HAPTIC_QUEUE_CAPACITY
 
 /* 应用事件类型；所有可能修改 coordinator 的输入都在同一队列串行执行。 */
 typedef enum app_event_kind {
@@ -179,8 +185,6 @@ typedef enum app_event_kind {
     APP_EVENT_PAIRING_UPDATE,
     /* AXP2101 电量与充电状态更新。 */
     APP_EVENT_BATTERY,
-    /* 马达任务已经真实启动一次 PWM 脉冲，应用任务据实际时刻登记 IMU 污染区。 */
-    APP_EVENT_HAPTIC_STARTED,
     /* 生产空闲时钟每秒请求一次熄屏或长空闲门槛检查。 */
     APP_EVENT_IDLE_POLL,
     /* 关键摘要刷盘结果，用于授权或拒绝 PMIC 关机。 */
@@ -203,14 +207,6 @@ typedef struct app_battery_event {
     bool charging;
 } app_battery_event_t;
 
-/* 保存一次已经实际启动的马达 PWM 导通区间；单位为单调微秒。 */
-typedef struct app_haptic_interval_event {
-    /* start_us 是 board_adapter_pulse_haptic 调用前立即捕获的单调时刻。 */
-    uint64_t start_us;
-    /* end_us 是 start_us 加本次 on_ms 得到的计划关断时刻，实际关断由 esp_timer 执行。 */
-    uint64_t end_us;
-} app_haptic_interval_event_t;
-
 /* 跨任务应用事件；最大成员为一帧 QMI，按值复制后不借用驱动缓冲。 */
 typedef struct app_event {
     /* 指明联合体有效成员。 */
@@ -227,12 +223,18 @@ typedef struct app_event {
         bool ble_connected;
         /* 电池状态。 */
         app_battery_event_t battery;
-        /* 已实际启动的马达 PWM 区间。 */
-        app_haptic_interval_event_t haptic_interval;
         /* 关键存储结果。 */
         app_storage_result_t storage_result;
     } data;
 } app_event_t;
+
+/* UI 控制邮箱负载；不复制 QMI 联合体，降低片内队列内存并保留触摸原始时刻。 */
+typedef struct app_ui_command_event {
+    /* 保存 LVGL 点击发生的设备单调毫秒，用于协调器事件排序。 */
+    uint64_t monotonic_ms;
+    /* 保存当前页面已经校验过的用户命令枚举。 */
+    ui_command_t command;
+} app_ui_command_event_t;
 
 /* BLE 输出类型。 */
 typedef enum app_ble_output_kind {
@@ -376,14 +378,16 @@ _Static_assert(FEATURE_DIM <= UINT16_MAX, "FEATURE_DIM exceeds Manifest u16");
 _Static_assert(CLASS_NUM <= UINT8_MAX, "CLASS_NUM exceeds Manifest u8");
 /* 主应用事件队列。 */
 static QueueHandle_t s_app_event_queue;
+/* UI 控制单槽邮箱；与 125 Hz QMI 数据队列隔离。 */
+static QueueHandle_t s_ui_command_queue;
+/* 汇合主数据队列和 UI 控制邮箱，使应用任务无轮询地等待任一输入。 */
+static QueueSetHandle_t s_app_input_queue_set;
 /* UI 最新快照队列。 */
 static QueueHandle_t s_ui_queue;
 /* BLE 输出队列。 */
 static QueueHandle_t s_ble_queue;
 /* 摘要写入队列。 */
 static QueueHandle_t s_storage_queue;
-/* 振动请求队列。 */
-static QueueHandle_t s_haptic_queue;
 /* 电源策略队列。 */
 static QueueHandle_t s_power_queue;
 /* BLE 命令单槽互斥锁。 */
@@ -811,7 +815,7 @@ static void app_queue_inference_diagnostic(const imu_pipeline_inference_result_t
         .masked_confidence_q15 = model_valid
             ? s_dual_m0_diagnostics.masked_confidence_q15
             : UINT16_C(0),
-        /* 低 16 位保留窗口预热、插值、振动污染和推理失败等质量事实。 */
+    /* 低 16 位保留窗口预热、插值、旧执行器质量位和推理失败等事实。 */
         .quality_flags = (uint16_t)(result->quality_flags & UINT16_MAX),
         /* 窗口序号允许 u32 自然回绕。 */
         .window_sequence = result->sequence,
@@ -1023,26 +1027,6 @@ static void app_queue_raw_stream_power_policy(const bool enabled)
     app_queue_power_internal(&policy, false, true);
 }
 
-/* 投递非阻塞振动序列；污染区只能由马达任务按真实 PWM 启动时刻登记。 */
-static void app_queue_haptic(const fitness_haptic_request_t *request)
-{
-    /* 参数和队列必须有效。 */
-    if ((request == NULL) || (s_haptic_queue == NULL) || (request->repeat_count == 0U)) {
-        /* 安全返回。 */
-        return;
-    }
-    /* 用户关闭振动时丢弃新请求；计数、BLE 和摘要仍照常更新。 */
-    if (!s_device_config.haptic_enabled) {
-        /* 不向马达任务入队。 */
-        return;
-    }
-    /* 队列满时记录；不在应用任务中等待马达。 */
-    if (xQueueSend(s_haptic_queue, request, 0U) != pdPASS) {
-        /* 输出原因。 */
-        ESP_LOGW(APP_TAG, "haptic queue full reason=%d", (int)request->reason);
-    }
-}
-
 /* 消费一次协调器 effect，禁止在此重算业务指标。 */
 static void app_dispatch_effects(const device_effects_t *effects)
 {
@@ -1065,14 +1049,6 @@ static void app_dispatch_effects(const device_effects_t *effects)
     if ((effects->flags & DEVICE_EFFECT_BLE_EVENT) != 0U) {
         /* 按 event_seq 顺序投递全部有效事件。 */
         app_queue_metric_events(effects);
-    }
-    /* 逐条预登记并投递振动波形。 */
-    if ((effects->flags & DEVICE_EFFECT_HAPTIC) != 0U) {
-        /* 遍历有效请求数。 */
-        for (uint8_t index = 0U; index < effects->haptic_count; ++index) {
-            /* 投递当前请求。 */
-            app_queue_haptic(&effects->haptics[index]);
-        }
     }
     /* 电源策略默认没有刷盘关机授权。 */
     if ((effects->flags & DEVICE_EFFECT_POWER_POLICY) != 0U) {
@@ -1158,18 +1134,18 @@ static void app_pipeline_on_sample(void *context, const imu_resampled_sample_t *
         (uint32_t)IMU_QUALITY_QUEUE_OVERFLOW |
         (uint32_t)IMU_QUALITY_DRIVER_DROP |
         (uint32_t)IMU_QUALITY_RESAMPLER_RESET;
-    /* 只在真实连续性破坏时重置动作段分类证据；马达污染仅跳过当前点，不能丢弃整段历史。 */
+    /* 只在真实连续性破坏时重置动作段分类证据；历史保留质量位不能丢弃整段历史。 */
     if ((sample->quality_flags & bout_reset_mask) != 0U) {
         /* 清空累计 logits，但保留当前会话的动作、次数、时间和热量。 */
         workout_engine_reset_bout_evidence(&s_coordinator.workout);
     }
-    /* 马达污染、间断或队列溢出时仍累计热量，但冻结相位/步峰。 */
+    /* 历史保留污染位、间断或队列溢出时仍累计热量，但冻结相位和步峰。 */
     const uint32_t invalid_count_mask =
         (uint32_t)IMU_QUALITY_ACCEL_GAP |
         (uint32_t)IMU_QUALITY_GYRO_GAP |
         (uint32_t)IMU_QUALITY_OUT_OF_ORDER |
         (uint32_t)IMU_QUALITY_QUEUE_OVERFLOW |
-        (uint32_t)IMU_QUALITY_HAPTIC_CONTAMINATED |
+        (uint32_t)IMU_QUALITY_LEGACY_ACTUATOR_CONTAMINATED |
         (uint32_t)IMU_QUALITY_DRIVER_DROP |
         (uint32_t)IMU_QUALITY_RESAMPLER_RESET;
     /* 只有零关键质量位时允许推进计数器。 */
@@ -1218,7 +1194,7 @@ static void app_pipeline_on_inference(
     }
     /* 分类门打开后才发布融合动作、双模型结果和推理耗时到上位机。 */
     app_queue_inference_diagnostic(result);
-    /* 只有模型推理失败时拒绝；质量告警窗仍需让 RUNNING 识别异类并冻结错误计数。 */
+    /* 只有模型推理失败时拒绝；质量告警仍需进入诊断，RUNNING 计数由逐点活动门控制。 */
     if (result->inference_status != 0) {
         /* 输出错误，下一完整窗口继续推理。 */
         ESP_LOGE(APP_TAG, "dual M0 inference failed=%d seq=%lu",
@@ -1301,8 +1277,6 @@ static void app_project_device_config_to_ui(ui_context_t *ui)
     ui->view.screen_timeout_seconds = s_device_config.screen_timeout_seconds;
     /* 复制偏好修订号，供设备与 PC 诊断对照。 */
     ui->view.preferences_revision = s_device_config.preferences_revision;
-    /* 复制计次振动总开关。 */
-    ui->view.haptic_enabled = s_device_config.haptic_enabled;
 }
 
 /* 返回下一个设备端亮度预设；任意 PC 自定义值会向上取最近档。 */
@@ -1362,30 +1336,6 @@ static uint16_t app_next_screen_timeout_seconds(const uint16_t current)
 /* 处理不经过领域协调器的设备端设置与诊断按钮；返回 true 表示命令已消费。 */
 static bool app_process_local_ui_command(const ui_command_t command)
 {
-    /* 诊断振动只在诊断页接受，复用与一次有效计数完全相同的 30 ms 脉冲。 */
-    if (command == UI_COMMAND_TEST_HAPTIC) {
-        /* 页面已切走或振动关闭时丢弃排队旧命令。 */
-        if ((s_coordinator.ui.state != UI_STATE_DIAGNOSTICS) ||
-            !s_device_config.haptic_enabled) {
-            /* 命令属于本地设置集合，仍视为已消费。 */
-            return true;
-        }
-        /* 构造一次计数反馈同波形请求；不产生 MetricEvent。 */
-        const fitness_haptic_request_t request = {
-            /* 马达有效导通 30 ms。 */
-            .on_ms = UINT16_C(30),
-            /* 单脉冲没有间隔。 */
-            .off_ms = UINT16_C(0),
-            /* 只振动一次。 */
-            .repeat_count = UINT8_C(1),
-            /* 复用一次有效重复的硬件波形。 */
-            .reason = FITNESS_HAPTIC_REASON_REPETITION,
-        };
-        /* 异步投递，UI 线程和应用任务均不等待电机。 */
-        app_queue_haptic(&request);
-        /* 命令处理完成。 */
-        return true;
-    }
     /* “忘记电脑”只删除 NimBLE 绑定，不修改设备偏好、训练记录或算法状态。 */
     if (command == UI_COMMAND_FORGET_COMPUTER) {
         /* 页面已切走时安全消费旧触摸事件，防止后台误删合法绑定。 */
@@ -1403,19 +1353,17 @@ static bool app_process_local_ui_command(const ui_command_t command)
         /* API 内部会通过 passkey_clear 回调清除屏幕敏感码。 */
         return true;
     }
-    /* 判断命令是否属于三项可持久化设备偏好。 */
+    /* 判断命令是否属于可持久化设备偏好。 */
     const bool brightness_command = command == UI_COMMAND_CYCLE_BRIGHTNESS;
-    /* 判断振动切换。 */
-    const bool haptic_command = command == UI_COMMAND_TOGGLE_HAPTIC;
     /* 判断熄屏时长切换。 */
     const bool timeout_command = command == UI_COMMAND_CYCLE_TIMEOUT;
     /* 其它命令交回普通导航或会话控制。 */
-    if (!brightness_command && !haptic_command && !timeout_command) {
+    if (!brightness_command && !timeout_command) {
         /* 返回未消费。 */
         return false;
     }
-    /* 亮度和振动只允许 SETTINGS；熄屏时长只允许 DIAGNOSTICS。 */
-    const bool valid_page = (brightness_command || haptic_command)
+    /* 亮度只允许 SETTINGS；熄屏时长只允许 DIAGNOSTICS。 */
+    const bool valid_page = brightness_command
         ? (s_coordinator.ui.state == UI_STATE_SETTINGS)
         : (s_coordinator.ui.state == UI_STATE_DIAGNOSTICS);
     /* 页面切换后到达的旧按钮事件不得修改配置。 */
@@ -1429,9 +1377,6 @@ static bool app_process_local_ui_command(const ui_command_t command)
     if (brightness_command) {
         /* 循环 15/35/60/100% 预设。 */
         candidate.brightness_percent = app_next_brightness_percent(candidate.brightness_percent);
-    } else if (haptic_command) {
-        /* 切换计次与系统反馈马达总开关。 */
-        candidate.haptic_enabled = !candidate.haptic_enabled;
     } else {
         /* 循环 15/30/60/120 秒预设。 */
         candidate.screen_timeout_seconds = app_next_screen_timeout_seconds(
@@ -1455,11 +1400,6 @@ static bool app_process_local_ui_command(const ui_command_t command)
     s_device_config = candidate;
     /* 秒转毫秒；最大 600 秒不会溢出 uint32。 */
     s_screen_timeout_ms = (uint32_t)s_device_config.screen_timeout_seconds * UINT32_C(1000);
-    /* 关闭振动时清除尚未执行的排队波形。 */
-    if (!s_device_config.haptic_enabled) {
-        /* 已导通脉冲仍由硬件定时器自然结束。 */
-        (void)xQueueReset(s_haptic_queue);
-    }
     /* 把真实设置投影到当前页面快照。 */
     app_project_device_config_to_ui(&s_coordinator.ui);
     /* 立即刷新设置或诊断文字。 */
@@ -1468,22 +1408,6 @@ static bool app_process_local_ui_command(const ui_command_t command)
     const power_policy_t policy = power_manager_policy(&s_coordinator.power);
     /* 应用亮度但不授权 PMIC 关机。 */
     app_queue_power(&policy, false);
-    /* 开启振动时用一次 30 ms 计数同波形给用户确认。 */
-    if (haptic_command && s_device_config.haptic_enabled) {
-        /* 构造单脉冲。 */
-        const fitness_haptic_request_t confirmation = {
-            /* 有效导通 30 ms。 */
-            .on_ms = UINT16_C(30),
-            /* 单脉冲无关闭间隔。 */
-            .off_ms = UINT16_C(0),
-            /* 重复一次。 */
-            .repeat_count = UINT8_C(1),
-            /* 使用有效计数波形。 */
-            .reason = FITNESS_HAPTIC_REASON_REPETITION,
-        };
-        /* 异步投递确认反馈。 */
-        app_queue_haptic(&confirmation);
-    }
     /* 设置命令完成。 */
     return true;
 }
@@ -1510,7 +1434,7 @@ static APP_STACK_BOUNDARY void app_process_ui_command(
         /* 唤醒命令已消费。 */
         return;
     }
-    /* 亮度、振动、熄屏与马达自检由应用任务本地事务处理。 */
+    /* 亮度与熄屏设置由应用任务本地事务处理。 */
     if (app_process_local_ui_command(command)) {
         /* 本地命令已处理或因页面过期安全忽略。 */
         return;
@@ -1627,9 +1551,8 @@ static bool app_preferences_match_current(const device_preferences_command_t *pr
         /* 返回 false。 */
         return false;
     }
-    /* 比较六个持久字段；RawStream 是独立易失命令，不参与 Cmd9。 */
+    /* 比较五个有效持久字段；旧振动保留位和 RawStream 都不参与 Cmd9。 */
     return (preferences->brightness_percent == s_device_config.brightness_percent) &&
-           (preferences->haptic_enabled == s_device_config.haptic_enabled) &&
            (preferences->sound_enabled == s_device_config.sound_enabled) &&
            (preferences->screen_timeout_seconds == s_device_config.screen_timeout_seconds) &&
            (preferences->preferences_revision == s_device_config.preferences_revision) &&
@@ -1829,11 +1752,6 @@ static APP_STACK_BOUNDARY bool app_process_device_config_command(const uint64_t 
     if (command.command_id == (uint8_t)DEVICE_COMMAND_SET_PREFERENCES) {
         /* 秒转毫秒；最大 600 秒安全落入 uint32。 */
         s_screen_timeout_ms = (uint32_t)s_device_config.screen_timeout_seconds * UINT32_C(1000);
-        /* 关闭振动时清除尚未执行的排队波形；已经导通的 30 ms 脉冲自然结束。 */
-        if (!s_device_config.haptic_enabled) {
-            /* 清空待处理请求。 */
-            (void)xQueueReset(s_haptic_queue);
-        }
         /* 重新投递当前功耗策略，app_queue_power 会套用新亮度。 */
         const power_policy_t policy = power_manager_policy(&s_coordinator.power);
         /* 应用亮度与外设状态。 */
@@ -2040,26 +1958,20 @@ static void app_ui_command_callback(void *context, const ui_command_t command)
 {
     /* 当前不使用 context。 */
     (void)context;
-    /* 两个分级隔离阶段都没有创建应用事件队列；即使用户触摸按钮也不能访问空句柄。 */
-    if (APP_BENCH_DISPLAY_ONLY || APP_BENCH_SENSOR_ONLY || (s_app_event_queue == NULL)) {
+    /* 两个分级隔离阶段都没有创建 UI 控制邮箱；即使用户触摸按钮也不能访问空句柄。 */
+    if (APP_BENCH_DISPLAY_ONLY || APP_BENCH_SENSOR_ONLY || (s_ui_command_queue == NULL)) {
         /* 丢弃隔离阶段交互命令；恢复产品启动链后由同一回调正常投递。 */
         return;
     }
-    /* 构造事件。 */
-    app_event_t event;
-    /* 清零联合体。 */
-    (void)memset(&event, 0, sizeof(event));
-    /* 标记 UI 命令。 */
-    event.kind = APP_EVENT_UI_COMMAND;
-    /* 捕获触摸单调时间。 */
-    event.monotonic_ms = app_now_ms();
-    /* 保存命令。 */
-    event.data.ui_command = command;
-    /* 队列满时记录，不在 LVGL 回调等待。 */
-    if (xQueueSend(s_app_event_queue, &event, 0U) != pdPASS) {
-        /* 输出诊断。 */
-        ESP_LOGW(APP_TAG, "UI command queue full command=%d", (int)command);
-    }
+    /* 构造仅含触摸时刻和命令的单槽邮箱负载。 */
+    const app_ui_command_event_t command_event = {
+        /* 捕获触摸单调时间，应用任务稍后提交时仍保留原始交互顺序。 */
+        .monotonic_ms = app_now_ms(),
+        /* 保存 presenter 已绑定的有效命令。 */
+        .command = command,
+    };
+    /* 单槽邮箱使用 overwrite；即使 QMI 数据队列已满，用户最后一次点击也不会丢失或阻塞 LVGL。 */
+    (void)xQueueOverwrite(s_ui_command_queue, &command_event);
 }
 
 /* BLE 连接回调：只投递连接事实。 */
@@ -2223,9 +2135,39 @@ static void app_event_task(void *argument)
     app_event_t event;
     /* 永久消费队列。 */
     while (true) {
-        /* 阻塞等待下一输入，空闲时允许 Light-sleep。 */
-        if (xQueueReceive(s_app_event_queue, &event, portMAX_DELAY) != pdPASS) {
-            /* 理论上不会失败，继续等待。 */
+        /* 阻塞等待数据队列或 UI 控制邮箱任一就绪；Queue Set 不产生周期唤醒。 */
+        const QueueSetMemberHandle_t ready_member =
+            xQueueSelectFromSet(s_app_input_queue_set, portMAX_DELAY);
+        /* Queue Set 理论上只返回两个已注册成员；空句柄防御性忽略。 */
+        if (ready_member == NULL) {
+            /* 继续阻塞等待，不修改领域状态。 */
+            continue;
+        }
+        /* UI 邮箱就绪时把轻量命令还原为统一应用事件，后续仍走同一串行 switch。 */
+        if (ready_member == s_ui_command_queue) {
+            /* 保存从单槽邮箱取出的触摸事实。 */
+            app_ui_command_event_t command_event;
+            /* Queue Set 已报告可读；异常空读时放弃本轮并保留任务存活。 */
+            if (xQueueReceive(s_ui_command_queue, &command_event, 0U) != pdPASS) {
+                /* 继续等待下一项。 */
+                continue;
+            }
+            /* 清零完整事件联合体，避免未使用成员携带栈垃圾。 */
+            (void)memset(&event, 0, sizeof(event));
+            /* 标记统一 UI 命令类型。 */
+            event.kind = APP_EVENT_UI_COMMAND;
+            /* 恢复点击发生时的单调毫秒。 */
+            event.monotonic_ms = command_event.monotonic_ms;
+            /* 写入用户命令。 */
+            event.data.ui_command = command_event.command;
+        } else if (ready_member == s_app_event_queue) {
+            /* 主数据队列就绪时读取一条 QMI、BLE、电池、空闲或存储事实。 */
+            if (xQueueReceive(s_app_event_queue, &event, 0U) != pdPASS) {
+                /* Queue Set 与成员状态不一致时失败关闭，不提交未初始化事件。 */
+                continue;
+            }
+        } else {
+            /* 未注册句柄表示启动合同损坏；忽略它，避免把任意内存解释成事件。 */
             continue;
         }
         /* 按事件类型串行处理。 */
@@ -2304,15 +2246,6 @@ static void app_event_task(void *argument)
                 }
                 break;
             }
-            /* 按马达真实导通时刻登记前后各 20 ms 的 IMU 污染区。 */
-            case APP_EVENT_HAPTIC_STARTED:
-                /* 应用任务是 imu_pipeline 唯一写者，因此这里不会与 QMI 窗口处理数据竞争。 */
-                (void)imu_pipeline_mark_haptic_interval(
-                    &s_imu_pipeline,
-                    event.data.haptic_interval.start_us,
-                    event.data.haptic_interval.end_us);
-                /* 结束分支。 */
-                break;
             /* 每秒检查一次尚未发出的熄屏或长空闲门槛。 */
             case APP_EVENT_IDLE_POLL: {
                 /* 即使即时提示事件曾因队列满丢失，每秒也补取一次最新配对邮箱。 */
@@ -2768,65 +2701,6 @@ static void app_storage_task(void *argument)
     }
 }
 
-/* 振动任务：按领域波形调用 GPIO18 非阻塞 PWM，并在脉冲间让出 CPU。 */
-static void app_haptic_task(void *argument)
-{
-    /* 当前不使用参数。 */
-    (void)argument;
-    /* 保存振动请求。 */
-    fitness_haptic_request_t request;
-    /* 永久处理。 */
-    while (true) {
-        /* 等待下一请求。 */
-        if (xQueueReceive(s_haptic_queue, &request, portMAX_DELAY) != pdPASS) {
-            /* 继续。 */
-            continue;
-        }
-        /* 遍历 1~3 个脉冲。 */
-        for (uint8_t repeat = 0U; repeat < request.repeat_count; ++repeat) {
-            /* 在真正调用板级 PWM 前立即捕获单调起点，排队等待时间不计入污染区。 */
-            const uint64_t pulse_start_us = app_now_us();
-            /* 通过板级适配器启动一次 PWM 脉冲。 */
-            const board_adapter_result_t status = board_adapter_pulse_haptic(
-                board_runtime_adapter(&s_board_runtime),
-                request.on_ms,
-                APP_HAPTIC_INTENSITY_PERCENT);
-            /* 失败时停止当前波形。 */
-            if (status != BOARD_ADAPTER_OK) {
-                /* 输出错误。 */
-                ESP_LOGE(APP_TAG, "motor pulse failed=%d", (int)status);
-                /* 退出重复循环。 */
-                break;
-            }
-            /* 构造已实际启动的马达区间事件；计划终点由硬件定时脉宽换算，单位微秒。 */
-            app_event_t haptic_event;
-            /* 清零联合体及保留字段。 */
-            (void)memset(&haptic_event, 0, sizeof(haptic_event));
-            /* 标记马达已启动。 */
-            haptic_event.kind = APP_EVENT_HAPTIC_STARTED;
-            /* 保存同一事件的毫秒时间供统一诊断。 */
-            haptic_event.monotonic_ms = pulse_start_us / UINT64_C(1000);
-            /* 保存真实 PWM 启动前的单调微秒时刻。 */
-            haptic_event.data.haptic_interval.start_us = pulse_start_us;
-            /* on_ms 最大很小，乘 1000 不会接近 uint64 上限。 */
-            haptic_event.data.haptic_interval.end_us =
-                pulse_start_us + (uint64_t)request.on_ms * UINT64_C(1000);
-            /* 插入应用队列前端，使污染登记先于随后到达的 QMI 帧处理。 */
-            if (xQueueSendToFront(s_app_event_queue, &haptic_event, pdMS_TO_TICKS(10U)) != pdPASS) {
-                /* 队列异常满时记录；不得在马达任务无限等待。 */
-                ESP_LOGE(APP_TAG, "haptic contamination event queue full");
-            }
-            /* 等待本次导通结束；真实关断由 esp_timer 完成。 */
-            vTaskDelay(pdMS_TO_TICKS(request.on_ms));
-            /* 非最后脉冲等待关闭间隔。 */
-            if ((repeat + 1U < request.repeat_count) && (request.off_ms > 0U)) {
-                /* 等待关闭间隔。 */
-                vTaskDelay(pdMS_TO_TICKS(request.off_ms));
-            }
-        }
-    }
-}
-
 /* 为自动 Light-sleep 安装 GPIO38 触摸和 GPIO39 RTC 的低电平唤醒源。 */
 static bool app_configure_light_sleep_wake(const power_policy_t *policy)
 {
@@ -3200,14 +3074,19 @@ static bool app_create_os_objects(void)
 {
     /* 创建主事件队列。 */
     s_app_event_queue = xQueueCreate(APP_EVENT_QUEUE_LENGTH, sizeof(app_event_t));
+    /* 创建 UI 单槽控制邮箱；只保存最新点击，不与高频 QMI 帧共享容量。 */
+    s_ui_command_queue = xQueueCreate(
+        APP_UI_COMMAND_QUEUE_LENGTH,
+        sizeof(app_ui_command_event_t));
+    /* 创建 Queue Set；容量等于两个成员队列长度之和，保证每个就绪事实都有槽位。 */
+    s_app_input_queue_set = xQueueCreateSet(
+        APP_EVENT_QUEUE_LENGTH + APP_UI_COMMAND_QUEUE_LENGTH);
     /* 创建 UI 最新帧队列。 */
     s_ui_queue = xQueueCreate(APP_UI_QUEUE_LENGTH, sizeof(ui_context_t));
     /* 创建 BLE 输出队列。 */
     s_ble_queue = xQueueCreate(APP_BLE_QUEUE_LENGTH, sizeof(app_ble_output_t));
     /* 创建存储队列。 */
     s_storage_queue = xQueueCreate(APP_STORAGE_QUEUE_LENGTH, sizeof(app_storage_request_t));
-    /* 创建振动队列。 */
-    s_haptic_queue = xQueueCreate(APP_HAPTIC_QUEUE_LENGTH, sizeof(fitness_haptic_request_t));
     /* 创建电源最新策略队列。 */
     s_power_queue = xQueueCreate(APP_POWER_QUEUE_LENGTH, sizeof(app_power_request_t));
     /* 创建 BLE broker 互斥锁。 */
@@ -3220,10 +3099,26 @@ static bool app_create_os_objects(void)
     s_session_transfer_mutex = xSemaphoreCreateMutex();
     /* 创建 QMI 专用互斥锁，串行化数据读取与低功耗寄存器切换。 */
     s_sensors.qmi_mutex = xSemaphoreCreateMutex();
+    /* 默认标记两个成员尚未加入 Queue Set；任一对象为空时保持失败。 */
+    BaseType_t app_queue_added = pdFAIL;
+    /* 默认标记 UI 邮箱尚未加入 Queue Set。 */
+    BaseType_t ui_queue_added = pdFAIL;
+    /* 三个句柄均有效后才允许注册成员，避免向 FreeRTOS 传入空队列。 */
+    if ((s_app_input_queue_set != NULL) &&
+        (s_app_event_queue != NULL) &&
+        (s_ui_command_queue != NULL)) {
+        /* 把主数据队列加入等待集合。 */
+        app_queue_added = xQueueAddToSet(s_app_event_queue, s_app_input_queue_set);
+        /* 把 UI 控制邮箱加入同一等待集合。 */
+        ui_queue_added = xQueueAddToSet(s_ui_command_queue, s_app_input_queue_set);
+    }
     /* 全部对象必须成功。 */
-    return (s_app_event_queue != NULL) && (s_ui_queue != NULL) &&
+    return (s_app_event_queue != NULL) && (s_ui_command_queue != NULL) &&
+           (s_app_input_queue_set != NULL) &&
+           (app_queue_added == pdPASS) && (ui_queue_added == pdPASS) &&
+           (s_ui_queue != NULL) &&
            (s_ble_queue != NULL) && (s_storage_queue != NULL) &&
-           (s_haptic_queue != NULL) && (s_power_queue != NULL) &&
+           (s_power_queue != NULL) &&
            (s_ble_command_mutex != NULL) && (s_ble_command_done != NULL) &&
            (s_session_store_mutex != NULL) && (s_session_transfer_mutex != NULL) &&
            (s_sensors.qmi_mutex != NULL);
@@ -3380,7 +3275,7 @@ static void app_load_device_config(void)
     s_screen_timeout_ms = (uint32_t)s_device_config.screen_timeout_seconds * UINT32_C(1000);
 }
 
-/* 先初始化显示、触摸、I2C、马达与功放门控，使后续自检失败仍可显示中文 ERROR 页。 */
+    /* 先初始化显示、触摸、I2C 与功放门控，使后续自检失败仍可显示中文 ERROR 页。 */
 static bool app_init_board_runtime(void)
 {
     /* 构造外部驱动回调；hub 生命周期为静态。 */
@@ -3412,7 +3307,7 @@ static bool app_init_board_runtime(void)
         /* 启动亮度直接使用 NVS/Cmd9 偏好，首次启动默认为 35%。 */
         .initial_brightness_percent = s_device_config.brightness_percent,
     };
-    /* 初始化厂家 BSP、显示、触摸、I2C、马达和功放门控。 */
+    /* 初始化厂家 BSP、显示、触摸、I2C 和功放门控。 */
     if (board_runtime_init(&s_board_runtime, &config) != BOARD_RUNTIME_OK) {
         /* 输出失败。 */
         ESP_LOGE(APP_TAG, "board_runtime_init failed");
@@ -3828,11 +3723,11 @@ static bool app_init_domains(void)
 /* 创建唯一任务集合。 */
 static bool app_create_tasks(void)
 {
-    /* 应用任务 20 KiB 栈，覆盖双 M0 特征和前向临时数组。 */
+    /* 应用任务 16 KiB 栈，覆盖约 10.9 KiB 最深静态链并保留约 5 KiB 运行余量。 */
     const BaseType_t app_created = xTaskCreatePinnedToCore(
         app_event_task,
         "app_owner",
-        20U * 1024U,
+        APP_OWNER_TASK_STACK_BYTES,
         NULL,
         9U,
         NULL,
@@ -3846,14 +3741,18 @@ static bool app_create_tasks(void)
         10U,
         NULL,
         0);
-    /* UI 任务可由调度器分配。 */
-    const BaseType_t ui_created = xTaskCreate(
+    /*
+     * UI 任务只消费按值快照并在 BSP LVGL 锁内更新对象，不执行 Flash、NVS 或 ISR 路径。
+     * 其 8 KiB 栈使用板载 8 MB PSRAM，避免产品级页面对象与 NimBLE 争抢片内任务栈。
+     */
+    const BaseType_t ui_created = xTaskCreateWithCaps(
         app_ui_task,
         "ui_render",
-        8U * 1024U,
+        APP_UI_TASK_STACK_BYTES,
         NULL,
         5U,
-        NULL);
+        NULL,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     /* BLE 发布任务。 */
     const BaseType_t ble_created = xTaskCreate(
         app_ble_task,
@@ -3869,14 +3768,6 @@ static bool app_create_tasks(void)
         6U * 1024U,
         NULL,
         4U,
-        NULL);
-    /* 马达任务。 */
-    const BaseType_t haptic_created = xTaskCreate(
-        app_haptic_task,
-        "haptic",
-        3U * 1024U,
-        NULL,
-        7U,
         NULL);
     /* 电池任务。 */
     const BaseType_t battery_created = xTaskCreate(
@@ -3902,10 +3793,30 @@ static bool app_create_tasks(void)
         NULL,
         2U,
         NULL);
-    /* 全部九个任务必须创建成功。 */
+    /* 读取任务创建后的片内总余量，验证科技 UI、BLE 与八条业务链可同时常驻。 */
+    const size_t internal_free = heap_caps_get_free_size(
+        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    /* 读取最大连续片内块，后续协议和驱动临时对象不能只依赖离散总量。 */
+    const size_t internal_largest = heap_caps_get_largest_free_block(
+        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    /* 输出每个任务结果和剩余片内堆，真板启动日志可直接定位具体失败项。 */
+    ESP_LOGI(
+        APP_TAG,
+        "TASK_HEAP free=%u largest=%u result=%d%d%d%d%d%d%d%d",
+        (unsigned int)internal_free,
+        (unsigned int)internal_largest,
+        app_created == pdPASS ? 1 : 0,
+        qmi_created == pdPASS ? 1 : 0,
+        ui_created == pdPASS ? 1 : 0,
+        ble_created == pdPASS ? 1 : 0,
+        storage_created == pdPASS ? 1 : 0,
+        battery_created == pdPASS ? 1 : 0,
+        power_created == pdPASS ? 1 : 0,
+        idle_created == pdPASS ? 1 : 0);
+    /* 全部八个真实硬件/业务任务必须创建成功，任一失败都由启动错误页阻断产品运行。 */
     return (app_created == pdPASS) && (qmi_created == pdPASS) &&
            (ui_created == pdPASS) && (ble_created == pdPASS) &&
-           (storage_created == pdPASS) && (haptic_created == pdPASS) &&
+           (storage_created == pdPASS) &&
            (battery_created == pdPASS) && (power_created == pdPASS) &&
            (idle_created == pdPASS);
 }
@@ -3967,9 +3878,8 @@ static bool app_start_ble(const uint8_t initial_battery_percent)
                  (unsigned int)littlefs_used_bytes,
                  (unsigned int)littlefs_total_bytes);
     }
-    /* 能力位仅声明主应用已接入的振动、历史补传、LittleFS 与显式开发者原始流。 */
+    /* 能力位只声明主应用已接入的历史补传、LittleFS 与显式开发者原始流。 */
     const uint32_t manifest_capabilities =
-        (uint32_t)BLE_SERVICE_MANIFEST_CAPABILITY_HAPTIC_FEEDBACK |
         (uint32_t)BLE_SERVICE_MANIFEST_CAPABILITY_SESSION_HISTORY |
         (uint32_t)BLE_SERVICE_MANIFEST_CAPABILITY_LITTLEFS_STORAGE |
         (uint32_t)BLE_SERVICE_MANIFEST_CAPABILITY_RAW_STREAM;
@@ -4303,16 +4213,7 @@ void app_main(void)
         /* 静态分析保护。 */
         return;
     }
-    /* 全部关键检查通过后完成 SELF_TEST 到 HOME 的合法状态转移。 */
-    if (!app_finish_startup_success(&startup_ui)) {
-        /* 把状态机异常归入领域故障并保留可见页。 */
-        app_show_startup_error(&startup_ui, APP_STARTUP_FAULT_DOMAIN);
-        /* 暂停当前任务。 */
-        vTaskSuspend(NULL);
-        /* 静态分析保护。 */
-        return;
-    }
-    /* 领域和 UI 已处于 Home 后建立空闲基准，避免把启动耗时计入熄屏门槛。 */
+    /* 领域对象就绪后建立空闲基准，避免把后续 BLE 与任务启动耗时计入熄屏门槛。 */
     power_idle_timer_init(&s_power_idle_timer, app_now_ms());
     /* 读取启动电量；失败使用未知哨兵。 */
     uint8_t battery_percent = UINT8_MAX;
@@ -4359,10 +4260,25 @@ void app_main(void)
         /* 明确记录 BLE 未启动是诊断设计，不是 NimBLE 初始化失败。 */
         ESP_LOGW(APP_TAG, "bench isolation: BLE startup skipped");
     }
-    /* BLE 控制器完成片内保留后再创建九个业务任务，防止任务栈切碎控制器连续块。 */
+    /* BLE 控制器完成片内保留后再创建八个业务任务，防止任务栈切碎控制器连续块。 */
     if (!app_create_tasks()) {
-        /* 任务创建失败不可降级运行；此时串口已保留 BLE 启动前内存证据。 */
-        ESP_ERROR_CHECK(ESP_ERR_NO_MEM);
+        /* 输出稳定内存故障；app_create_tasks 已记录八个任务结果和剩余片内堆。 */
+        ESP_LOGE(APP_TAG, "business task allocation blocked startup");
+        /* startup_ui 仍处于 SELF_TEST，可合法切到中文错误码 1004。 */
+        app_show_startup_error(&startup_ui, APP_STARTUP_FAULT_TASK_MEMORY);
+        /* 禁止 ESP_ERROR_CHECK 形成设备检查重启循环；保留错误页供现场诊断。 */
+        vTaskSuspend(NULL);
+        /* 静态分析保护；暂停成功后不会到达。 */
+        return;
+    }
+    /* 传感器、存储、领域、BLE 和八个业务任务均通过后才允许进入 HOME。 */
+    if (!app_finish_startup_success(&startup_ui)) {
+        /* 把状态机异常归入领域故障并保留可见页。 */
+        app_show_startup_error(&startup_ui, APP_STARTUP_FAULT_DOMAIN);
+        /* 暂停当前任务。 */
+        vTaskSuspend(NULL);
+        /* 静态分析保护。 */
+        return;
     }
     /* 渲染初始 Home。 */
     app_queue_ui(&s_coordinator.ui);

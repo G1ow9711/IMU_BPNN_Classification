@@ -145,9 +145,13 @@ static int test_two_phase_cycle(void)
     sample = make_sample(720ULL, 0.0F, 1.0F);
     /* 第一 REST 点只进入候选。 */
     CHECK(push_rep_sample(&detector, &counter, &sample, &completed) == 0);
-    /* 第二 REST 点闭合周期。 */
+    /* 第二个真实 REST 点确认物理端点并发布第一条领域相位。 */
     sample = make_sample(760ULL, 0.0F, 1.0F);
-    /* 本点必须完成一次深蹲。 */
+    /* 领域层仍等待同一已确认相位的接口保持点。 */
+    CHECK(push_rep_sample(&detector, &counter, &sample, &completed) == 0);
+    /* 第三个输入点只承载已由两个原始点确认的 REST 保持事件。 */
+    sample = make_sample(800ULL, 0.0F, 1.0F);
+    /* 保持事件必须让领域层完成一次深蹲。 */
     CHECK(push_rep_sample(&detector, &counter, &sample, &completed) == 0);
     /* 检查完成标志。 */
     CHECK(completed);
@@ -209,22 +213,22 @@ static int test_continuous_jumping_jack_cycles(void)
     sample = make_sample(480ULL, 78.0F, 1.28F);
     /* REST 第一稳定点不立即计数。 */
     CHECK(push_rep_sample(&detector, &counter, &sample, &completed) == 0);
-    /* 连续正向点保持 REST，完成第一周期且周期时长不短于 400 ms。 */
+    /* 连续正向点是第二个真实端点，只确认并发布第一条 REST。 */
     sample = make_sample(520ULL, 68.0F, 1.24F);
-    /* 第二 REST 点必须完成一次开合跳。 */
+    /* 领域层尚未收到保持点。 */
+    CHECK(push_rep_sample(&detector, &counter, &sample, &completed) == 0);
+    /* 下一输入只承载已确认 REST 的接口保持事件。 */
+    sample = make_sample(560ULL, 75.0F, 1.22F);
+    /* 保持事件必须完成第一周期且周期时长不短于 400 ms。 */
     CHECK(push_rep_sample(&detector, &counter, &sample, &completed) == 0);
     /* 检查第一周期完成标志。 */
     CHECK(completed);
     /* 检查累计恰好为一。 */
     CHECK(counter.total_repetitions == 1ULL);
 
-    /* 同一正向动作继续存在时，重新学习 PRIMARY 并开启第二周期。 */
-    sample = make_sample(560ULL, 75.0F, 1.22F);
-    /* PRIMARY 第一证据点不计数。 */
-    CHECK(push_rep_sample(&detector, &counter, &sample, &completed) == 0);
-    /* 保持 PRIMARY 第二稳定点。 */
+    /* 连续闭合端点已经作为第二周期起点；后续正向点只维持回程前运动。 */
     sample = make_sample(600ULL, 65.0F, 1.18F);
-    /* 第二周期已开启但未完成。 */
+    /* 第二周期已开启但未到达反向端点。 */
     CHECK(push_rep_sample(&detector, &counter, &sample, &completed) == 0);
     /* 保持第二周期 25 Hz 连续时间线。 */
     for (uint64_t time_ms = 640ULL; time_ms < 800ULL; time_ms += 40ULL) {
@@ -252,8 +256,12 @@ static int test_continuous_jumping_jack_cycles(void)
     sample = make_sample(1040ULL, 76.0F, 1.26F);
     /* REST 第一证据点不计数。 */
     CHECK(push_rep_sample(&detector, &counter, &sample, &completed) == 0);
-    /* 保持点确认 REST。 */
+    /* 第二个真实正向点确认 REST，但领域层仍等待接口保持事件。 */
     sample = make_sample(1080ULL, 66.0F, 1.20F);
+    /* 当前点只发布第一条已确认 REST。 */
+    CHECK(push_rep_sample(&detector, &counter, &sample, &completed) == 0);
+    /* 下一点承载 REST 保持事件。 */
+    sample = make_sample(1120ULL, 60.0F, 1.18F);
     /* 本点必须完成第二次。 */
     CHECK(push_rep_sample(&detector, &counter, &sample, &completed) == 0);
     /* 检查第二周期完成标志。 */
@@ -324,9 +332,13 @@ static int test_jumping_jack_keeps_session_projection_axis(void)
         sample = make_vector_sample(base_ms + 480ULL, 74.0F, 0.0F, 0.0F, 1.26F);
         /* REST 第一稳定点不立即增加次数。 */
         CHECK(push_rep_sample(&detector, &counter, &sample, &completed) == 0);
-        /* 第二返回点保持正 x 方向，完成一次。 */
+        /* 第二个真实返回点确认端点并发布第一条 REST。 */
         sample = make_vector_sample(base_ms + 520ULL, 66.0F, 0.0F, 0.0F, 1.22F);
-        /* 样本处理必须成功。 */
+        /* 当前只确认物理端点，领域层仍等待保持事件。 */
+        CHECK(push_rep_sample(&detector, &counter, &sample, &completed) == 0);
+        /* 第三个输入点承载已确认 REST 的接口保持事件，不参与端点判定。 */
+        sample = make_vector_sample(base_ms + 560ULL, 20.0F, 0.0F, 0.0F, 1.18F);
+        /* 保持事件必须完成本周期。 */
         CHECK(push_rep_sample(&detector, &counter, &sample, &completed) == 0);
         /* 当前周期必须恰好产生一次完成事件。 */
         CHECK(completed);
@@ -398,8 +410,12 @@ static int test_jumping_jack_fixed_axis_avoids_projection_cancellation(void)
         sample = make_vector_sample(base_ms + 480ULL, -60.0F, 100.0F, -80.0F, 1.24F);
         /* REST 第一证据点尚不满足下游两点确认。 */
         CHECK(push_rep_sample(&detector, &counter, &sample, &completed) == 0);
-        /* 返回正 gy 第二点完成一次。 */
+        /* 返回正 gy 第二个真实点确认端点。 */
         sample = make_vector_sample(base_ms + 520ULL, -58.0F, 92.0F, -76.0F, 1.20F);
+        /* 当前只发布第一条已确认 REST。 */
+        CHECK(push_rep_sample(&detector, &counter, &sample, &completed) == 0);
+        /* 下一点承载已确认端点的接口保持事件。 */
+        sample = make_vector_sample(base_ms + 560ULL, 0.0F, 20.0F, 0.0F, 1.16F);
         /* 本点必须完成当前周期。 */
         CHECK(push_rep_sample(&detector, &counter, &sample, &completed) == 0);
         /* 每个合成周期必须恰好累计一次。 */
@@ -412,62 +428,81 @@ static int test_jumping_jack_fixed_axis_avoids_projection_cancellation(void)
     return 0;
 }
 
-/* 验证跳跃深蹲五阶段顺序能闭合一次，缺少腾空不能计数。 */
-static int test_jump_cycle(void)
+/* 验证腕戴跳跃深蹲在加速度始终高于腾空门时，完整正反腕部周期仍能计一次。 */
+static int test_wrist_jump_cycle_without_flight(void)
 {
-    /* 创建跳跃相位检测器和计数器。 */
+    /* 创建跳跃深蹲相位检测器和计数器。 */
     motion_phase_detector_t detector;
-    /* 保存跳跃重复计数器。 */
+    /* 保存统一腕部周期计数器。 */
     fitness_rep_counter_t counter;
     /* 保存完成标志。 */
     bool completed = false;
-    /* 初始化跳跃深蹲路径。 */
+    /* 初始化跳跃深蹲腕部路径。 */
     CHECK(motion_phase_init(&detector, FITNESS_ACTION_JUMPING_SQUAT) == MOTION_PHASE_OK);
-    /* 初始化五阶段计数器。 */
+    /* 初始化统一两相位计数器。 */
     CHECK(fitness_rep_counter_init(&counter, FITNESS_ACTION_JUMPING_SQUAT) == FITNESS_STATUS_OK);
     /* 首点稳定。 */
     motion_phase_sample_t sample = make_sample(0ULL, 0.0F, 1.0F);
     /* 首点不计数。 */
     CHECK(push_rep_sample(&detector, &counter, &sample, &completed) == 0);
-    /* 起跳推进高支持力和角速度。 */
-    sample = make_sample(40ULL, 60.0F, 1.25F);
-    /* TAKEOFF 第一稳定点。 */
+    /* 主向腕部转动；加速度保持 1.05 g，明确没有低于 0.78 g 的腾空点。 */
+    sample = make_sample(40ULL, 80.0F, 1.05F);
+    /* PRIMARY 第一稳定点。 */
     CHECK(push_rep_sample(&detector, &counter, &sample, &completed) == 0);
-    /* 保持 TAKEOFF。 */
-    sample = make_sample(80ULL, 50.0F, 1.10F);
-    /* TAKEOFF 第二稳定点。 */
+    /* 保持主向运动，让离散相位满足连续两点合同。 */
+    sample = make_sample(80ULL, 70.0F, 1.02F);
+    /* PRIMARY 第二稳定点只开启周期。 */
     CHECK(push_rep_sample(&detector, &counter, &sample, &completed) == 0);
-    /* 腾空低支持力。 */
-    sample = make_sample(160ULL, 35.0F, 0.55F);
-    /* FLIGHT 第一稳定点。 */
+    /* 120 ms 内插入低于方向门但高于静止角速度的连续点，避免合成数据触发真实断流保护。 */
+    sample = make_sample(160ULL, 25.0F, 1.00F);
+    /* 中间点不能推进相位。 */
     CHECK(push_rep_sample(&detector, &counter, &sample, &completed) == 0);
-    /* 保持 FLIGHT。 */
-    sample = make_sample(200ULL, 30.0F, 0.60F);
-    /* FLIGHT 第二稳定点。 */
+    /* 继续保持合法时间线，尚未到达反向端点。 */
+    sample = make_sample(240ULL, 25.0F, 1.00F);
+    /* 中间点仍不得计数。 */
     CHECK(push_rep_sample(&detector, &counter, &sample, &completed) == 0);
-    /* 落地冲击。 */
-    sample = make_sample(320ULL, 70.0F, 1.65F);
-    /* LANDING 第一稳定点。 */
+    /* 反向腕部转动确认动作另一端；支持力仍约 1 g。 */
+    sample = make_sample(320ULL, -80.0F, 0.98F);
+    /* SECONDARY 第一稳定点。 */
     CHECK(push_rep_sample(&detector, &counter, &sample, &completed) == 0);
-    /* 保持 LANDING。 */
-    sample = make_sample(360ULL, 45.0F, 1.20F);
-    /* LANDING 第二稳定点。 */
+    /* 保持反向转动。 */
+    sample = make_sample(360ULL, -70.0F, 1.01F);
+    /* SECONDARY 第二稳定点仍不计数。 */
     CHECK(push_rep_sample(&detector, &counter, &sample, &completed) == 0);
-    /* 落地后恢复稳定。 */
-    sample = make_sample(480ULL, 0.0F, 1.0F);
-    /* RECOVERY 第一稳定点。 */
+    /* 用 25 deg/s 连续点保持时间线且不满足 22 deg/s 静止门，防止尚未回到主向时提前闭合。 */
+    sample = make_sample(440ULL, 25.0F, 1.00F);
+    /* 回程中间点不形成 REST。 */
     CHECK(push_rep_sample(&detector, &counter, &sample, &completed) == 0);
-    /* 保持 RECOVERY。 */
-    sample = make_sample(520ULL, 0.0F, 1.0F);
-    /* RECOVERY 第二稳定点。 */
+    /* 第二个回程中间点保持相同合同。 */
+    sample = make_sample(520ULL, 25.0F, 1.00F);
+    /* 中间点不计数。 */
     CHECK(push_rep_sample(&detector, &counter, &sample, &completed) == 0);
-    /* 继续稳定触发 REST。 */
-    sample = make_sample(600ULL, 0.0F, 1.0F);
+    /* 第三个回程中间点继续维持小于方向阈值的正向速度。 */
+    sample = make_sample(600ULL, 25.0F, 1.00F);
+    /* 尚未到达主向端点。 */
+    CHECK(push_rep_sample(&detector, &counter, &sample, &completed) == 0);
+    /* 第四个中间点使慢速回程保持连续，且尚未满足 800 ms 跳跃深蹲周期。 */
+    sample = make_sample(680ULL, 25.0F, 1.00F);
+    /* 当前点仍不闭合周期。 */
+    CHECK(push_rep_sample(&detector, &counter, &sample, &completed) == 0);
+    /* 继续输入三个 80 ms 间隔的低幅回程点，使合成周期覆盖当前 800 ms 最短门。 */
+    for (uint64_t time_ms = 760ULL; time_ms <= 920ULL; time_ms += 80ULL) {
+        /* 25 deg/s 高于静止门但低于自适应方向门，不会提前闭合。 */
+        sample = make_sample(time_ms, 25.0F, 1.00F);
+        /* 回程点只延续时间线，不发布相位。 */
+        CHECK(push_rep_sample(&detector, &counter, &sample, &completed) == 0);
+    }
+    /* 回到主向起点闭合完整周期；从已确认 PRIMARY 到最终保持点超过 800 ms。 */
+    sample = make_sample(960ULL, 80.0F, 1.06F);
     /* REST 第一稳定点。 */
     CHECK(push_rep_sample(&detector, &counter, &sample, &completed) == 0);
-    /* 保持 REST 并完成完整周期。 */
-    sample = make_sample(640ULL, 0.0F, 1.0F);
-    /* 第二 REST 点必须计数。 */
+    /* 第二个真实返回点确认 REST。 */
+    sample = make_sample(1000ULL, 70.0F, 1.03F);
+    /* 当前只发布第一条已确认相位。 */
+    CHECK(push_rep_sample(&detector, &counter, &sample, &completed) == 0);
+    /* 下一输入承载 REST 接口保持事件。 */
+    sample = make_sample(1040ULL, 20.0F, 1.01F);
+    /* 保持事件必须计数。 */
     CHECK(push_rep_sample(&detector, &counter, &sample, &completed) == 0);
     /* 检查完成标志。 */
     CHECK(completed);
@@ -516,6 +551,71 @@ static int test_step_peak(void)
     CHECK(motion_phase_push(&detector, &sample, &observation) == MOTION_PHASE_OK);
     /* 不得重复。 */
     CHECK(!observation.step_peak);
+    /* 测试通过。 */
+    return 0;
+}
+
+/* 验证慢速单步形成宽峰和次级波瓣时，必须等信号真正回落后才能重新武装。 */
+static int test_step_wide_peak_requires_low_rearm(void)
+{
+    /* detector 使用 walk 步峰路径；本测试只审计上游峰事件，不依赖下游固定不应期。 */
+    motion_phase_detector_t detector;
+    /* observation 接收每个 25 Hz 点是否产生步峰。 */
+    motion_phase_observation_t observation;
+    /* 初始化 walk 检测器并清空慢基线、历史和重新武装状态。 */
+    CHECK(motion_phase_init(&detector, FITNESS_ACTION_WALK) == MOTION_PHASE_OK);
+    /* time_ms 严格按 40 ms 推进，单位为毫秒。 */
+    uint64_t time_ms = 0ULL;
+    /* peak_count 累计上游报告的步峰数；两个物理宽峰应恰好得到两次。 */
+    uint32_t peak_count = 0U;
+    /* 前 20 点保持 1 g，建立稳定慢基线且不得产生步峰。 */
+    for (uint32_t point = 0U; point < 20U; ++point) {
+        /* sample 只在 az 写入 1 g，模拟佩戴者静止站立。 */
+        motion_phase_sample_t sample = make_sample(time_ms, 0.0F, 1.0F);
+        /* 平坦点必须被正常消费。 */
+        CHECK(motion_phase_push(&detector, &sample, &observation) == MOTION_PHASE_OK);
+        /* 静止基线不能触发步峰。 */
+        CHECK(!observation.step_peak);
+        /* 推进一个采样周期。 */
+        time_ms += MOTION_PHASE_SAMPLE_PERIOD_MS;
+    }
+    /* wide_step_g 模拟一个慢步的宽冲击；中间次级波瓣仍高于低回落门，不是第二步。 */
+    static const float wide_step_g[] = {
+        1.10F, 1.24F, 1.40F, 1.28F, 1.23F, 1.24F, 1.25F,
+        1.27F, 1.29F, 1.35F, 1.26F, 1.18F, 1.08F, 1.01F, 1.00F
+    };
+    /* 连续输入两个物理步；每一步内部有两个局部峰，但两步之间完整回到基线。 */
+    for (uint32_t physical_step = 0U; physical_step < 2U; ++physical_step) {
+        /* 遍历当前宽峰全部点，保持同一人的慢动作形状。 */
+        for (uint32_t point = 0U;
+             point < (uint32_t)(sizeof(wide_step_g) / sizeof(wide_step_g[0]));
+             ++point) {
+            /* sample 的加速度单位为 g；角速度保持零以隔离步峰算法。 */
+            motion_phase_sample_t sample = make_sample(time_ms, 0.0F, wide_step_g[point]);
+            /* 当前点必须正常推进慢基线和峰值迟滞。 */
+            CHECK(motion_phase_push(&detector, &sample, &observation) == MOTION_PHASE_OK);
+            /* 仅在检测器公开真实步峰时累计。 */
+            if (observation.step_peak) {
+                /* 记录一个上游步事件。 */
+                peak_count += 1U;
+            }
+            /* 推进一个采样周期。 */
+            time_ms += MOTION_PHASE_SAMPLE_PERIOD_MS;
+        }
+        /* 两个物理步之间追加 8 个基线点，明确完成低阈值回落和重新武装。 */
+        for (uint32_t rest_point = 0U; rest_point < 8U; ++rest_point) {
+            /* 1 g 点表示脚步冲击已经结束。 */
+            motion_phase_sample_t sample = make_sample(time_ms, 0.0F, 1.0F);
+            /* 回落点必须正常消费。 */
+            CHECK(motion_phase_push(&detector, &sample, &observation) == MOTION_PHASE_OK);
+            /* 回落过程不得额外产生局部峰。 */
+            CHECK(!observation.step_peak);
+            /* 推进一个采样周期。 */
+            time_ms += MOTION_PHASE_SAMPLE_PERIOD_MS;
+        }
+    }
+    /* 两个慢速宽峰必须恰好对应两步，内部波瓣不能重复计步。 */
+    CHECK(peak_count == 2U);
     /* 测试通过。 */
     return 0;
 }
@@ -608,66 +708,6 @@ static int test_periodic_pair_gap_preserves_completed_total(void)
     return 0;
 }
 
-/* 验证连续马达污染点只推进时间线，而真实长缺口仍清空未完成周期。 */
-static int test_periodic_pair_transient_skip_preserves_filter_state(void)
-{
-    /* 创建单轴 11+5 均值和相邻峰谷检测器。 */
-    motion_periodic_pair_detector_t detector;
-    /* 建立零累计初始状态。 */
-    CHECK(motion_periodic_pair_init(&detector) == MOTION_PHASE_OK);
-    /* accepted 保存干净点是否闭合峰谷；首点不可能计数。 */
-    bool accepted = true;
-    /* 0 ms 干净点建立滤波与时间线。 */
-    CHECK(motion_periodic_pair_push(&detector, 0ULL, 0.25F, &accepted) ==
-          MOTION_PHASE_OK);
-    /* 首点只填充第一级均值，不产生次数。 */
-    CHECK(!accepted);
-    /* 保存跳过污染前的滤波状态，单位分别为点和 g。 */
-    const uint8_t long_count_before = detector.long_filter.count;
-    /* 保存第一级窗口和，验证污染幅值完全没有写入。 */
-    const float long_sum_before = detector.long_filter.sum_g;
-    /* 保存最终滤波序号，污染点不能消耗不应期序号。 */
-    const uint32_t sequence_before = detector.filtered_sequence;
-    /* 连续四个 25 Hz 点模拟 30 ms 马达及前后保护窗。 */
-    for (uint64_t time_ms = 40ULL; time_ms <= 160ULL; time_ms += 40ULL) {
-        /* 每个污染点只推进严格单调时间线。 */
-        CHECK(motion_periodic_pair_skip_transient(&detector, time_ms) ==
-              MOTION_PHASE_OK);
-    }
-    /* 第一级均值有效点数必须完全不变。 */
-    CHECK(detector.long_filter.count == long_count_before);
-    /* 第一级均值和必须完全不变，证明马达幅值未进入滤波器。 */
-    CHECK(detector.long_filter.sum_g == long_sum_before);
-    /* 最终滤波序号必须不变，污染点不会缩短单轴不应期。 */
-    CHECK(detector.filtered_sequence == sequence_before);
-    /* 最近时间必须推进到最后一个污染点。 */
-    CHECK(detector.last_timestamp_ms == 160ULL);
-    /* 连续污染点数必须精确为四，未超过产品保护上限。 */
-    CHECK(detector.transient_skip_count == 4U);
-    /* 200 ms 干净点距最近污染点仅 40 ms，不得误报 200 ms 断流。 */
-    CHECK(motion_periodic_pair_push(&detector, 200ULL, 0.50F, &accepted) ==
-          MOTION_PHASE_OK);
-    /* 干净点必须结束连续污染段。 */
-    CHECK(detector.transient_skip_count == 0U);
-    /* 人工保存三个既有累计，验证后续真实断流仍不回滚。 */
-    detector.total_pairs = 3ULL;
-    /* 再送四个相邻污染点，仍处于允许的单次保护窗。 */
-    for (uint64_t time_ms = 240ULL; time_ms <= 360ULL; time_ms += 40ULL) {
-        /* 每点间隔正常，前四点只占时间。 */
-        CHECK(motion_periodic_pair_skip_transient(&detector, time_ms) ==
-              MOTION_PHASE_OK);
-    }
-    /* 第五个连续污染点虽只间隔 40 ms，仍必须按超长污染重置。 */
-    CHECK(motion_periodic_pair_skip_transient(&detector, 400ULL) ==
-          MOTION_PHASE_GAP_RESET);
-    /* 已完成累计必须保留。 */
-    CHECK(detector.total_pairs == 3ULL);
-    /* 真实断流重置后，第一级窗口为空且不写入污染幅值。 */
-    CHECK(detector.long_filter.count == 0U);
-    /* 测试通过。 */
-    return 0;
-}
-
 /* 返回三个单轴累计的中位数，复现训练引擎的鲁棒融合口径。 */
 static uint64_t median_three_u64(
     const uint64_t a,
@@ -735,7 +775,7 @@ static int test_periodic_pair_real_dataset(
             (uint64_t)active_index * (uint64_t)MOTION_PHASE_SAMPLE_PERIOD_MS;
         /* 三个加速度 raw 通道分别除以 4096 raw/g，转换为生产 API 的 g。 */
         for (uint8_t axis = 0U; axis < 3U; ++axis) {
-            /* accepted 只用于确认接口输出地址有效，最终以累计中位数核对。 */
+            /* accepted 只用于确认单轴接口输出地址有效；此历史样本没有跨轴事件时间人工标注。 */
             bool accepted = false;
             /* 第 4..6 列对应 ax、ay、az。 */
             const float acceleration_g =
@@ -754,12 +794,12 @@ static int test_periodic_pair_real_dataset(
     CHECK(fclose(file) == 0);
     /* 权威动作段必须精确为 408 点。 */
     CHECK(active_index == 408U);
-    /* 三轴累计中位数就是最终动作次数，不乘二。 */
+    /* 历史离线标注用三轴累计中位数核对底层峰谷不漂移；生产权威融合另由训练引擎测试。 */
     const uint64_t fused_repetitions = median_three_u64(
         detectors[0].total_pairs,
         detectors[1].total_pairs,
         detectors[2].total_pairs);
-    /* 生产 C 输出必须匹配用户视觉核数。 */
+    /* 底层三轴峰谷累计必须匹配旧人工视觉核数，防止滤波/配对器回归。 */
     CHECK(fused_repetitions == expected_repetitions);
     /* 测试通过。 */
     return 0;
@@ -811,16 +851,16 @@ int main(int argc, char **argv)
     CHECK(test_jumping_jack_keeps_session_projection_axis() == 0);
     /* 验证首窗固定主单轴可消除三轴点积抵消漏计。 */
     CHECK(test_jumping_jack_fixed_axis_avoids_projection_cancellation() == 0);
-    /* 验证跳跃五阶段完整周期。 */
-    CHECK(test_jump_cycle() == 0);
+    /* 验证腕戴跳跃无需腾空支持力也能按完整正反周期计数。 */
+    CHECK(test_wrist_jump_cycle_without_flight() == 0);
     /* 验证 walk 局部峰。 */
     CHECK(test_step_peak() == 0);
+    /* 验证慢速宽峰内部波瓣不会重复计步。 */
+    CHECK(test_step_wide_peak_requires_low_rearm() == 0);
     /* 验证相邻峰谷在线计数十个周期。 */
     CHECK(test_periodic_pair_counter_counts_ten_acceleration_cycles() == 0);
     /* 验证采样间断不清除已完成峰谷累计。 */
     CHECK(test_periodic_pair_gap_preserves_completed_total() == 0);
-    /* 验证马达污染时间占位不清空滤波，而真实长间断仍重置。 */
-    CHECK(test_periodic_pair_transient_skip_preserves_filter_state() == 0);
     /* scy1 用户视觉核数为 16。 */
     CHECK(test_periodic_pair_real_dataset(argv[1], 16ULL) == 0);
     /* scy2 用户视觉核数为 15。 */

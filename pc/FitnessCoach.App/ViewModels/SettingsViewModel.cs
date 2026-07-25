@@ -12,7 +12,7 @@ using FitnessCoach.Bluetooth;
 // 设置页 ViewModel 位于应用命名空间。
 namespace FitnessCoach.App.ViewModels;
 
-/// <summary>编辑体重、振动、声音、亮度、熄屏时间和每日目标。</summary>
+/// <summary>编辑体重、声音、亮度、熄屏时间和每日目标。</summary>
 public sealed class SettingsViewModel : ObservableObject
 {
     // 国际常衡磅换算常数：一千克等于 2.2046226218487757 磅。
@@ -39,8 +39,6 @@ public sealed class SettingsViewModel : ObservableObject
     private double _weightKilograms = 65.0;
     // 当前界面单位选项；内部体重和 BLE 协议始终保持千克。
     private MeasurementUnitOption _selectedUnitOption = AvailableUnitOptions[0];
-    // 是否启用有效计次振动。
-    private bool _hapticEnabled = true;
     // 是否启用提示音。
     private bool _soundEnabled;
     // AMOLED 亮度百分比。
@@ -188,15 +186,6 @@ public sealed class SettingsViewModel : ObservableObject
         ? $"体重（磅，{30.0 * PoundsPerKilogram:F1}～{250.0 * PoundsPerKilogram:F1}）"
         : "体重（千克，30～250）";
 
-    /// <summary>是否启用每次有效 repetition 的 30ms 振动。</summary>
-    public bool HapticEnabled
-    {
-        // 返回开关值。
-        get => _hapticEnabled;
-        // 更新开关值。
-        set => SetProperty(ref _hapticEnabled, value);
-    }
-
     /// <summary>是否启用提示音。</summary>
     public bool SoundEnabled
     {
@@ -264,8 +253,6 @@ public sealed class SettingsViewModel : ObservableObject
             SelectedUnitOption = AvailableUnitOptions.Single(option => option.UnitSystem == preferences.UnitSystem);
             // 复制下次启动真 BLE/Mock 模式。
             UseRealBleDevice = preferences.UseRealBleDevice;
-            // 复制振动开关。
-            HapticEnabled = preferences.HapticEnabled;
             // 复制声音开关。
             SoundEnabled = preferences.SoundEnabled;
             // 复制亮度。
@@ -312,8 +299,6 @@ public sealed class SettingsViewModel : ObservableObject
                 WeightKilograms = WeightKilograms,
                 // 保存界面单位；设备端仍只接收上面的规范千克值。
                 UnitSystem = SelectedUnitOption.UnitSystem,
-                // 保存振动开关。
-                HapticEnabled = HapticEnabled,
                 // 保存声音开关。
                 SoundEnabled = SoundEnabled,
                 // 保存亮度。
@@ -377,7 +362,6 @@ public sealed class SettingsViewModel : ObservableObject
                 // 构造固件命令 9 偏好记录。
                 DevicePreferencesV1 devicePreferences = new(
                     checked((byte)BrightnessPercent),
-                    HapticEnabled,
                     SoundEnabled,
                     checked((ushort)ScreenTimeoutSeconds),
                     nextPreferencesRevision,

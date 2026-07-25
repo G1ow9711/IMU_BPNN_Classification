@@ -279,10 +279,6 @@ static void test_constant_stream_and_windows(void)
     static imu_pipeline_t pipeline;
     /* 初始化流水线。 */
     CHECK_EQ_INT(IMU_PIPELINE_OK, imu_pipeline_init(&pipeline, &config));
-    /* 注册 80~110 ms 的 30 ms 计数振动，保护区扩为 60~130 ms。 */
-    CHECK_EQ_INT(
-        IMU_PIPELINE_OK,
-        imu_pipeline_mark_haptic_interval(&pipeline, 80000ULL, 110000ULL));
     /* 输入到 3 秒，足够产生 75 个 25 Hz 点和两个窗口。 */
     feed_constant_streams(&pipeline, 3000000ULL);
     /* 应产生 0~2.96 秒共 75 点。 */
@@ -308,10 +304,6 @@ static void test_constant_stream_and_windows(void)
     CHECK_CLOSE(-2.0F, observer.samples[10].axes[IMU_AXIS_AY], 0.0001F);
     /* 检查 az。 */
     CHECK_CLOSE(3.0F, observer.samples[10].axes[IMU_AXIS_AZ], 0.0001F);
-    /* 80 ms 和 120 ms 点都在扩展马达区间。 */
-    CHECK_TRUE((observer.samples[2].quality_flags & IMU_QUALITY_HAPTIC_CONTAMINATED) != 0U);
-    /* 检查第二个污染点。 */
-    CHECK_TRUE((observer.samples[3].quality_flags & IMU_QUALITY_HAPTIC_CONTAMINATED) != 0U);
     /* 产生两个窗口：首窗 62 点，随后新增 12 点。 */
     CHECK_EQ_INT(2U, observer.window_count);
     /* 首窗末点为 61*40 ms=2.44 s。 */
@@ -322,9 +314,6 @@ static void test_constant_stream_and_windows(void)
     CHECK_EQ_INT(0U, observer.windows[0].sequence);
     /* 第二窗口序号递增。 */
     CHECK_EQ_INT(1U, observer.windows[1].sequence);
-    /* 首窗包含马达污染质量位。 */
-    CHECK_TRUE(
-        (observer.windows[0].quality_flags & IMU_QUALITY_HAPTIC_CONTAMINATED) != 0U);
     /* 模型每个窗口调用一次。 */
     CHECK_EQ_INT(2U, observer.infer_count);
     /* 结果回调也为两次。 */
@@ -414,6 +403,103 @@ static void test_lowpass_attenuation(void)
     }
 }
 
+/*
+ * 验证短于 25 Hz 输出周期的单个原始漏点只标记质量，不清空 62 点模型历史。
+ * 125 Hz 加速度漏一帧形成 16 ms 间隔，仍可由相邻原始端点为 40 ms 输出网格做线性插值。
+ */
+static void test_recoverable_raw_gap_keeps_window_stride(void)
+{
+    /* 清零观察结构，窗口数和质量位从零开始。 */
+    test_observer_t observer;
+    /* 避免栈残值污染回调计数。 */
+    (void)memset(&observer, 0, sizeof(observer));
+    /* 使用常量六轴配置，关闭模型但保留窗口观察。 */
+    imu_pipeline_config_t config = test_default_config(&observer);
+    /* 本测试只审计重采样和窗口，不执行双 M0。 */
+    config.infer = NULL;
+    /* 推理结果回调随模型一起关闭。 */
+    config.on_inference = NULL;
+    /* 使用静态流水线，避免约数 KiB 窗口对象占用测试线程栈。 */
+    static imu_pipeline_t pipeline;
+    /* 初始化生产流水线。 */
+    CHECK_EQ_INT(IMU_PIPELINE_OK, imu_pipeline_init(&pipeline, &config));
+    /* 两路原始时钟从零开始。 */
+    uint64_t next_accel_us = 0ULL;
+    /* 陀螺名义周期为 8,912 微秒。 */
+    uint64_t next_gyro_us = 0ULL;
+    /* 加速度序号用于精确跳过第 20 帧，制造一次 16 ms 间隔。 */
+    uint32_t accel_index = 0U;
+    /* 输入到 3 秒，正常应形成首窗和一个 12 点步进窗。 */
+    const uint64_t end_us = 3000000ULL;
+    /* 按时间顺序交错两路，复现 QMI 轮询提交次序。 */
+    while ((next_accel_us <= end_us) || (next_gyro_us <= end_us)) {
+        /* 当前加速度时刻较早时处理加速度源。 */
+        if ((next_accel_us <= next_gyro_us) && (next_accel_us <= end_us)) {
+            /* 第 20 帧只推进硬件时间、不提交，模拟一次 DATA_READY 轮询抖动。 */
+            if (accel_index != 20U) {
+                /* 其它加速度点保持常量，隔离时间策略。 */
+                CHECK_EQ_INT(
+                    IMU_PIPELINE_OK,
+                    push_constant_accel(&pipeline, next_accel_us));
+            }
+            /* 原始帧序号前进一。 */
+            accel_index += 1U;
+            /* 加速度硬件时间固定前进 8 ms。 */
+            next_accel_us += IMU_PIPELINE_ACCEL_EXPECTED_PERIOD_US;
+        } else if (next_gyro_us <= end_us) {
+            /* 陀螺保持无丢帧，提供连续插值端点。 */
+            CHECK_EQ_INT(
+                IMU_PIPELINE_OK,
+                push_constant_gyro(&pipeline, next_gyro_us));
+            /* 陀螺时钟前进一个名义周期。 */
+            next_gyro_us += IMU_PIPELINE_GYRO_EXPECTED_PERIOD_US;
+        }
+    }
+    /* 16 ms 小缺口不得把完整窗口清零。 */
+    CHECK_EQ_INT(0U, pipeline.stats.resampler_resets);
+    /* 缺失一帧必须保留诊断统计，不能把容错解释成没有丢点。 */
+    CHECK_TRUE(pipeline.stats.accel_raw_dropped >= 1U);
+    /* 输出仍保持 0、40...2960 ms 共 75 点。 */
+    CHECK_EQ_INT(75U, observer.sample_count);
+    /* 首窗 62 点、随后新增 12 点，必须按正常 0.48 秒步长形成两窗。 */
+    CHECK_EQ_INT(2U, observer.window_count);
+    /* 第一窗口保留 ACCEL_GAP 诊断事实。 */
+    CHECK_TRUE((observer.windows[0].quality_flags & IMU_QUALITY_ACCEL_GAP) != 0U);
+    /* 可恢复小缺口不得伪造 RESAMPLER_RESET。 */
+    CHECK_TRUE((observer.windows[0].quality_flags & IMU_QUALITY_RESAMPLER_RESET) == 0U);
+}
+
+/* 验证超过 25 Hz 输出周期的原始缺口仍作硬重置，禁止跨长缺口插值。 */
+static void test_unrecoverable_raw_gap_resets_window(void)
+{
+    /* 清零观察结构。 */
+    test_observer_t observer;
+    /* 消除未定义栈数据。 */
+    (void)memset(&observer, 0, sizeof(observer));
+    /* 关闭模型和窗口回调断言，只检查内部连续性状态。 */
+    imu_pipeline_config_t config = test_default_config(&observer);
+    /* 长缺口测试无需模型。 */
+    config.infer = NULL;
+    /* 长缺口测试无需窗口。 */
+    config.on_window = NULL;
+    /* 长缺口测试无需推理结果。 */
+    config.on_inference = NULL;
+    /* 使用独立静态流水线。 */
+    static imu_pipeline_t pipeline;
+    /* 初始化生产流水线。 */
+    CHECK_EQ_INT(IMU_PIPELINE_OK, imu_pipeline_init(&pipeline, &config));
+    /* 首帧建立加速度时间基准。 */
+    CHECK_EQ_INT(IMU_PIPELINE_OK, push_constant_accel(&pipeline, 0ULL));
+    /* 48 ms 大于 40 ms 输出周期，必须重建连续段。 */
+    CHECK_EQ_INT(IMU_PIPELINE_OK, push_constant_accel(&pipeline, 48000ULL));
+    /* 长缺口必须增加重采样重置统计。 */
+    CHECK_TRUE(pipeline.stats.resampler_resets >= 1U);
+    /* 至少五个 8 ms 原始点缺失必须被统计。 */
+    CHECK_TRUE(pipeline.stats.accel_raw_dropped >= 5U);
+    /* 新连续段尚无 62 点，模型环必须为空。 */
+    CHECK_EQ_INT(0U, pipeline.ring_count);
+}
+
 /* 验证倒退时间、驱动丢样、队列溢出和会话重置。 */
 static void test_quality_and_drop_paths(void)
 {
@@ -461,10 +547,6 @@ static void test_quality_and_drop_paths(void)
     CHECK_EQ_INT(
         IMU_PIPELINE_ERR_ARGUMENT,
         imu_pipeline_report_source_drop(&pipeline, (imu_source_t)99, 1U));
-    /* 结束早于开始的马达区间拒绝。 */
-    CHECK_EQ_INT(
-        IMU_PIPELINE_ERR_ARGUMENT,
-        imu_pipeline_mark_haptic_interval(&pipeline, 200ULL, 100ULL));
     /* 会话重置不应增加故障重采样计数。 */
     const uint32_t resets_before = pipeline.stats.resampler_resets;
     /* 重置新会话。 */
@@ -519,6 +601,10 @@ int main(void)
     test_constant_stream_and_windows();
     /* 验证简化抗混叠低通。 */
     test_lowpass_attenuation();
+    /* 验证一次原始漏帧只留质量事实，不重启 62 点窗口。 */
+    test_recoverable_raw_gap_keeps_window_stride();
+    /* 验证长于输出周期的原始缺口仍安全重建。 */
+    test_unrecoverable_raw_gap_resets_window();
     /* 验证质量和丢样路径。 */
     test_quality_and_drop_paths();
     /* 任一失败返回非零。 */

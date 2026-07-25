@@ -1,7 +1,7 @@
 #ifndef IMU_HANDHELD_IMU_PIPELINE_H
 #define IMU_HANDHELD_IMU_PIPELINE_H
 
-/* 引入布尔类型，描述时间表、滤波器和振动区间是否有效。 */
+/* 引入布尔类型，描述时间表和滤波器是否有效。 */
 #include <stdbool.h>
 /* 引入定长整数，保证 QMI 原始值、时间戳、计数器和质量位宽明确。 */
 #include <stdint.h>
@@ -32,9 +32,12 @@ extern "C" {
 #define IMU_PIPELINE_ACCEL_EXPECTED_PERIOD_US (8000ULL)
 /* QMI 陀螺仪名义 112.1 Hz 周期近似为 8,912 微秒。 */
 #define IMU_PIPELINE_GYRO_EXPECTED_PERIOD_US (8912ULL)
-/* 马达区间前后各扩展 20 ms，覆盖机械起振和余振。 */
-#define IMU_PIPELINE_HAPTIC_GUARD_US (20000ULL)
-
+/*
+ * 原始流缺口只有超过一个 25 Hz 输出周期才清空滤波、插值和 62 点窗口。
+ * 小于等于 40 ms 的单帧/少量漏点仍由相邻原始端点线性插值，并保留 ACCEL_GAP/GYRO_GAP
+ * 质量事实；这样既不掩盖丢帧，也避免 16 ms 轮询抖动把 2.48 秒模型窗反复冷启动。
+ */
+#define IMU_PIPELINE_RAW_GAP_RESET_THRESHOLD_US IMU_PIPELINE_OUTPUT_PERIOD_US
 /* 明确六轴下标；模型、特征头和 ESP32 必须使用同一顺序。 */
 typedef enum {
     /* 角速度 x，单位 deg/s。 */
@@ -83,8 +86,8 @@ typedef enum {
     IMU_QUALITY_OUT_OF_ORDER = 1U << 2,
     /* 异步队列已满并丢弃最旧滤波点。 */
     IMU_QUALITY_QUEUE_OVERFLOW = 1U << 3,
-    /* 当前插值所用原始点或目标时刻与马达振动保护区重叠。 */
-    IMU_QUALITY_HAPTIC_CONTAMINATED = 1U << 4,
+    /* 兼容旧日志的历史执行器污染位；当前无执行器固件不会再产生该位。 */
+    IMU_QUALITY_LEGACY_ACTUATOR_CONTAMINATED = 1U << 4,
     /* 已知 QMI FIFO/驱动丢样由上层显式报告。 */
     IMU_QUALITY_DRIVER_DROP = 1U << 5,
     /* 数据间断后清空 62 点环形窗并重新对齐 25 Hz 网格。 */
@@ -109,7 +112,7 @@ typedef struct {
     uint64_t timestamp_us;
     /* 前三项单位 deg/s，后三项单位 g。 */
     float axes[IMU_PIPELINE_AXIS_COUNT];
-    /* 保存两路插值端点、振动和间断传播得到的质量位。 */
+    /* 保存两路插值端点和间断传播得到的质量位。 */
     uint32_t quality_flags;
 } imu_resampled_sample_t;
 
@@ -255,12 +258,6 @@ typedef struct {
     uint32_t next_window_sequence;
     /* 保存展开后的连续窗口，避免每次推理在任务栈分配约 1.5 KiB。 */
     imu_pipeline_window_t window_scratch;
-    /* 标记马达污染保护区是否有效。 */
-    bool haptic_interval_valid;
-    /* 保存扩展保护后的马达区间起点。 */
-    uint64_t haptic_start_us;
-    /* 保存扩展保护后的马达区间终点。 */
-    uint64_t haptic_end_us;
     /* 保存累计诊断统计。 */
     imu_pipeline_stats_t stats;
     /* 标记初始化已经成功。 */
@@ -286,11 +283,6 @@ imu_pipeline_result_t imu_pipeline_report_source_drop(
     imu_pipeline_t *pipeline,
     imu_source_t source,
     uint32_t count);
-/* 注册马达实际导通区间；内部前后各扩 20 ms，保护插值端点和余振。 */
-imu_pipeline_result_t imu_pipeline_mark_haptic_interval(
-    imu_pipeline_t *pipeline,
-    uint64_t start_timestamp_us,
-    uint64_t end_timestamp_us);
 /* 返回只读累计统计指针；流水线生命周期内有效，空流水线返回空指针。 */
 const imu_pipeline_stats_t *imu_pipeline_get_stats(const imu_pipeline_t *pipeline);
 

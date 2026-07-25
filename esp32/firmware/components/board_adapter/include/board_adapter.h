@@ -75,8 +75,6 @@ typedef struct {
     uint8_t imu_interrupt_gpio;
     /* 记录 PCF85063 中断引脚；本地原理图为 GPIO39，仅能作为 Light-sleep GPIO 唤醒。 */
     uint8_t rtc_interrupt_gpio;
-    /* 记录马达 NMOS 栅极引脚；当前硬件为 GPIO18。 */
-    uint8_t motor_gpio;
     /* 记录扬声器功放使能引脚；当前硬件为 GPIO46。 */
     uint8_t speaker_enable_gpio;
     /* 记录 TF 卡 CLK 引脚；当前硬件为 GPIO2。 */
@@ -101,8 +99,6 @@ typedef struct {
     int (*set_display_brightness)(void *context, uint8_t percent);
     /* 控制触摸工作/监视模式；enabled=false 表示进入低功耗监视或休眠。 */
     int (*set_touch_active)(void *context, bool enabled);
-    /* 输出马达脉冲；duration_ms 为毫秒，intensity_percent 为 1~100。 */
-    int (*pulse_motor)(void *context, uint16_t duration_ms, uint8_t intensity_percent);
     /* 控制扬声器功放；enabled=false 时 GPIO46 必须保持关闭。 */
     int (*set_speaker_power)(void *context, bool enabled);
     /* 挂载或卸载 TF；enabled=false 时应结束写入并释放 SDMMC。 */
@@ -150,11 +146,6 @@ board_adapter_result_t board_adapter_set_display(
     board_adapter_t *adapter,
     bool enabled,
     uint8_t brightness_percent);
-/* 请求一次马达脉冲；超范围持续时间或强度会被拒绝。 */
-board_adapter_result_t board_adapter_pulse_haptic(
-    board_adapter_t *adapter,
-    uint16_t duration_ms,
-    uint8_t intensity_percent);
 /* 读取电池状态；输出指针不能为空。 */
 board_adapter_result_t board_adapter_read_battery(
     board_adapter_t *adapter,

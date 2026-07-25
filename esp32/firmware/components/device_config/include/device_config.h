@@ -132,7 +132,7 @@ typedef struct device_goal_command {
 typedef struct device_preferences_command {
     /* AMOLED 亮度百分比，范围 5～100。 */
     uint8_t brightness_percent;
-    /* 是否允许马达反馈。 */
+    /* 协议 v1 保留位；真表没有马达，解码后始终强制为 false。 */
     bool haptic_enabled;
     /* 是否允许扬声器提示；v1 默认关闭。 */
     bool sound_enabled;
@@ -187,7 +187,7 @@ typedef struct device_config {
     uint32_t goal_value;
     /* AMOLED 亮度百分比，默认 35。 */
     uint8_t brightness_percent;
-    /* 是否启用振动，默认 true。 */
+    /* 配置 blob v1 保留位；当前产品始终为 false。 */
     bool haptic_enabled;
     /* 是否启用声音，默认 false。 */
     bool sound_enabled;

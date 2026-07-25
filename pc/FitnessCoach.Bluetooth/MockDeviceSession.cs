@@ -82,7 +82,7 @@ public sealed class MockDeviceSession : IDeviceSession, IDevicePairingSession, I
     // 当前 Mock 目标值，单位由 _goalKind 决定。
     private uint _goalValue;
     // 当前 Mock 设备偏好。
-    private DevicePreferencesV1 _devicePreferences = new(35, true, false, 30, 0U, false);
+    private DevicePreferencesV1 _devicePreferences = new(35, false, 30, 0U, false);
     // 当前 Mock RawStream 是否已显式打开。
     private bool _rawStreamEnabled;
     // 最近同步的 UTC Unix 毫秒，零表示尚未同步。
@@ -194,7 +194,7 @@ public sealed class MockDeviceSession : IDeviceSession, IDevicePairingSession, I
                 _reconnectCount,
                 crcErrorCount: 0U,
                 fragmentErrorCount: 0U,
-                manifestSummary: "设备能力清单版本 1.0；基础模型摘要=8f66e344bcfa；掩码模型摘要=57f4b2bca05d；能力标志=0x00000007；内部文件系统可用量=1048576 字节（模拟）");
+                manifestSummary: "设备能力清单版本 1.0；基础模型摘要=8f66e344bcfa；掩码模型摘要=57f4b2bca05d；能力标志=0x00000006；内部文件系统可用量=1048576 字节（模拟）");
         }
     }
 

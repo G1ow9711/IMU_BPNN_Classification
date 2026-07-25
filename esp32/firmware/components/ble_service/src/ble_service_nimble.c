@@ -60,8 +60,10 @@ static const char *const BLE_SERVICE_LOG_TAG = "ble_service";
 #define BLE_SERVICE_SINGLE_INDICATION_QUEUE UINT8_C(1)
 // BLE 业务队列最多缓存 6 个 ATT 分片；协议要求客户端等待响应后再发下一事务。
 #define BLE_SERVICE_WORK_QUEUE_LENGTH UINT32_C(6)
-// BLE 业务任务使用 6 KiB 栈，覆盖两个 1040 字节响应缓冲和应用回调局部对象。
-#define BLE_SERVICE_WORKER_STACK_WORDS UINT32_C(6144)
+// ESP-IDF 的 xTaskCreate 栈深单位为字节；16 KiB 覆盖首次绑定后的能力清单同步突发和最大控制帧调用链。
+#define BLE_SERVICE_WORKER_STACK_BYTES (16U * 1024U)
+// 禁止编译器把控制与传输路径的最大帧缓冲内联到常驻 worker 栈帧；真板曾因 6 KiB 合并帧触发栈溢出。
+#define BLE_SERVICE_STACK_BOUNDARY __attribute__((noinline))
 // BLE 业务任务优先级低于 NimBLE 主机和 IMU 采样，高于后台存储。
 #define BLE_SERVICE_WORKER_PRIORITY ((UBaseType_t)5U)
 // 工作任务每 20 ms 检查停止和连接代次，停止流程不会无限等待。
@@ -925,7 +927,7 @@ static int ble_service_flatten_write(
 }
 
 // 处理 Transfer Control 严格分片、消息类型 5 和业务回调，并开始类型 6 indication。
-static int ble_service_handle_transfer_write(
+static BLE_SERVICE_STACK_BOUNDARY int ble_service_handle_transfer_write(
     const uint8_t *fragment,
     uint16_t fragment_length,
     uint32_t connection_epoch)
@@ -1035,7 +1037,7 @@ static int ble_service_handle_transfer_write(
 }
 
 // 在独立 BLE 业务任务中处理一片 Control Point，允许等待应用 broker 而不阻塞 NimBLE 主机。
-static void ble_service_process_control_work(const ble_service_work_item_t *item)
+static BLE_SERVICE_STACK_BOUNDARY void ble_service_process_control_work(const ble_service_work_item_t *item)
 {
     // 工作项必须存在，且调用者已经核对连接代次和安全状态。
     if (item == NULL) {
@@ -1106,6 +1108,8 @@ static void ble_service_worker_task(void *argument)
     uint32_t observed_epoch = UINT32_MAX;
     // item 按值接收稳定分片，任务处理期间不借用队列内部存储。
     ble_service_work_item_t item;
+    // minimum_free_bytes 保存任务启动后的历史最小剩余栈字节，真板可据此验证首次绑定余量。
+    UBaseType_t minimum_free_bytes = (UBaseType_t)BLE_SERVICE_WORKER_STACK_BYTES;
     // 直到 stop 明确置位前持续处理业务分片。
     while (g_ble_state.worker_stop_requested == 0U) {
         // GAP 连接代次变化时清空半帧和最近请求缓存，旧连接内容绝不跨到新连接。
@@ -1160,6 +1164,18 @@ static void ble_service_worker_task(void *argument)
         } else {
             // 未知枚举表示内存损坏或版本不一致，记录并丢弃。
             ESP_LOGE(BLE_SERVICE_LOG_TAG, "未知 BLE 工作类型=%d", (int)item.kind);
+        }
+        // ESP-IDF 返回历史最小空闲栈字节；在大缓冲函数退出后读取仍能覆盖刚完成的最深调用链。
+        const UBaseType_t current_free_bytes = uxTaskGetStackHighWaterMark(NULL);
+        // 只在刷新历史低点时输出，避免正常 20 ms 队列轮询产生重复日志。
+        if (current_free_bytes < minimum_free_bytes) {
+            // 保存新低点；数值越大表示与栈金丝雀的安全距离越充足。
+            minimum_free_bytes = current_free_bytes;
+            // 输出字节单位事实，不输出控制请求内容或配对密钥。
+            ESP_LOGI(
+                BLE_SERVICE_LOG_TAG,
+                "BLE_WORKER_STACK minimum_free_bytes=%u",
+                (unsigned int)minimum_free_bytes);
         }
     }
     // 清空任务句柄，stop 轮询该值确认任务已经不再访问 g_ble_state。
@@ -1545,14 +1561,18 @@ static int ble_service_gap_event(struct ble_gap_event *event, void *argument)
             (void)memset(&g_ble_state.pending_indication, 0, sizeof(g_ble_state.pending_indication));
             // 主动发起加密、MITM 和绑定；Control/Transfer 写本身也要求 WRITE_ENC。
             const int security_result = ble_gap_security_initiate(event->connect.conn_handle);
-            // 安全发起失败时立即终止物理连接，避免保留只能看到部分公开信息的僵尸链路。
-            if (security_result != 0) {
+            // Windows 可能已用旧绑定先启动加密；EALREADY 表示同一安全流程正在进行，必须等待 ENC_CHANGE。
+            if ((security_result != 0) &&
+                (security_result != BLE_HS_EALREADY)) {
                 // 记录安全错误。
                 ESP_LOGE(BLE_SERVICE_LOG_TAG, "发起连接安全失败 rc=%d", security_result);
                 // 若上一次配对显示尚未清理，安全发起失败必须立即清码。
                 ble_service_clear_pairing_code(BLE_SERVICE_PAIRING_CLEAR_FAILED);
                 // 使用本地终止原因断开；断连事件负责清理句柄和恢复广播。
                 (void)ble_gap_terminate(event->connect.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+            } else if (security_result == BLE_HS_EALREADY) {
+                // 记录正常竞态；不得断开，否则 Windows 服务发现会得到 Unreachable。
+                ESP_LOGI(BLE_SERVICE_LOG_TAG, "PC 安全握手已在进行，等待加密状态事件");
             }
             // 这里只记录物理链路；应用层连接状态等安全握手完成后才上报。
             ESP_LOGI(BLE_SERVICE_LOG_TAG, "PC 物理链路已建立，等待安全绑定 handle=%u", (unsigned int)event->connect.conn_handle);
@@ -1933,7 +1953,7 @@ esp_err_t ble_service_nimble_start(const ble_service_nimble_config_t *config)
     const BaseType_t worker_created = xTaskCreate(
         ble_service_worker_task,
         "ble_business",
-        BLE_SERVICE_WORKER_STACK_WORDS,
+        BLE_SERVICE_WORKER_STACK_BYTES,
         NULL,
         BLE_SERVICE_WORKER_PRIORITY,
         &worker_handle);

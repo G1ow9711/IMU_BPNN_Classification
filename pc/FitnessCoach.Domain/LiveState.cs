@@ -19,7 +19,7 @@ public sealed class LiveState
     /// <param name="metricValue">设备权威次数、步数或秒数。</param>
     /// <param name="confidenceQ15">模型置信度，0～65535 映射到 0～1。</param>
     /// <param name="caloriesMilliKcal">累计热量，单位 0.001 kcal。</param>
-    /// <param name="qualityFlags">传感器、振动替代和存储质量标志。</param>
+    /// <param name="qualityFlags">传感器、旧固件替代样本和存储质量标志。</param>
     /// <param name="powerFlags">充电、USB 和低电量状态位。</param>
     /// <param name="goalPercent">目标完成度 0～100，或 255 表示未配置。</param>
     public LiveState(
@@ -71,7 +71,7 @@ public sealed class LiveState
         ConfidenceQ15 = confidenceQ15;
         // 保存千分之一千卡，避免 BLE 浮点格式和跨语言舍入差异。
         CaloriesMilliKcal = caloriesMilliKcal;
-        // 保存传感器、预热、振动替代和存储质量标志。
+        // 保存传感器、预热、旧固件替代样本和存储质量标志。
         QualityFlags = qualityFlags;
         // 保存充电、USB 和低电量状态位。
         PowerFlags = powerFlags;

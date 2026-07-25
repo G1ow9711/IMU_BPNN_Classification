@@ -63,25 +63,6 @@ static int runtime_set_touch_active_callback(void *context, bool enabled)
     return result;
 }
 
-/* 把马达请求转发到 GPIO18 LEDC/定时器或 Mock。 */
-static int runtime_pulse_motor_callback(
-    void *context,
-    uint16_t duration_ms,
-    uint8_t intensity_percent)
-{
-    /* context 在初始化时固定指向 board_runtime_t。 */
-    board_runtime_t *runtime = (board_runtime_t *)context;
-    /* 平台后端负责非阻塞停止，避免调用方等待 30 ms。 */
-    const int result = board_runtime_backend_pulse_motor(
-        runtime,
-        duration_ms,
-        intensity_percent);
-    /* 记录最近平台错误。 */
-    runtime->diagnostics.last_platform_error = result;
-    /* 返回平台结果。 */
-    return result;
-}
-
 /* 控制扬声器功放；产品 v1 默认始终关闭。 */
 static int runtime_set_speaker_callback(void *context, bool enabled)
 {
@@ -172,7 +153,6 @@ board_runtime_result_t board_runtime_init(
         .set_display_power = runtime_set_display_power,
         .set_display_brightness = runtime_set_display_brightness,
         .set_touch_active = runtime_set_touch_active_callback,
-        .pulse_motor = runtime_pulse_motor_callback,
         .set_speaker_power = runtime_set_speaker_callback,
         .set_storage_active = runtime_set_storage_callback,
         .read_battery = runtime_read_battery_callback,

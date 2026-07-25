@@ -9,47 +9,13 @@
 #include "driver/gpio.h"
 /* 引入 ESP-IDF I2C 主机探测 API，只做地址 ACK 检查。 */
 #include "driver/i2c_master.h"
-/* 引入 ESP-IDF LEDC API，GPIO18 使用 5 kHz PWM 驱动马达 NMOS。 */
-#include "driver/ledc.h"
 /* 引入 ESP-IDF 错误码。 */
 #include "esp_err.h"
-/* 引入一次性软件定时器，脉冲结束后自动关闭马达。 */
-#include "esp_timer.h"
 /* 引入 LVGL 9 输入设备开关 API。 */
 #include "lvgl.h"
 
-/* 固定马达 LEDC 低速模式，ESP32-S3 Light-sleep 前由电源层停止脉冲。 */
-#define BOARD_RUNTIME_MOTOR_SPEED_MODE (LEDC_LOW_SPEED_MODE)
-/* 固定马达 LEDC 定时器 0；集成时不得与其它组件重复占用。 */
-#define BOARD_RUNTIME_MOTOR_TIMER (LEDC_TIMER_0)
-/* 固定马达 LEDC 通道 0。 */
-#define BOARD_RUNTIME_MOTOR_CHANNEL (LEDC_CHANNEL_0)
-/* 固定 10 位 PWM 分辨率，最大占空比为 1023。 */
-#define BOARD_RUNTIME_MOTOR_DUTY_RESOLUTION (LEDC_TIMER_10_BIT)
-/* 固定 10 位最大占空比，用整数比例避免浮点。 */
-#define BOARD_RUNTIME_MOTOR_MAX_DUTY (1023U)
 /* 固定 I2C 地址探测超时为 50 ms，避免坏设备阻塞启动页。 */
 #define BOARD_RUNTIME_I2C_PROBE_TIMEOUT_MS (50)
-
-/* 马达脉冲结束回调运行在 esp_timer 任务，不在硬中断上下文。 */
-static void board_runtime_motor_stop_callback(void *argument)
-{
-    /* argument 在创建定时器时固定指向长期有效的 board_runtime_t。 */
-    board_runtime_t *runtime = (board_runtime_t *)argument;
-    /* 空指针表示初始化异常，不能访问 LEDC。 */
-    if (runtime == NULL) {
-        return;
-    }
-    /* 把 GPIO18 占空比降为零，停止马达。 */
-    (void)ledc_set_duty(
-        BOARD_RUNTIME_MOTOR_SPEED_MODE,
-        BOARD_RUNTIME_MOTOR_CHANNEL,
-        0U);
-    /* 把零占空比写入硬件。 */
-    (void)ledc_update_duty(
-        BOARD_RUNTIME_MOTOR_SPEED_MODE,
-        BOARD_RUNTIME_MOTOR_CHANNEL);
-}
 
 /* 探测单个 7 位 I2C 地址；只判断 ACK，不读写芯片寄存器。 */
 static bool board_runtime_probe_address(
@@ -65,60 +31,6 @@ static bool board_runtime_probe_address(
                bus,
                address,
                BOARD_RUNTIME_I2C_PROBE_TIMEOUT_MS) == ESP_OK;
-}
-
-/* 配置 GPIO18 LEDC 和一次性停止定时器。 */
-static int board_runtime_motor_init(board_runtime_t *runtime)
-{
-    /* 创建 5 kHz、10 位低速 LEDC 定时器。 */
-    const ledc_timer_config_t timer_config = {
-        .speed_mode = BOARD_RUNTIME_MOTOR_SPEED_MODE,
-        .duty_resolution = BOARD_RUNTIME_MOTOR_DUTY_RESOLUTION,
-        .timer_num = BOARD_RUNTIME_MOTOR_TIMER,
-        .freq_hz = (int)BOARD_RUNTIME_MOTOR_PWM_HZ,
-        .clk_cfg = LEDC_AUTO_CLK,
-        .deconfigure = false,
-    };
-    /* 定时器配置失败时不能继续驱动马达。 */
-    if (ledc_timer_config(&timer_config) != ESP_OK) {
-        return -1;
-    }
-    /* 把 LEDC 通道 0 路由到 GPIO18，初始占空比为零。 */
-    const ledc_channel_config_t channel_config = {
-        .gpio_num = (int)runtime->adapter.profile.motor_gpio,
-        .speed_mode = BOARD_RUNTIME_MOTOR_SPEED_MODE,
-        .channel = BOARD_RUNTIME_MOTOR_CHANNEL,
-        .intr_type = LEDC_INTR_DISABLE,
-        .timer_sel = BOARD_RUNTIME_MOTOR_TIMER,
-        .duty = 0U,
-        .hpoint = 0,
-        .sleep_mode = LEDC_SLEEP_MODE_NO_ALIVE_NO_PD,
-        .flags = {
-            .output_invert = 0U,
-        },
-    };
-    /* 通道配置失败时返回错误。 */
-    if (ledc_channel_config(&channel_config) != ESP_OK) {
-        return -1;
-    }
-    /* 创建一次性停止定时器；回调参数使用 runtime 长期存储。 */
-    const esp_timer_create_args_t timer_args = {
-        .callback = board_runtime_motor_stop_callback,
-        .arg = runtime,
-        .dispatch_method = ESP_TIMER_TASK,
-        .name = "motor_stop",
-        .skip_unhandled_events = true,
-    };
-    /* 创建定时器并把句柄写入不透明字段。 */
-    esp_timer_handle_t timer_handle = NULL;
-    /* 创建失败时不能保证马达自动停止。 */
-    if (esp_timer_create(&timer_args, &timer_handle) != ESP_OK) {
-        return -1;
-    }
-    /* 保存句柄，后续脉冲可停止旧定时并重新启动。 */
-    runtime->platform_motor_timer = (void *)timer_handle;
-    /* 返回成功。 */
-    return 0;
 }
 
 /* 配置 GPIO46 扬声器功放使能并默认拉低。 */
@@ -181,10 +93,6 @@ int board_runtime_backend_init(board_runtime_t *runtime)
     }
     /* 保存不透明总线句柄。 */
     runtime->platform_i2c = (void *)bus;
-    /* 配置马达 PWM 与自动停止定时器。 */
-    if (board_runtime_motor_init(runtime) != 0) {
-        return -1;
-    }
     /* 配置扬声器功放门控并默认关闭。 */
     if (board_runtime_speaker_gate_init(runtime) != 0) {
         return -1;
@@ -219,8 +127,6 @@ int board_runtime_backend_init(board_runtime_t *runtime)
         BOARD_RUNTIME_PCF85063_ADDRESS);
     /* TF 默认按需挂载，启动时不阻塞主页。 */
     runtime->diagnostics.storage_mounted = false;
-    /* 马达初始化已经成功。 */
-    runtime->diagnostics.motor_ready = true;
     /* 扬声器门控初始化已经成功且保持关闭。 */
     runtime->diagnostics.speaker_gate_ready = true;
     /* 触摸默认启用。 */
@@ -268,51 +174,6 @@ int board_runtime_backend_set_touch_active(board_runtime_t *runtime, bool enable
     /* 释放 BSP LVGL 锁。 */
     bsp_display_unlock();
     /* 返回成功。 */
-    return 0;
-}
-
-/* 输出非阻塞马达脉冲。 */
-int board_runtime_backend_pulse_motor(
-    board_runtime_t *runtime,
-    uint16_t duration_ms,
-    uint8_t intensity_percent)
-{
-    /* 定时器未创建时不能保证自动停止。 */
-    if (runtime->platform_motor_timer == NULL) {
-        return -1;
-    }
-    /* 把 1~100% 映射到 10 位占空比，使用整数四舍五入。 */
-    const uint32_t duty =
-        ((uint32_t)intensity_percent * BOARD_RUNTIME_MOTOR_MAX_DUTY + 50U) / 100U;
-    /* 先停止可能仍在运行的旧定时器；未运行返回 INVALID_STATE，可忽略。 */
-    const esp_err_t stop_result = esp_timer_stop(
-        (esp_timer_handle_t)runtime->platform_motor_timer);
-    /* 其它停止错误说明句柄失效。 */
-    if ((stop_result != ESP_OK) && (stop_result != ESP_ERR_INVALID_STATE)) {
-        return -1;
-    }
-    /* 写入目标占空比。 */
-    if (ledc_set_duty(
-            BOARD_RUNTIME_MOTOR_SPEED_MODE,
-            BOARD_RUNTIME_MOTOR_CHANNEL,
-            duty) != ESP_OK) {
-        return -1;
-    }
-    /* 更新硬件输出。 */
-    if (ledc_update_duty(
-            BOARD_RUNTIME_MOTOR_SPEED_MODE,
-            BOARD_RUNTIME_MOTOR_CHANNEL) != ESP_OK) {
-        return -1;
-    }
-    /* 以微秒启动一次性定时器；uint16 毫秒转换不会溢出 uint64。 */
-    if (esp_timer_start_once(
-            (esp_timer_handle_t)runtime->platform_motor_timer,
-            (uint64_t)duration_ms * UINT64_C(1000)) != ESP_OK) {
-        /* 启动失败时立即关闭马达，避免持续导通。 */
-        board_runtime_motor_stop_callback(runtime);
-        return -1;
-    }
-    /* 返回成功；马达会由定时器异步关闭。 */
     return 0;
 }
 

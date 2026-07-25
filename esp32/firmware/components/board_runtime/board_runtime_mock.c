@@ -26,8 +26,6 @@ int board_runtime_backend_init(board_runtime_t *runtime)
     runtime->diagnostics.rtc_present = runtime->config.mock.sensor_devices_present;
     /* Mock 初始不挂载 TF；存在性在挂载调用中检查。 */
     runtime->diagnostics.storage_mounted = false;
-    /* Mock 马达接受合法脉冲。 */
-    runtime->diagnostics.motor_ready = true;
     /* Mock 扬声器门控可用。 */
     runtime->diagnostics.speaker_gate_ready = true;
     /* Mock 默认触摸活动。 */
@@ -61,22 +59,6 @@ int board_runtime_backend_set_touch_active(board_runtime_t *runtime, bool enable
 {
     /* 更新逻辑触摸状态。 */
     runtime->touch_active = enabled;
-    /* 返回成功。 */
-    return 0;
-}
-
-/* Mock 接受马达脉冲；参数范围由 board_adapter 验证。 */
-int board_runtime_backend_pulse_motor(
-    board_runtime_t *runtime,
-    uint16_t duration_ms,
-    uint8_t intensity_percent)
-{
-    /* 显式读取参数，避免 Werror 报告未使用；Mock 不等待脉冲结束。 */
-    (void)runtime;
-    /* 持续时间只用于确认调用合同。 */
-    (void)duration_ms;
-    /* 强度只用于确认调用合同。 */
-    (void)intensity_percent;
     /* 返回成功。 */
     return 0;
 }

@@ -255,7 +255,7 @@ public sealed class WindowsBleDeviceSession : IDeviceSession, IDevicePairingSess
             // 把模型短摘要、能力位和内部文件系统可用量压成一条稳定诊断摘要，避免界面依赖蓝牙层类型。
             string manifestSummary = _manifestInfo is null
                 ? "设备能力清单：未知"
-                : $"设备能力清单版本 {_manifestInfo.ProtocolMajor}.{_manifestInfo.ProtocolMinor}；基础模型摘要={_manifestInfo.BaseModelSha256Short}；掩码模型摘要={_manifestInfo.MaskedModelSha256Short}；能力标志=0x{_manifestInfo.Capabilities:X8}（振动、会话历史、内部文件系统）；内部文件系统可用量={_manifestInfo.LittleFsAvailableBytes} 字节";
+                : $"设备能力清单版本 {_manifestInfo.ProtocolMajor}.{_manifestInfo.ProtocolMinor}；基础模型摘要={_manifestInfo.BaseModelSha256Short}；掩码模型摘要={_manifestInfo.MaskedModelSha256Short}；能力标志=0x{_manifestInfo.Capabilities:X8}（会话历史、内部文件系统）；内部文件系统可用量={_manifestInfo.LittleFsAvailableBytes} 字节";
             // 创建不可变快照；Interlocked 读取的计数夹紧到 uint 范围。
             return new DeviceDiagnosticsSnapshot(
                 _deviceId,

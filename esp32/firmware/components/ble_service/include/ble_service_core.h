@@ -73,7 +73,7 @@ typedef enum ble_service_command_id {
     BLE_SERVICE_COMMAND_SET_USER_PROFILE = 7,
     // 设置次数、时长或卡路里目标。
     BLE_SERVICE_COMMAND_SET_GOAL = 8,
-    // 设置亮度、振动、声音和熄屏时间等偏好。
+// 设置亮度、声音和熄屏时间等偏好；旧马达字段固定为零。
     BLE_SERVICE_COMMAND_SET_PREFERENCES = 9,
     // 请求设备立即返回一份权威状态快照。
     BLE_SERVICE_COMMAND_GET_SNAPSHOT = 10,

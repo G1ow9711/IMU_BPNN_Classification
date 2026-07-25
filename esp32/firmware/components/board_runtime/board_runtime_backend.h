@@ -12,11 +12,6 @@ int board_runtime_backend_set_display_power(board_runtime_t *runtime, bool enabl
 int board_runtime_backend_set_display_brightness(board_runtime_t *runtime, uint8_t percent);
 /* 逻辑启用或禁用 LVGL 触摸设备。 */
 int board_runtime_backend_set_touch_active(board_runtime_t *runtime, bool enabled);
-/* 输出一次非阻塞马达 PWM 脉冲。 */
-int board_runtime_backend_pulse_motor(
-    board_runtime_t *runtime,
-    uint16_t duration_ms,
-    uint8_t intensity_percent);
 /* 控制 GPIO46 扬声器功放使能。 */
 int board_runtime_backend_set_speaker(board_runtime_t *runtime, bool enabled);
 /* 挂载或卸载 TF 卡。 */

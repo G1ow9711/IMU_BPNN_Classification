@@ -7,14 +7,12 @@
  * 本组件不读取 IMU、不调用 GPIO、不依赖 FreeRTOS，因而既能被 ESP-IDF 固件调用，
  * 也能由 Windows/Linux 主机测试直接编译。上游算法负责把连续 IMU 信号解释为
  * “主相位、次相位、腾空、落地”等离散相位；本组件只确认完整动作周期、维护
- * 会话指标、估算热量并生成振动请求。
+ * 会话指标并估算热量。
  *
- * 详细公式、单位、边界和复杂度见：docs/计数卡路里与振动算法.md。
+ * 详细公式、单位、边界和复杂度见：docs/计数卡路里算法.md。
  */
 
-/* size_t 用于返回一次最多输出多少个修复后的六轴采样点。 */
-#include <stddef.h>
-/* bool 用于表达计数是否成立、队列是否入队成功等二值结果。 */
+/* bool 用于表达计数是否成立等二值结果。 */
 #include <stdbool.h>
 /* uint32_t/uint64_t 等定宽整数保证 ESP32 与主机端字段宽度一致。 */
 #include <stdint.h>
@@ -26,15 +24,7 @@ extern "C" {
 
 /* 六轴采样固定顺序为 gx、gy、gz、ax、ay、az；前三轴单位 deg/s，后三轴单位 g。 */
 #define FITNESS_IMU_AXIS_COUNT 6U
-/* 最多缓存 3 个受振动污染的采样点；超过该长度时停止计数而不伪造长段波形。 */
-#define FITNESS_HAPTIC_MAX_INTERPOLATED_SAMPLES 3U
-/* 一次干净采样到来时最多输出 3 个插值点和当前干净点，共 4 点。 */
-#define FITNESS_HAPTIC_MAX_OUTPUT_SAMPLES 4U
-/* 振动请求环形队列固定 16 项；静态分配避免运行期堆碎片。 */
-#define FITNESS_HAPTIC_QUEUE_CAPACITY 16U
-/* 电机停止后额外屏蔽 80 ms，覆盖机械余振和电源纹波。 */
-#define FITNESS_HAPTIC_TAIL_GUARD_MS 80U
-/* 热量公式的整数分母；推导见 docs/计数卡路里与振动算法.md。 */
+/* 热量公式的整数分母；推导见 docs/计数卡路里算法.md。 */
 #define FITNESS_CALORIE_DENOMINATOR 24000000ULL
 
 /* 11 类动作顺序必须与 Python 模型输出和 BLE 协议完全一致。 */
@@ -84,24 +74,10 @@ typedef enum {
     /* 会话未启动、动作不匹配或状态顺序不允许。 */
     FITNESS_STATUS_INVALID_STATE = 2,
     /* 单调时钟倒退或一次 tick 间隔超过允许上限。 */
-    FITNESS_STATUS_INVALID_TIME = 3,
-    /* 固定容量振动队列已满，本次请求未写入。 */
-    FITNESS_STATUS_QUEUE_FULL = 4
+    FITNESS_STATUS_INVALID_TIME = 3
 } fitness_status_t;
 
-/* 事件/采样质量位可以组合；0 表示当前数据无需额外说明。 */
-typedef enum {
-    /* 当前原始采样落在电机振动及其 80 ms 余振保护区内。 */
-    FITNESS_QUALITY_HAPTIC_CONTAMINATED = 1U << 0,
-    /* 当前采样由前后干净点线性插值得到，不是原始测量值。 */
-    FITNESS_QUALITY_INTERPOLATED = 1U << 1,
-    /* 污染连续超过 3 点，计数器应冻结到下一干净点。 */
-    FITNESS_QUALITY_COUNTER_FROZEN = 1U << 2,
-    /* 上游识别稳定度不足，但仍保留事件供诊断。 */
-    FITNESS_QUALITY_LOW_STABILITY = 1U << 3
-} fitness_quality_flag_t;
-
-/* MetricEvent 是 UI、BLE、存储、振动的唯一指标事实源。 */
+/* MetricEvent 是 UI、BLE 和存储的唯一指标事实源。 */
 typedef struct {
     /* 会话序号由持久化层分配；重启后也应保持递增。 */
     uint32_t session_seq;
@@ -181,10 +157,8 @@ typedef enum {
 
 /* 8 类重复动作被归纳为两种有限状态机。 */
 typedef enum {
-    /* 普通往返动作依次经历主向、反向并回到主向起点或稳定基线。 */
-    FITNESS_REP_MODE_TWO_PHASE = 0,
-    /* 跳跃动作依次经历静止、起跳、腾空、落地、恢复并回到静止。 */
-    FITNESS_REP_MODE_JUMP = 1
+    /* 腕戴重复动作依次经历主向、反向并回到主向起点或稳定基线。 */
+    FITNESS_REP_MODE_TWO_PHASE = 0
 } fitness_rep_mode_t;
 
 /* 重复动作状态机；字段公开便于静态分配，但调用方不得直接改写。 */
@@ -230,76 +204,6 @@ typedef struct {
     /* 已接受步数。 */
     uint64_t total_steps;
 } fitness_step_counter_t;
-
-/* 振动原因决定波形，电机驱动层只消费时序参数。 */
-typedef enum {
-    /* 会话开始：2 次 20 ms。 */
-    FITNESS_HAPTIC_REASON_START = 0,
-    /* 每次有效重复：1 次 30 ms。 */
-    FITNESS_HAPTIC_REASON_REPETITION = 1,
-    /* walk/trot 每满 10 步：1 次 30 ms。 */
-    FITNESS_HAPTIC_REASON_STEP_BATCH = 2,
-    /* 暂停或结束：1 次 40 ms。 */
-    FITNESS_HAPTIC_REASON_PAUSE_OR_END = 3,
-    /* 达成目标：3 次 25 ms。 */
-    FITNESS_HAPTIC_REASON_GOAL = 4,
-    /* 低电量提醒：2 次 40 ms。 */
-    FITNESS_HAPTIC_REASON_LOW_BATTERY = 5,
-    /* 原因总数，仅用于参数校验。 */
-    FITNESS_HAPTIC_REASON_COUNT = 6
-} fitness_haptic_reason_t;
-
-/* 单个振动请求，不包含 GPIO 细节或阻塞延时。 */
-typedef struct {
-    /* 单次通电时间，单位 ms。 */
-    uint16_t on_ms;
-    /* 相邻脉冲间关闭时间，单位 ms；单次脉冲时为 0。 */
-    uint16_t off_ms;
-    /* 脉冲重复次数，范围 1..3。 */
-    uint8_t repeat_count;
-    /* 业务原因，供日志和优先级策略使用。 */
-    fitness_haptic_reason_t reason;
-} fitness_haptic_request_t;
-
-/* 固定容量 FIFO；单生产者/单消费者可由外部临界区保护。 */
-typedef struct {
-    /* 静态请求槽位，占用约 FITNESS_HAPTIC_QUEUE_CAPACITY*8 字节。 */
-    fitness_haptic_request_t items[FITNESS_HAPTIC_QUEUE_CAPACITY];
-    /* 下一次读取位置，范围 0..15。 */
-    uint8_t head;
-    /* 下一次写入位置，范围 0..15。 */
-    uint8_t tail;
-    /* 当前队列元素个数，范围 0..16。 */
-    uint8_t count;
-} fitness_haptic_queue_t;
-
-/* 六轴样本及质量标记；axis 顺序和单位由 FITNESS_IMU_AXIS_COUNT 约束。 */
-typedef struct {
-    /* 采样点的单调毫秒时间。 */
-    uint64_t monotonic_ms;
-    /* [gx,gy,gz,ax,ay,az]；前三轴 deg/s，后三轴 g。 */
-    float axis[FITNESS_IMU_AXIS_COUNT];
-    /* fitness_quality_flag_t 按位组合。 */
-    uint16_t quality_flags;
-} fitness_imu_sample_t;
-
-/* 振动污染保护状态；可在 25 Hz IMU 任务中静态分配。 */
-typedef struct {
-    /* true 表示已经保存一个可作为插值左端点的干净采样。 */
-    bool has_previous_clean;
-    /* true 表示连续污染超过 3 点，必须冻结计数器。 */
-    bool hard_freeze;
-    /* 最近一次干净采样，用作线性插值左端点。 */
-    fitness_imu_sample_t previous_clean;
-    /* 待插值污染点的时间戳；污染轴值不可信，因此不保存。 */
-    uint64_t pending_timestamps[FITNESS_HAPTIC_MAX_INTERPOLATED_SAMPLES];
-    /* 当前可插值污染点数量，范围 0..3。 */
-    uint8_t pending_count;
-    /* 当前污染保护区起始时刻；区间外的更早采样不能被误标为污染。 */
-    uint64_t contaminated_from_ms;
-    /* 当前污染保护区结束时刻，含电机通电和 80 ms 余振。 */
-    uint64_t contaminated_until_ms;
-} fitness_haptic_guard_t;
 
 /* 返回动作的固定 milliMET；例如 3.8 MET 返回 3800。 */
 uint32_t fitness_action_met_milli(fitness_action_t action);
@@ -378,60 +282,7 @@ fitness_status_t fitness_step_counter_init(
 fitness_status_t fitness_step_counter_accept(
     fitness_step_counter_t *counter,
     uint64_t now_ms,
-    bool *step_accepted,
-    bool *haptic_due);
-
-/* 清空固定容量振动 FIFO。 */
-void fitness_haptic_queue_init(fitness_haptic_queue_t *queue);
-
-/* 按业务原因生成固定波形并入队。 */
-fitness_status_t fitness_haptic_enqueue_reason(
-    fitness_haptic_queue_t *queue,
-    fitness_haptic_reason_t reason);
-
-/* 根据唯一 MetricEvent 决定是否入队：每次 REP、每 10 STEP，sit 不振动。 */
-fitness_status_t fitness_haptic_enqueue_for_metric(
-    fitness_haptic_queue_t *queue,
-    const fitness_metric_event_t *event,
-    bool *request_enqueued);
-
-/* 从 FIFO 取出最早请求；空队列返回 false。 */
-bool fitness_haptic_queue_pop(
-    fitness_haptic_queue_t *queue,
-    fitness_haptic_request_t *request);
-
-/* 初始化振动污染保护状态。 */
-void fitness_haptic_guard_init(fitness_haptic_guard_t *guard);
-
-/* 登记一次电机通电脉冲，并把保护区延长至 pulse_end+80 ms。 */
-fitness_status_t fitness_haptic_guard_mark_pulse(
-    fitness_haptic_guard_t *guard,
-    uint64_t pulse_start_ms,
-    uint32_t pulse_on_ms);
-
-/* 查询某个采样时刻是否处于振动污染保护区。 */
-bool fitness_haptic_guard_is_contaminated(
-    const fitness_haptic_guard_t *guard,
-    uint64_t sample_ms);
-
-/*
- * 输入一个六轴采样，并输出 0..4 个可供算法消费的采样。
- * input_sample 的 axis 形状为 [6]，顺序 gx、gy、gz、ax、ay、az；前三轴单位 deg/s，后三轴单位 g。
- * output_samples 必须非空，形状为 [FITNESS_HAPTIC_MAX_OUTPUT_SAMPLES] 个 fitness_imu_sample_t；
- * 每个元素继承相同六轴顺序与单位，缓冲区生命周期和所有权均由调用者管理，仅在本次调用写入。
- * counter_frozen 表示污染过长，计数器在本次调用后仍应保持冻结。
- */
-fitness_status_t fitness_haptic_guard_push_sample(
-    /* 非空保护状态；函数会更新污染区和待插值样本。 */
-    fitness_haptic_guard_t *guard,
-    /* 非空只读当前 25 Hz 六轴点，生命周期覆盖本次同步调用。 */
-    const fitness_imu_sample_t *input_sample,
-    /* 非空输出数组，形状 [4]，每项六轴单位依次为 deg/s 与 g。 */
-    fitness_imu_sample_t output_samples[FITNESS_HAPTIC_MAX_OUTPUT_SAMPLES],
-    /* 非空输出；写入本次有效输出元素数，范围 0～4。 */
-    size_t *output_count,
-    /* 非空输出；污染连续过长时写 true，要求计数器保持冻结。 */
-    bool *counter_frozen);
+    bool *step_accepted);
 
 #ifdef __cplusplus
 /* 结束 C ABI 声明区。 */

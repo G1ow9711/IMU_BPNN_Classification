@@ -12,42 +12,64 @@
 
 /* 固定加锁超时为 250 ms，超过后放弃本帧避免阻塞算法任务。 */
 #define UI_LVGL_LOCK_TIMEOUT_MS (250U)
-/* 固定 AMOLED 黑色背景，减少全屏发光功耗和烧屏风险。 */
-#define UI_COLOR_BACKGROUND_HEX (0x080B10U)
-/* 固定卡片深灰色。 */
-#define UI_COLOR_CARD_HEX (0x141A23U)
-/* 固定主强调青绿色。 */
-#define UI_COLOR_ACCENT_HEX (0x6EA8FEU)
-/* 固定次强调蓝色。 */
-#define UI_COLOR_SECONDARY_HEX (0xB8C3D6U)
-/* 固定普通文本浅灰色。 */
-#define UI_COLOR_TEXT_HEX (0xF4F7FBU)
-/* 固定弱化文本灰色。 */
-#define UI_COLOR_MUTED_HEX (0x8996A9U)
+/* AMOLED 主背景使用接近纯黑的石墨色，降低发光面积并形成智能手表质感。 */
+#define UI_COLOR_BACKGROUND_HEX (0x05070BU)
+/* 主信息卡使用深蓝黑表面，和背景形成低对比层级。 */
+#define UI_COLOR_CARD_HEX (0x0D1420U)
+/* 抬升按钮和状态胶囊使用稍亮表面色。 */
+#define UI_COLOR_RAISED_HEX (0x151F2EU)
+/* 主强调色使用高辨识度系统蓝，只用于主操作和关键状态。 */
+#define UI_COLOR_ACCENT_HEX (0x0A84FFU)
+/* 科技状态辅助色使用清亮青色，不与主按钮争夺层级。 */
+#define UI_COLOR_CYAN_HEX (0x32D5FFU)
+/* 正常连接、计数和健康电量使用系统绿色。 */
+#define UI_COLOR_SUCCESS_HEX (0x30D158U)
+/* 休息、低电量和待确认状态使用系统橙色。 */
+#define UI_COLOR_WARNING_HEX (0xFF9F0AU)
+/* 故障和破坏性操作使用系统红色。 */
+#define UI_COLOR_DANGER_HEX (0xFF453AU)
+/* 固定次级文本冷灰蓝。 */
+#define UI_COLOR_SECONDARY_HEX (0xA9B4C4U)
+/* 固定普通文本近白色。 */
+#define UI_COLOR_TEXT_HEX (0xF5F7FAU)
+/* 固定弱化文本灰蓝色。 */
+#define UI_COLOR_MUTED_HEX (0x657187U)
+/* 卡片与按钮描边使用低亮度蓝灰，增强结构但不形成装饰噪声。 */
+#define UI_COLOR_BORDER_HEX (0x223047U)
 /* SH8601 逻辑横向宽度固定 410 像素，用于计算圆角屏幕安全内容宽度。 */
 #define UI_SCREEN_WIDTH_PX (410)
 /* 左右各留 32 像素，避免标题首字和右侧状态进入玻璃圆角不可视区。 */
 #define UI_SAFE_HORIZONTAL_PX (32)
-/* 顶部留 32 像素，使标题基线离开左上和右上圆角切线。 */
-#define UI_SAFE_TOP_PX (32)
-/* 底部保留 20 像素；底部三按钮在真板照片中未发生裁切。 */
-#define UI_SAFE_BOTTOM_PX (20)
+/* 顶部留 28 像素，使品牌标、电池图标离开圆角切线。 */
+#define UI_SAFE_TOP_PX (28)
+/* 底部保留 22 像素，保证最下方按钮不进入圆角遮挡区。 */
+#define UI_SAFE_BOTTOM_PX (22)
 /* 安全文本宽度等于 410 减去左右各 32 像素，即 346 像素。 */
 #define UI_SAFE_CONTENT_WIDTH_PX (UI_SCREEN_WIDTH_PX - (2 * UI_SAFE_HORIZONTAL_PX))
-/* 设置页每个按钮使用 104 像素，三按钮与间距可完整放入 346 像素安全宽度。 */
-#define UI_SETTINGS_BUTTON_WIDTH_PX (104)
-/* HOME 固定布局的标题纵坐标为 32 像素，与圆角安全区顶边一致。 */
-#define UI_HOME_TITLE_Y_PX (32)
-/* HOME 固定布局的状态行纵坐标为 78 像素，位于标题行高之后。 */
-#define UI_HOME_STATUS_Y_PX (78)
-/* HOME 固定布局的主文案纵坐标为 128 像素，预留状态行和视觉间距。 */
-#define UI_HOME_PRIMARY_Y_PX (128)
-/* HOME 固定布局的次文案纵坐标为 270 像素，保持主信息与设备状态分区。 */
-#define UI_HOME_SECONDARY_Y_PX (270)
-/* HOME 固定布局的页脚纵坐标为 378 像素，位于按钮行上方。 */
-#define UI_HOME_FOOTER_Y_PX (378)
-/* HOME 固定布局的按钮行纵坐标为 414 像素，底部仍保留 18 像素圆角安全余量。 */
-#define UI_HOME_BUTTON_ROW_Y_PX (414)
+/* 设置页按钮使用 166 像素，两列按钮在 346 像素安全宽度内保留间距。 */
+#define UI_SETTINGS_BUTTON_WIDTH_PX (166)
+/* 顶部品牌栏起点固定为 28 像素。 */
+#define UI_TOP_BAR_Y_PX (28)
+/* 电池外框顶部固定为 31 像素，位于右上第一行。 */
+#define UI_BATTERY_SHELL_Y_PX (31)
+/* 电池外框高度固定为 20 像素，其底边位于 51 像素。 */
+#define UI_BATTERY_SHELL_HEIGHT_PX (20)
+/* 电池正极帽顶部固定为 37 像素，与外框垂直居中。 */
+#define UI_BATTERY_TIP_Y_PX (37)
+/* 电池百分比文字顶部固定为 29 像素，与图标第一行对齐。 */
+#define UI_BATTERY_LABEL_Y_PX (29)
+/* BLE 状态点顶部固定为 63 像素，独占右上第二行。 */
+#define UI_BLE_DOT_Y_PX (63)
+/* BLE 状态文字顶部固定为 56 像素，与电池底边保留 5 像素间距。 */
+#define UI_BLE_LABEL_Y_PX (56)
+/* 主信息卡起点固定为 94 像素，避开顶部品牌和设备状态。 */
+#define UI_HERO_CARD_Y_PX (94)
+/* 主信息卡高度固定为 250 像素，保证动作与累计值同屏。 */
+#define UI_HERO_CARD_HEIGHT_PX (250)
+/* 普通页面按钮行固定在 396 像素，底部仍保留圆角安全区。 */
+#define UI_BUTTON_ROW_Y_PX (396)
+/* 设置页四按钮使用两行，按钮区提前到 354 像素。 */
+#define UI_SETTINGS_BUTTON_ROW_Y_PX (354)
 /* 16 像素中文字体用于状态栏、页脚和按钮，字形由项目生成脚本固定。 */
 #define UI_FONT_CHINESE_16 (&ui_font_noto_sans_sc_16)
 /* 20 像素中文字体用于标题和次级指标，禁止改回缺少汉字的 Montserrat。 */
@@ -61,9 +83,31 @@
 typedef struct {
     /* 保存页面根 screen。 */
     lv_obj_t *root;
-    /* 保存标题标签。 */
+    /* 保存“毕”字几何品牌标。 */
+    lv_obj_t *brand_mark;
+    /* 保存品牌标内的“毕”字。 */
+    lv_obj_t *brand_mark_label;
+    /* 保存“毕昇杯”品牌名称。 */
+    lv_obj_t *brand_label;
+    /* 保存“智慧运动助手”产品副标题。 */
     lv_obj_t *title_label;
-    /* 保存电池/BLE 状态标签。 */
+    /* 保存电池外框。 */
+    lv_obj_t *battery_shell;
+    /* 保存随百分比改变宽度的电池填充。 */
+    lv_obj_t *battery_fill;
+    /* 保存电池正极帽。 */
+    lv_obj_t *battery_tip;
+    /* 保存电池百分比文字。 */
+    lv_obj_t *battery_label;
+    /* 保存 BLE 连接状态点。 */
+    lv_obj_t *ble_dot;
+    /* 保存 BLE 连接文字。 */
+    lv_obj_t *ble_label;
+    /* 保存主信息卡背景。 */
+    lv_obj_t *hero_card;
+    /* 保存页面状态胶囊。 */
+    lv_obj_t *status_pill;
+    /* 保存页面状态文字。 */
     lv_obj_t *status_label;
     /* 保存动作名、倒计时或总结主值。 */
     lv_obj_t *primary_label;
@@ -71,12 +115,16 @@ typedef struct {
     lv_obj_t *secondary_label;
     /* 保存底部提示。 */
     lv_obj_t *footer_label;
+    /* 保存活动状态轨道。 */
+    lv_obj_t *activity_track;
+    /* 保存活动状态填充。 */
+    lv_obj_t *activity_fill;
     /* 保存按钮行容器。 */
     lv_obj_t *button_row;
-/* 保存五个固定按钮对象；设置页使用三加二双行，其它页面隐藏未用槽位。 */
-lv_obj_t *buttons[UI_PRESENTER_MAX_BUTTONS];
-/* 保存与五个按钮一一对应的中文文字对象。 */
-lv_obj_t *button_labels[UI_PRESENTER_MAX_BUTTONS];
+    /* 保存五个固定按钮对象；设置页使用两列双行，其它页面隐藏未用槽位。 */
+    lv_obj_t *buttons[UI_PRESENTER_MAX_BUTTONS];
+    /* 保存与五个按钮一一对应的中文文字对象。 */
+    lv_obj_t *button_labels[UI_PRESENTER_MAX_BUTTONS];
 } ui_lvgl_page_t;
 
 /* 保存按钮 user_data；生命周期覆盖全部页面。 */
@@ -159,31 +207,61 @@ static void ui_lvgl_button_event(lv_event_t *event)
         binding->command);
 }
 
-/* 配置 screen 的 AMOLED 友好背景和纵向布局。 */
+/* 配置 screen 的 AMOLED 友好背景和固定像素布局。 */
 static void ui_lvgl_style_screen(lv_obj_t *screen)
 {
     /* 接近纯黑背景降低 AMOLED 发光功耗。 */
     lv_obj_set_style_bg_color(screen, lv_color_hex(UI_COLOR_BACKGROUND_HEX), LV_PART_MAIN);
     /* 背景完全不透明，避免旧 framebuffer 透出。 */
     lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, LV_PART_MAIN);
-    /* 左侧留 32 像素，标题“健”不再落入屏幕左上圆角遮挡区。 */
-    lv_obj_set_style_pad_left(screen, UI_SAFE_HORIZONTAL_PX, LV_PART_MAIN);
-    /* 右侧使用同一安全区，避免长状态文本进入右上圆角。 */
-    lv_obj_set_style_pad_right(screen, UI_SAFE_HORIZONTAL_PX, LV_PART_MAIN);
-    /* 顶部留 32 像素，保证标题首行完整显示。 */
-    lv_obj_set_style_pad_top(screen, UI_SAFE_TOP_PX, LV_PART_MAIN);
-    /* 底部保持 20 像素，兼顾按钮触摸面积和下圆角。 */
-    lv_obj_set_style_pad_bottom(screen, UI_SAFE_BOTTOM_PX, LV_PART_MAIN);
-    /* 使用纵向 flex 适配 410x502 窄长屏。 */
-    lv_obj_set_flex_flow(screen, LV_FLEX_FLOW_COLUMN);
-    /* 元素纵向排列且横向居中。 */
-    lv_obj_set_flex_align(
-        screen,
-        LV_FLEX_ALIGN_START,
-        LV_FLEX_ALIGN_CENTER,
-        LV_FLEX_ALIGN_CENTER);
+    /* 固定布局自己包含圆角安全区，根 screen 不再叠加内边距。 */
+    lv_obj_set_style_pad_all(screen, 0, LV_PART_MAIN);
+    /* 禁用自动 flex，避免动态中文长度改变其它对象坐标并产生异步刷新残影。 */
+    lv_obj_set_layout(screen, LV_LAYOUT_NONE);
     /* 根页面不滚动，防止训练时误触拖动。 */
     lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
+}
+
+/* 创建固定位置的圆角表面对象；只在初始化阶段调用。 */
+static lv_obj_t *ui_lvgl_create_surface(
+    lv_obj_t *parent,
+    int32_t x,
+    int32_t y,
+    int32_t width,
+    int32_t height,
+    uint32_t color_hex,
+    int32_t radius)
+{
+    /* 父对象必须存在，防止把无主对象挂到默认 screen。 */
+    if (parent == NULL) {
+        /* 返回空指针，调用方进入统一内存错误路径。 */
+        return NULL;
+    }
+    /* 创建普通对象作为卡片、状态胶囊或图标轮廓。 */
+    lv_obj_t *surface = lv_obj_create(parent);
+    /* 分配失败时返回空指针。 */
+    if (surface == NULL) {
+        /* 调用方会递归删除已创建页面。 */
+        return NULL;
+    }
+    /* 写入固定坐标，避免运行期布局重算。 */
+    lv_obj_set_pos(surface, x, y);
+    /* 写入固定尺寸。 */
+    lv_obj_set_size(surface, width, height);
+    /* 写入表面底色。 */
+    lv_obj_set_style_bg_color(surface, lv_color_hex(color_hex), LV_PART_MAIN);
+    /* 表面完全不透明。 */
+    lv_obj_set_style_bg_opa(surface, LV_OPA_COVER, LV_PART_MAIN);
+    /* 写入统一圆角。 */
+    lv_obj_set_style_radius(surface, radius, LV_PART_MAIN);
+    /* 默认取消内边距，子对象使用自身固定坐标。 */
+    lv_obj_set_style_pad_all(surface, 0, LV_PART_MAIN);
+    /* 默认取消边框；需要描边的调用方随后单独设置。 */
+    lv_obj_set_style_border_width(surface, 0, LV_PART_MAIN);
+    /* 卡片不可滚动，训练过程中拖动不改变布局。 */
+    lv_obj_remove_flag(surface, LV_OBJ_FLAG_SCROLLABLE);
+    /* 返回新表面对象。 */
+    return surface;
 }
 
 /* 创建标签并设置字体、颜色、宽度和换行。 */
@@ -267,61 +345,101 @@ static bool ui_lvgl_create_button(
     return true;
 }
 
-/*
- * 为显示质量诊断的 HOME 页面应用完全固定的像素几何。
- * 五个文字对象不再参与根 flex 的自动高度与位置重算，避免异步局部刷新把同一文字留在旧坐标。
- */
-static void ui_lvgl_apply_static_home_layout(ui_lvgl_page_t *page)
+/* 为全部产品页面应用同一智能手表固定网格。 */
+static void ui_lvgl_apply_product_layout(ui_lvgl_page_t *page, ui_state_t state)
 {
-    /* HOME 页面对象由创建函数完整建立后才允许调用；空指针仅作防御性保护。 */
+    /* 页面对象由创建函数完整建立后才允许调用；空指针仅作防御性保护。 */
     if (page == NULL) {
         /* 空页面没有任何可配置对象，直接返回。 */
         return;
     }
-    /* 关闭根 screen 的 flex 布局，使所有子对象只服从下面的绝对坐标。 */
-    lv_obj_set_layout(page->root, LV_LAYOUT_NONE);
-    /* 绝对坐标已经包含圆角安全区，根对象不再叠加任何内边距。 */
-    lv_obj_set_style_pad_all(page->root, 0, LV_PART_MAIN);
-
-    /* 标题短文本使用裁剪模式，禁止内容变化触发自动换行高度重算。 */
+    /* 品牌标固定在左上安全区。 */
+    lv_obj_set_pos(page->brand_mark, UI_SAFE_HORIZONTAL_PX, UI_TOP_BAR_Y_PX);
+    /* 品牌标固定为 38×38 像素，兼顾识别度和圆角屏安全区。 */
+    lv_obj_set_size(page->brand_mark, 38, 38);
+    /* “毕”字始终位于品牌标中央。 */
+    lv_obj_center(page->brand_mark_label);
+    /* 品牌名称固定在品牌标右侧第一行。 */
+    lv_obj_set_pos(page->brand_label, 80, UI_TOP_BAR_Y_PX - 2);
+    /* 品牌名称使用单行裁剪，避免任何状态改变顶栏高度。 */
+    lv_label_set_long_mode(page->brand_label, LV_LABEL_LONG_CLIP);
+    /* 品牌名称可用宽度固定为 104 像素。 */
+    lv_obj_set_size(page->brand_label, 104, 26);
+    /* 产品副标题固定在品牌名称下方。 */
+    lv_obj_set_pos(page->title_label, 80, UI_TOP_BAR_Y_PX + 22);
+    /* 产品副标题单行显示。 */
     lv_label_set_long_mode(page->title_label, LV_LABEL_LONG_CLIP);
-    /* 标题左上角固定在 32 像素圆角安全区。 */
-    lv_obj_set_pos(page->title_label, UI_SAFE_HORIZONTAL_PX, UI_HOME_TITLE_Y_PX);
-    /* 标题固定为 346×42 像素，可容纳 28 像素字体的 34 像素行高。 */
-    lv_obj_set_size(page->title_label, UI_SAFE_CONTENT_WIDTH_PX, 42);
-
-    /* 电池与蓝牙状态使用单行裁剪，避免状态变化改变后续对象位置。 */
+    /* 产品副标题宽度固定为 164 像素。 */
+    lv_obj_set_size(page->title_label, 164, 22);
+    /* 电池百分比位于电池图标左侧并右对齐。 */
+    lv_obj_set_pos(page->battery_label, 254, UI_BATTERY_LABEL_Y_PX);
+    /* 百分比文字固定 54×22 像素。 */
+    lv_obj_set_size(page->battery_label, 54, 22);
+    /* BLE 状态点固定在右上第二行。 */
+    lv_obj_set_pos(page->ble_dot, 281, UI_BLE_DOT_Y_PX);
+    /* BLE 状态文字位于状态点右侧。 */
+    lv_obj_set_pos(page->ble_label, 295, UI_BLE_LABEL_Y_PX);
+    /* BLE 文字固定单行。 */
+    lv_label_set_long_mode(page->ble_label, LV_LABEL_LONG_CLIP);
+    /* BLE 文字宽度固定为 82 像素。 */
+    lv_obj_set_size(page->ble_label, 82, 22);
+    /* 状态胶囊文字使用单行裁剪，避免页面状态改变卡片布局。 */
     lv_label_set_long_mode(page->status_label, LV_LABEL_LONG_CLIP);
-    /* 状态行固定在标题下方。 */
-    lv_obj_set_pos(page->status_label, UI_SAFE_HORIZONTAL_PX, UI_HOME_STATUS_Y_PX);
-    /* 状态行固定为 346×28 像素，可容纳 20 像素字体的 24 像素行高。 */
-    lv_obj_set_size(page->status_label, UI_SAFE_CONTENT_WIDTH_PX, 28);
-
-    /* 主文案使用单行裁剪；当前“准备训练”在 346 像素内完整显示。 */
+    /* 状态文字固定在胶囊内部。 */
+    lv_obj_set_pos(page->status_label, 62, UI_HERO_CARD_Y_PX + 24);
+    /* 状态文字最多显示 132×24 像素。 */
+    lv_obj_set_size(page->status_label, 132, 24);
+    /* 主文案使用单行裁剪，动作名和关键状态保持稳定基线。 */
     lv_label_set_long_mode(page->primary_label, LV_LABEL_LONG_CLIP);
-    /* 主文案使用固定纵坐标，不再因标题或状态内容宽高变化而移动。 */
-    lv_obj_set_pos(page->primary_label, UI_SAFE_HORIZONTAL_PX, UI_HOME_PRIMARY_Y_PX);
-    /* 主文案固定为 346×60 像素，可容纳 36 像素字体的 42 像素行高。 */
-    lv_obj_set_size(page->primary_label, UI_SAFE_CONTENT_WIDTH_PX, 60);
-
-    /* 次文案同样限制为单行，当前设备就绪提示不会换行。 */
+    /* 主文案固定在主卡中部。 */
+    lv_obj_set_pos(page->primary_label, 52, UI_HERO_CARD_Y_PX + 68);
+    /* 主文案固定 306×58 像素。 */
+    lv_obj_set_size(page->primary_label, 306, 58);
+    /* 次文案限制为单行，次数、步数和热量不改变对象高度。 */
     lv_label_set_long_mode(page->secondary_label, LV_LABEL_LONG_CLIP);
-    /* 次文案固定在页面中下部。 */
-    lv_obj_set_pos(page->secondary_label, UI_SAFE_HORIZONTAL_PX, UI_HOME_SECONDARY_Y_PX);
-    /* 次文案固定为 346×44 像素，可容纳 28 像素字体的 34 像素行高。 */
-    lv_obj_set_size(page->secondary_label, UI_SAFE_CONTENT_WIDTH_PX, 44);
-
-    /* 页脚使用单行裁剪，避免按钮行随提示文字高度变化。 */
+    /* 次文案固定在主文案下方。 */
+    lv_obj_set_pos(page->secondary_label, 52, UI_HERO_CARD_Y_PX + 132);
+    /* 次文案固定 306×48 像素。 */
+    lv_obj_set_size(page->secondary_label, 306, 48);
+    /* 页脚使用单行裁剪，显示时长、恢复条件或简短提示。 */
     lv_label_set_long_mode(page->footer_label, LV_LABEL_LONG_CLIP);
-    /* 页脚固定在按钮行上方。 */
-    lv_obj_set_pos(page->footer_label, UI_SAFE_HORIZONTAL_PX, UI_HOME_FOOTER_Y_PX);
-    /* 页脚固定为 346×28 像素，可容纳 20 像素字体。 */
-    lv_obj_set_size(page->footer_label, UI_SAFE_CONTENT_WIDTH_PX, 28);
-
-    /* 按钮行固定在屏幕底部安全区；其内部按钮仍沿用已在真板显示清晰的横向 flex。 */
-    lv_obj_set_pos(page->button_row, UI_SAFE_HORIZONTAL_PX, UI_HOME_BUTTON_ROW_Y_PX);
-    /* 按钮行固定为 346×70 像素，不随上方五个标签变化。 */
+    /* 页脚固定在活动轨道上方。 */
+    lv_obj_set_pos(page->footer_label, 52, UI_HERO_CARD_Y_PX + 190);
+    /* 页脚固定 306×30 像素。 */
+    lv_obj_set_size(page->footer_label, 306, 30);
+    /* 普通页面按钮行固定在底部安全区。 */
+    lv_obj_set_pos(page->button_row, UI_SAFE_HORIZONTAL_PX, UI_BUTTON_ROW_Y_PX);
+    /* 固定按钮区每次应用页面几何时都复位到原点，禁止继承任何历史滚动偏移。 */
+    lv_obj_scroll_to(page->button_row, 0, 0, LV_ANIM_OFF);
+    /* 普通按钮行固定 346×70 像素。 */
     lv_obj_set_size(page->button_row, UI_SAFE_CONTENT_WIDTH_PX, 70);
+    /* 设置页使用两行四按钮，需要更高的按钮区域。 */
+    if (state == UI_STATE_SETTINGS) {
+        /* 设置按钮区提前到 354 像素，避免第二行进入底部圆角。 */
+        lv_obj_set_pos(page->button_row, UI_SAFE_HORIZONTAL_PX, UI_SETTINGS_BUTTON_ROW_Y_PX);
+        /* 两行按钮区固定为 346×126 像素。 */
+        lv_obj_set_size(page->button_row, UI_SAFE_CONTENT_WIDTH_PX, 126);
+        /* 真板主题的 flex 行列间距会改变自动换行结果；设置页改用不依赖主题的绝对布局。 */
+        lv_obj_set_layout(page->button_row, LV_LAYOUT_NONE);
+        /* 绝对坐标直接覆盖完整 346 像素内宽，因此设置页容器不得再叠加四周内边距。 */
+        lv_obj_set_style_pad_all(page->button_row, 0, LV_PART_MAIN);
+        /* 左上槽位固定为亮度按钮，宽 166、高 52 像素。 */
+        lv_obj_set_pos(page->buttons[0], 0, 0);
+        /* 写入亮度按钮固定触摸尺寸。 */
+        lv_obj_set_size(page->buttons[0], UI_SETTINGS_BUTTON_WIDTH_PX, 52);
+        /* 右上槽位固定为诊断按钮，左右两列保留 14 像素间距。 */
+        lv_obj_set_pos(page->buttons[1], 180, 0);
+        /* 写入诊断按钮固定触摸尺寸。 */
+        lv_obj_set_size(page->buttons[1], UI_SETTINGS_BUTTON_WIDTH_PX, 52);
+        /* 左下槽位固定为忘记电脑按钮，与第一行保留 12 像素间距。 */
+        lv_obj_set_pos(page->buttons[2], 0, 64);
+        /* 写入忘记电脑按钮固定触摸尺寸。 */
+        lv_obj_set_size(page->buttons[2], UI_SETTINGS_BUTTON_WIDTH_PX, 52);
+        /* 右下槽位固定为返回按钮，保证用户始终能回到主页。 */
+        lv_obj_set_pos(page->buttons[3], 180, 64);
+        /* 写入返回按钮固定触摸尺寸。 */
+        lv_obj_set_size(page->buttons[3], UI_SETTINGS_BUTTON_WIDTH_PX, 52);
+    }
 }
 
 /* 创建一张独立 LVGL screen。 */
@@ -340,32 +458,137 @@ static bool ui_lvgl_create_page(
     }
     /* 应用统一背景和布局。 */
     ui_lvgl_style_screen(page->root);
-    /* 创建标题。 */
-    page->title_label = ui_lvgl_create_label(page->root, lv_color_hex(UI_COLOR_ACCENT_HEX), UI_FONT_CHINESE_28, LV_TEXT_ALIGN_LEFT, UI_SAFE_CONTENT_WIDTH_PX);
-    /* 创建电池和 BLE 状态。 */
-    page->status_label = ui_lvgl_create_label(page->root, lv_color_hex(UI_COLOR_MUTED_HEX), UI_FONT_CHINESE_20, LV_TEXT_ALIGN_LEFT, UI_SAFE_CONTENT_WIDTH_PX);
+    /* 创建蓝色圆角品牌标，内部只承载一个“毕”字，避免依赖外部图片资源。 */
+    page->brand_mark = ui_lvgl_create_surface(
+        page->root,
+        UI_SAFE_HORIZONTAL_PX,
+        UI_TOP_BAR_Y_PX,
+        38,
+        38,
+        UI_COLOR_ACCENT_HEX,
+        12);
+    /* 创建品牌标文字。 */
+    page->brand_mark_label = ui_lvgl_create_label(
+        page->brand_mark,
+        lv_color_hex(UI_COLOR_TEXT_HEX),
+        UI_FONT_CHINESE_20,
+        LV_TEXT_ALIGN_CENTER,
+        38);
+    /* 品牌标固定显示“毕”。 */
+    if (page->brand_mark_label != NULL) {
+        /* 品牌字不随页面业务状态变化。 */
+        lv_label_set_text(page->brand_mark_label, "毕");
+    }
+    /* 创建“毕昇杯”品牌名称。 */
+    page->brand_label = ui_lvgl_create_label(
+        page->root,
+        lv_color_hex(UI_COLOR_TEXT_HEX),
+        UI_FONT_CHINESE_20,
+        LV_TEXT_ALIGN_LEFT,
+        104);
+    /* 品牌名称固定，不由 presenter 覆盖。 */
+    if (page->brand_label != NULL) {
+        /* 写入赛事主题品牌。 */
+        lv_label_set_text(page->brand_label, "毕昇杯");
+    }
+    /* 创建“智慧运动助手”产品副标题。 */
+    page->title_label = ui_lvgl_create_label(
+        page->root,
+        lv_color_hex(UI_COLOR_MUTED_HEX),
+        UI_FONT_CHINESE_16,
+        LV_TEXT_ALIGN_LEFT,
+        164);
+    /* 产品副标题固定，不因页面切换造成顶栏跳动。 */
+    if (page->title_label != NULL) {
+        /* 写入用户指定产品主题。 */
+        lv_label_set_text(page->title_label, "智慧运动助手");
+    }
+    /* 创建电池外框；填充宽度在 render 中按真实百分比更新。 */
+    page->battery_shell = ui_lvgl_create_surface(
+        page->root,
+        312,
+        UI_BATTERY_SHELL_Y_PX,
+        44,
+        UI_BATTERY_SHELL_HEIGHT_PX,
+        UI_COLOR_BACKGROUND_HEX,
+        5);
+    /* 电池外框使用 2 像素冷灰描边。 */
+    if (page->battery_shell != NULL) {
+        /* 显示真实电池轮廓。 */
+        lv_obj_set_style_border_width(page->battery_shell, 2, LV_PART_MAIN);
+        /* 描边颜色不随电量变化，保持图标形状稳定。 */
+        lv_obj_set_style_border_color(page->battery_shell, lv_color_hex(UI_COLOR_MUTED_HEX), LV_PART_MAIN);
+    }
+    /* 创建电池内部填充，宽度最小 2、最大 36 像素。 */
+    page->battery_fill = ui_lvgl_create_surface(page->battery_shell, 4, 4, 18, 12, UI_COLOR_SUCCESS_HEX, 3);
+    /* 创建电池正极帽。 */
+    page->battery_tip = ui_lvgl_create_surface(page->root, 358, UI_BATTERY_TIP_Y_PX, 4, 8, UI_COLOR_MUTED_HEX, 2);
+    /* 创建电量百分比文字。 */
+    page->battery_label = ui_lvgl_create_label(
+        page->root,
+        lv_color_hex(UI_COLOR_SECONDARY_HEX),
+        UI_FONT_CHINESE_16,
+        LV_TEXT_ALIGN_RIGHT,
+        54);
+    /* 创建 BLE 状态点。 */
+    page->ble_dot = ui_lvgl_create_surface(page->root, 281, UI_BLE_DOT_Y_PX, 8, 8, UI_COLOR_MUTED_HEX, 4);
+    /* 创建 BLE 连接状态文字。 */
+    page->ble_label = ui_lvgl_create_label(
+        page->root,
+        lv_color_hex(UI_COLOR_MUTED_HEX),
+        UI_FONT_CHINESE_16,
+        LV_TEXT_ALIGN_RIGHT,
+        82);
+    /* 创建主信息卡。 */
+    page->hero_card = ui_lvgl_create_surface(
+        page->root,
+        UI_SAFE_HORIZONTAL_PX,
+        UI_HERO_CARD_Y_PX,
+        UI_SAFE_CONTENT_WIDTH_PX,
+        UI_HERO_CARD_HEIGHT_PX,
+        UI_COLOR_CARD_HEX,
+        28);
+    /* 主信息卡增加一像素结构描边。 */
+    if (page->hero_card != NULL) {
+        /* 描边把卡片从石墨背景中分离，但不使用阴影。 */
+        lv_obj_set_style_border_width(page->hero_card, 1, LV_PART_MAIN);
+        /* 描边使用低亮度蓝灰。 */
+        lv_obj_set_style_border_color(page->hero_card, lv_color_hex(UI_COLOR_BORDER_HEX), LV_PART_MAIN);
+    }
+    /* 创建状态胶囊；颜色在 render 中按训练、休息或故障状态更新。 */
+    page->status_pill = ui_lvgl_create_surface(page->root, 50, UI_HERO_CARD_Y_PX + 18, 148, 32, UI_COLOR_RAISED_HEX, 16);
+    /* 创建状态胶囊文字。 */
+    page->status_label = ui_lvgl_create_label(page->root, lv_color_hex(UI_COLOR_CYAN_HEX), UI_FONT_CHINESE_16, LV_TEXT_ALIGN_LEFT, 132);
     /* 创建主文本。 */
     page->primary_label = ui_lvgl_create_label(page->root, lv_color_hex(UI_COLOR_TEXT_HEX), UI_FONT_CHINESE_36, LV_TEXT_ALIGN_CENTER, UI_SAFE_CONTENT_WIDTH_PX);
     /* 创建次文本。 */
     page->secondary_label = ui_lvgl_create_label(page->root, lv_color_hex(UI_COLOR_SECONDARY_HEX), UI_FONT_CHINESE_28, LV_TEXT_ALIGN_CENTER, UI_SAFE_CONTENT_WIDTH_PX);
     /* 创建底部提示。 */
-    page->footer_label = ui_lvgl_create_label(page->root, lv_color_hex(UI_COLOR_MUTED_HEX), UI_FONT_CHINESE_20, LV_TEXT_ALIGN_CENTER, UI_SAFE_CONTENT_WIDTH_PX);
-    /* 任一标签创建失败时报告内存不足。 */
-    if ((page->title_label == NULL) || (page->status_label == NULL) ||
-        (page->primary_label == NULL) || (page->secondary_label == NULL) ||
-        (page->footer_label == NULL)) {
+    page->footer_label = ui_lvgl_create_label(page->root, lv_color_hex(UI_COLOR_MUTED_HEX), UI_FONT_CHINESE_16, LV_TEXT_ALIGN_CENTER, UI_SAFE_CONTENT_WIDTH_PX);
+    /* 创建活动状态轨道；运行期填充长度表示当前是否允许推进完整周期。 */
+    page->activity_track = ui_lvgl_create_surface(page->root, 52, UI_HERO_CARD_Y_PX + 228, 306, 5, UI_COLOR_BORDER_HEX, 3);
+    /* 创建活动状态填充。 */
+    page->activity_fill = ui_lvgl_create_surface(page->activity_track, 0, 0, 92, 5, UI_COLOR_ACCENT_HEX, 3);
+    /* 任一品牌、状态、卡片或标签创建失败时报告内存不足。 */
+    if ((page->brand_mark == NULL) || (page->brand_mark_label == NULL) ||
+        (page->brand_label == NULL) || (page->title_label == NULL) ||
+        (page->battery_shell == NULL) || (page->battery_fill == NULL) ||
+        (page->battery_tip == NULL) || (page->battery_label == NULL) ||
+        (page->ble_dot == NULL) || (page->ble_label == NULL) ||
+        (page->hero_card == NULL) || (page->status_pill == NULL) ||
+        (page->status_label == NULL) || (page->primary_label == NULL) ||
+        (page->secondary_label == NULL) || (page->footer_label == NULL) ||
+        (page->activity_track == NULL) || (page->activity_fill == NULL)) {
         return false;
     }
-    /* 主文本占两份可用空间。 */
-    lv_obj_set_flex_grow(page->primary_label, 2U);
-    /* 次文本占一份空间。 */
-    lv_obj_set_flex_grow(page->secondary_label, 1U);
     /* 创建底部按钮行。 */
     page->button_row = lv_obj_create(page->root);
     /* 内存不足时失败。 */
     if (page->button_row == NULL) {
         return false;
     }
+    /* 固定按钮区不接受拖动或惯性滚动，亮度按钮松手后必须仍停在原位置。 */
+    lv_obj_remove_flag(page->button_row, LV_OBJ_FLAG_SCROLLABLE);
     /* 按钮行占满 346 像素安全宽度，与顶部文字左右边界一致。 */
     lv_obj_set_width(page->button_row, UI_SAFE_CONTENT_WIDTH_PX);
     /* 按钮行高度为 70 像素。 */
@@ -387,32 +610,31 @@ static bool ui_lvgl_create_page(
             return false;
         }
     }
-    /* HOME 显示诊断使用固定坐标，排除自动 flex 重排造成同一文字多位置残留。 */
-    if (state == UI_STATE_HOME) {
-        /* 只修改 HOME；其它产品页面继续保持原响应式 flex 布局。 */
-        ui_lvgl_apply_static_home_layout(page);
-    }
-    /* 设置页需要显示五个中文按钮，改为三加二的两行布局避免文字被压缩。 */
-    if (state == UI_STATE_SETTINGS) {
-        /* 把按钮容器增高到 116 像素，可容纳两行 48 像素触摸目标和行间距。 */
-        lv_obj_set_height(page->button_row, 116);
-        /* 启用水平排列并自动换行，不改变其它页面的单行按钮。 */
-        lv_obj_set_flex_flow(page->button_row, LV_FLEX_FLOW_ROW_WRAP);
-        /* 遍历五个已创建按钮，设置固定宽高便于手指点击和中文换行。 */
-        for (size_t index = 0U; index < UI_PRESENTER_MAX_BUTTONS; ++index) {
-            /* 取消 flex 伸展，防止五个按钮在第一行被压缩。 */
-            lv_obj_set_flex_grow(page->buttons[index], 0U);
-            /* 104 像素宽度允许 346 像素安全区第一行排列三个按钮并保留间距。 */
-            lv_obj_set_width(page->buttons[index], UI_SETTINGS_BUTTON_WIDTH_PX);
-            /* 48 像素高度达到手表触摸目标下限并留出第二行间距。 */
-            lv_obj_set_height(page->buttons[index], 48);
-        }
-    }
+    /* 全部页面使用同一固定网格，避免异步 QSPI 局部刷新留下旧坐标文字。 */
+    ui_lvgl_apply_product_layout(page, state);
     /* SCREEN_OFF 页隐藏文字，但保留不可见全屏按钮接收第一下触摸唤醒。 */
     if (state == UI_STATE_SCREEN_OFF) {
-        /* 隐藏标题，避免 AMOLED 再次点亮前刷新旧像素。 */
+        /* 隐藏品牌标，避免 AMOLED 再次点亮前刷新旧像素。 */
+        lv_obj_add_flag(page->brand_mark, LV_OBJ_FLAG_HIDDEN);
+        /* 隐藏品牌名称。 */
+        lv_obj_add_flag(page->brand_label, LV_OBJ_FLAG_HIDDEN);
+        /* 隐藏产品副标题。 */
         lv_obj_add_flag(page->title_label, LV_OBJ_FLAG_HIDDEN);
-        /* 隐藏状态栏。 */
+        /* 隐藏电池图标和百分比。 */
+        lv_obj_add_flag(page->battery_shell, LV_OBJ_FLAG_HIDDEN);
+        /* 隐藏电池正极帽。 */
+        lv_obj_add_flag(page->battery_tip, LV_OBJ_FLAG_HIDDEN);
+        /* 隐藏电量文字。 */
+        lv_obj_add_flag(page->battery_label, LV_OBJ_FLAG_HIDDEN);
+        /* 隐藏 BLE 状态点。 */
+        lv_obj_add_flag(page->ble_dot, LV_OBJ_FLAG_HIDDEN);
+        /* 隐藏 BLE 状态文字。 */
+        lv_obj_add_flag(page->ble_label, LV_OBJ_FLAG_HIDDEN);
+        /* 隐藏主信息卡。 */
+        lv_obj_add_flag(page->hero_card, LV_OBJ_FLAG_HIDDEN);
+        /* 隐藏状态胶囊。 */
+        lv_obj_add_flag(page->status_pill, LV_OBJ_FLAG_HIDDEN);
+        /* 隐藏状态文字。 */
         lv_obj_add_flag(page->status_label, LV_OBJ_FLAG_HIDDEN);
         /* 隐藏主信息。 */
         lv_obj_add_flag(page->primary_label, LV_OBJ_FLAG_HIDDEN);
@@ -420,12 +642,16 @@ static bool ui_lvgl_create_page(
         lv_obj_add_flag(page->secondary_label, LV_OBJ_FLAG_HIDDEN);
         /* 隐藏页脚。 */
         lv_obj_add_flag(page->footer_label, LV_OBJ_FLAG_HIDDEN);
-        /* 让透明按钮行占据去除页面安全边距后的全部可用区域。 */
-        lv_obj_set_width(page->button_row, LV_PCT(100));
-        /* 让透明按钮行吃满纵向剩余空间。 */
-        lv_obj_set_flex_grow(page->button_row, 1U);
-        /* 让第一个按钮覆盖整行高度，任意触摸位置都能产生 WAKE。 */
-        lv_obj_set_height(page->buttons[0], LV_PCT(100));
+        /* 隐藏活动轨道。 */
+        lv_obj_add_flag(page->activity_track, LV_OBJ_FLAG_HIDDEN);
+        /* 让透明按钮行覆盖完整 410×502 逻辑屏幕。 */
+        lv_obj_set_pos(page->button_row, 0, 0);
+        /* 写入完整屏幕尺寸。 */
+        lv_obj_set_size(page->button_row, UI_SCREEN_WIDTH_PX, 502);
+        /* 取消透明容器内边距。 */
+        lv_obj_set_style_pad_all(page->button_row, 0, LV_PART_MAIN);
+        /* 让第一个按钮覆盖整屏，任意触摸位置都能产生 WAKE。 */
+        lv_obj_set_size(page->buttons[0], UI_SCREEN_WIDTH_PX, 502);
         /* 隐藏唤醒按钮背景，避免短暂点屏时出现卡片。 */
         lv_obj_set_style_bg_opa(page->buttons[0], LV_OPA_TRANSP, LV_PART_MAIN);
         /* 禁用唤醒按钮圆角阴影的视觉成本。 */
@@ -433,6 +659,134 @@ static bool ui_lvgl_create_page(
     }
     /* 返回成功。 */
     return true;
+}
+
+/* 返回当前页面的语义强调色；颜色只表达状态，不改变业务状态机。 */
+static uint32_t ui_lvgl_semantic_color(const ui_context_t *context)
+{
+    /* 错误和关机使用红色，明确当前不可继续训练。 */
+    if ((context->state == UI_STATE_ERROR) || (context->state == UI_STATE_SHUTDOWN)) {
+        /* 返回系统危险色。 */
+        return UI_COLOR_DANGER_HEX;
+    }
+    /* 训练中活动门打开时使用健康绿色。 */
+    if ((context->state == UI_STATE_RUNNING) && context->view.counting_enabled) {
+        /* 返回正常计数色。 */
+        return UI_COLOR_SUCCESS_HEX;
+    }
+    /* 自动休息、手动暂停和停止确认使用橙色。 */
+    if (((context->state == UI_STATE_RUNNING) && !context->view.counting_enabled) ||
+        (context->state == UI_STATE_PAUSED) ||
+        (context->state == UI_STATE_STOP_CONFIRM)) {
+        /* 返回暂停警示色。 */
+        return UI_COLOR_WARNING_HEX;
+    }
+    /* 启动、识别、配对和诊断使用科技青色。 */
+    if ((context->state == UI_STATE_BOOT) ||
+        (context->state == UI_STATE_SELF_TEST) ||
+        (context->state == UI_STATE_PREPARE) ||
+        (context->state == UI_STATE_DIAGNOSTICS) ||
+        context->view.pairing_active) {
+        /* 返回信息状态色。 */
+        return UI_COLOR_CYAN_HEX;
+    }
+    /* 总结完成使用健康绿色。 */
+    if (context->state == UI_STATE_SUMMARY) {
+        /* 返回完成色。 */
+        return UI_COLOR_SUCCESS_HEX;
+    }
+    /* 主页和设置使用品牌蓝。 */
+    return UI_COLOR_ACCENT_HEX;
+}
+
+/* 更新独立电池图标和 BLE 连接状态。 */
+static void ui_lvgl_update_device_status(
+    ui_lvgl_page_t *page,
+    const ui_context_t *context)
+{
+    /* 电量未知时使用最小灰色填充并显示占位符。 */
+    if (context->view.battery_percent == UINT8_MAX) {
+        /* 图标保留 2 像素填充，明确它是未知而不是 0%。 */
+        lv_obj_set_width(page->battery_fill, 2);
+        /* 未知电量使用弱化色。 */
+        lv_obj_set_style_bg_color(page->battery_fill, lv_color_hex(UI_COLOR_MUTED_HEX), LV_PART_MAIN);
+        /* 百分比显示占位符。 */
+        lv_label_set_text(page->battery_label, "--%");
+    } else {
+        /* 36 像素内宽按 0～100% 映射，至少保留 2 像素可见填充。 */
+        int32_t fill_width = (int32_t)(((uint32_t)context->view.battery_percent * 36U + 99U) / 100U);
+        /* 零电量仍保留 2 像素红色提示。 */
+        if (fill_width < 2) {
+            /* 写入最小图形宽度。 */
+            fill_width = 2;
+        }
+        /* 更新真实填充宽度。 */
+        lv_obj_set_width(page->battery_fill, fill_width);
+        /* 充电时使用青色；否则按低电门槛选择绿色、橙色或红色。 */
+        const uint32_t battery_color = context->view.charging
+            ? UI_COLOR_CYAN_HEX
+            : (context->view.battery_percent <= 15U
+                ? UI_COLOR_DANGER_HEX
+                : (context->view.battery_percent <= 30U
+                    ? UI_COLOR_WARNING_HEX
+                    : UI_COLOR_SUCCESS_HEX));
+        /* 更新填充颜色。 */
+        lv_obj_set_style_bg_color(page->battery_fill, lv_color_hex(battery_color), LV_PART_MAIN);
+        /* 显示真实百分比；充电状态由填充颜色表达，避免顶栏文字拥挤。 */
+        lv_label_set_text_fmt(page->battery_label, "%u%%", (unsigned int)context->view.battery_percent);
+    }
+    /* BLE 已连接时状态点和文字使用绿色。 */
+    const uint32_t ble_color = context->view.ble_connected
+        ? UI_COLOR_SUCCESS_HEX
+        : UI_COLOR_MUTED_HEX;
+    /* 更新状态点颜色。 */
+    lv_obj_set_style_bg_color(page->ble_dot, lv_color_hex(ble_color), LV_PART_MAIN);
+    /* 更新文字颜色。 */
+    lv_obj_set_style_text_color(page->ble_label, lv_color_hex(ble_color), LV_PART_MAIN);
+    /* 显示稳定中文连接事实。 */
+    lv_label_set_text(page->ble_label, context->view.ble_connected ? "已连接" : "未连接");
+}
+
+/* 根据命令语义更新按钮视觉；命令本身仍由 presenter 决定。 */
+static void ui_lvgl_style_button(
+    lv_obj_t *button,
+    lv_obj_t *label,
+    ui_command_t command)
+{
+    /* 默认按钮使用抬升表面、冷灰描边和白字。 */
+    uint32_t background = UI_COLOR_RAISED_HEX;
+    /* 默认描边使用卡片边框色。 */
+    uint32_t border = UI_COLOR_BORDER_HEX;
+    /* 默认文字使用近白色。 */
+    uint32_t text = UI_COLOR_TEXT_HEX;
+    /* 开始、继续和完成属于主操作，常态直接使用品牌蓝。 */
+    if ((command == UI_COMMAND_START) ||
+        (command == UI_COMMAND_RESUME) ||
+        (command == UI_COMMAND_DONE)) {
+        /* 主操作填充品牌蓝。 */
+        background = UI_COLOR_ACCENT_HEX;
+        /* 主操作描边与填充一致。 */
+        border = UI_COLOR_ACCENT_HEX;
+    }
+    /* 停止确认和关机属于破坏性操作，使用低亮红底和红色文字。 */
+    if ((command == UI_COMMAND_CONFIRM_STOP) || (command == UI_COMMAND_SHUTDOWN)) {
+        /* 红色混入深背景，避免整块高亮造成误触吸引。 */
+        background = 0x281318U;
+        /* 描边使用系统红色。 */
+        border = UI_COLOR_DANGER_HEX;
+        /* 文字使用系统红色。 */
+        text = UI_COLOR_DANGER_HEX;
+    }
+    /* 写入常态背景。 */
+    lv_obj_set_style_bg_color(button, lv_color_hex(background), LV_PART_MAIN);
+    /* 写入一像素边框。 */
+    lv_obj_set_style_border_width(button, 1, LV_PART_MAIN);
+    /* 写入边框颜色。 */
+    lv_obj_set_style_border_color(button, lv_color_hex(border), LV_PART_MAIN);
+    /* 按下状态统一使用青色，提供即时触摸反馈。 */
+    lv_obj_set_style_bg_color(button, lv_color_hex(UI_COLOR_CYAN_HEX), LV_PART_MAIN | LV_STATE_PRESSED);
+    /* 更新按钮文字颜色。 */
+    lv_obj_set_style_text_color(label, lv_color_hex(text), LV_PART_MAIN);
 }
 
 /* 更新当前页面对象、按钮和轻量动画。 */
@@ -444,18 +798,42 @@ static void ui_lvgl_update_page(
 {
     /* 获取当前状态页面。 */
     ui_lvgl_page_t *page = &implementation->pages[context->state];
-    /* 更新标题文本。 */
-    lv_label_set_text(page->title_label, model->title);
-        /* 更新电池和 BLE 状态。 */
-        lv_label_set_text(page->status_label, model->status);
-        /* 更新主文本。 */
-        lv_label_set_text(page->primary_label, model->primary);
-        /* 更新次文本。 */
-        lv_label_set_text(page->secondary_label, model->secondary);
-        /* 更新页脚。 */
-        lv_label_set_text(page->footer_label, model->footer);
-        /* 更新五个固定按钮槽位；NONE 槽位保持隐藏。 */
-        for (size_t index = 0U; index < UI_PRESENTER_MAX_BUTTONS; ++index) {
+    /* 顶栏由真实电池与 BLE 字段独立渲染，不再依赖拼接字符串。 */
+    ui_lvgl_update_device_status(page, context);
+    /* 页面标题显示在主卡状态胶囊中。 */
+    lv_label_set_text(page->status_label, model->title);
+    /* 更新主文本。 */
+    lv_label_set_text(page->primary_label, model->primary);
+    /* 更新次文本。 */
+    lv_label_set_text(page->secondary_label, model->secondary);
+    /* 更新页脚。 */
+    lv_label_set_text(page->footer_label, model->footer);
+    /* 获取当前页面语义色。 */
+    const uint32_t semantic_color = ui_lvgl_semantic_color(context);
+    /* 状态胶囊使用深色表面和语义色描边。 */
+    lv_obj_set_style_bg_color(page->status_pill, lv_color_hex(UI_COLOR_RAISED_HEX), LV_PART_MAIN);
+    /* 状态胶囊使用一像素语义色描边。 */
+    lv_obj_set_style_border_width(page->status_pill, 1, LV_PART_MAIN);
+    /* 写入状态描边颜色。 */
+    lv_obj_set_style_border_color(page->status_pill, lv_color_hex(semantic_color), LV_PART_MAIN);
+    /* 状态文字使用同一语义色。 */
+    lv_obj_set_style_text_color(page->status_label, lv_color_hex(semantic_color), LV_PART_MAIN);
+    /* 活动轨道填充使用语义色。 */
+    lv_obj_set_style_bg_color(page->activity_fill, lv_color_hex(semantic_color), LV_PART_MAIN);
+    /* 活动门打开时轨道全长，休息时缩短但累计和动作不变。 */
+    const int32_t activity_width =
+        ((context->state == UI_STATE_RUNNING) && context->view.counting_enabled)
+            ? 306
+            : ((context->state == UI_STATE_PREPARE)
+                ? 204
+                : (((context->state == UI_STATE_PAUSED) ||
+                    ((context->state == UI_STATE_RUNNING) && !context->view.counting_enabled))
+                    ? 72
+                    : 122));
+    /* 更新状态轨道长度，不创建动画定时器。 */
+    lv_obj_set_width(page->activity_fill, activity_width);
+    /* 更新五个固定按钮槽位；NONE 槽位保持隐藏。 */
+    for (size_t index = 0U; index < UI_PRESENTER_MAX_BUTTONS; ++index) {
             /* 保存稳定渲染器指针和当前命令。 */
             implementation->bindings[context->state][index].renderer = renderer;
             /* 保存当前按钮命令。 */
@@ -471,6 +849,11 @@ static void ui_lvgl_update_page(
             lv_obj_remove_flag(page->buttons[index], LV_OBJ_FLAG_HIDDEN);
             /* 更新按钮文字。 */
             lv_label_set_text(page->button_labels[index], model->buttons[index].label);
+            /* 根据命令语义应用主操作、普通或破坏性样式。 */
+            ui_lvgl_style_button(
+                page->buttons[index],
+                page->button_labels[index],
+                model->buttons[index].command);
             /* 同步禁用状态。 */
             if (model->buttons[index].enabled) {
                 /* 有效命令允许点击。 */
@@ -479,13 +862,13 @@ static void ui_lvgl_update_page(
                 /* 无效命令显示禁用态。 */
                 lv_obj_add_state(page->buttons[index], LV_STATE_DISABLED);
             }
-        }
-    /* 页面切换时播放短淡入，避免大面积滑动动画。 */
+    }
+    /* 页面切换直接加载固定 screen，避免多轮训练积累 screen 动画生命周期。 */
     if (implementation->active_state != context->state) {
-        /* 产品模式保留短淡入；静态诊断模式禁止分块 QSPI 在旧/新 screen 间反复混合刷新。 */
+        /* 厂家 QSPI flush 为异步链；整页切换始终使用立即加载以保证触摸对象立即归属新 screen。 */
+        lv_screen_load(page->root);
+        /* 产品动画只保留 BOOT/SHUTDOWN 的局部文字反馈，不再动画加载整张 screen。 */
         if (renderer->animations_enabled) {
-            /* 150 ms 淡入只在已通过真板视觉门后使用。 */
-            lv_screen_load_anim(page->root, LV_SCR_LOAD_ANIM_FADE_IN, 150U, 0U, false);
             /* 读取产品动画配置。 */
             const ui_animation_profile_t animation = ui_default_animation_profile();
             /* BOOT 播放 800 ms 文字淡入。 */
@@ -498,9 +881,6 @@ static void ui_lvgl_update_page(
                 /* 关机主文案淡入后由电源状态机处理面板。 */
                 ui_lvgl_start_fade(page->primary_label, animation.shutdown_ms);
             }
-        } else {
-            /* 立即切换到已完整创建的 screen，避免旧 screen 与新中文字形交叉淡入。 */
-            lv_screen_load(page->root);
         }
         /* 保存当前页面。 */
         implementation->active_state = context->state;

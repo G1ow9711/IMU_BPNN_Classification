@@ -43,7 +43,7 @@ public sealed class DeviceEventV1
     /// <param name="action">模型动作索引 0～10，或 255 表示未知。</param>
     /// <param name="metricKind">指标单位：无、次、步或秒。</param>
     /// <param name="batteryPercent">电池百分比 0～100，或 255 表示未知。</param>
-    /// <param name="qualityFlags">传感器、振动替代和存储质量位图。</param>
+    /// <param name="qualityFlags">传感器、旧固件替代样本和存储质量位图。</param>
     /// <param name="sessionSequence">设备持久化会话序号。</param>
     /// <param name="eventSequence">当前会话内严格递增的事件序号。</param>
     /// <param name="stateRevision">事件对应的权威状态修订号。</param>

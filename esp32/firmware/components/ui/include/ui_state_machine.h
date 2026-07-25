@@ -55,7 +55,7 @@ typedef enum {
     UI_STATE_STOP_CONFIRM,
     /* 会话总结页；等待保存完成或用户确认返回主页。 */
     UI_STATE_SUMMARY,
-    /* 设置页修改亮度、振动和连接偏好；具体值由设置组件持久化。 */
+    /* 设置页修改亮度、熄屏和连接偏好；具体值由设置组件持久化。 */
     UI_STATE_SETTINGS,
     /* 诊断页展示板级自检、数据质量和 BLE 状态，不修改算法状态。 */
     UI_STATE_DIAGNOSTICS,
@@ -149,8 +149,6 @@ typedef struct {
     uint16_t screen_timeout_seconds;
     /* 保存偏好修订号，设备触屏或 PC 每次成功持久化后递增。 */
     uint32_t preferences_revision;
-    /* 标记有效计数、开始/暂停和提示是否允许驱动振动马达。 */
-    bool haptic_enabled;
     /* 保存模型置信度，单位为 0.01%，取值 0~10000。 */
     uint16_t confidence_centipercent;
     /* 保存电池百分比，取值 0~100；255 表示 PMIC 数据未知。 */

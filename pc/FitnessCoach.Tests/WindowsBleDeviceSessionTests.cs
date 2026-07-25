@@ -85,7 +85,7 @@ internal static class WindowsBleDeviceSessionTests
         // 核对 32 字节原始 SHA 转为 12 字符短值。
         Assert(manifest.BaseModelSha256Short == "8f66e344bcfa" && manifest.MaskedModelSha256Short == "57f4b2bca05d", "Manifest 模型 SHA 解码错误。" );
         // 核对小端能力和 64 位 LittleFS 容量。
-        Assert(manifest.Capabilities == 7U && manifest.LittleFsAvailableBytes == 0x0102030405060708UL, "Manifest 能力或 LittleFS 小端解码错误。" );
+        Assert(manifest.Capabilities == 6U && manifest.LittleFsAvailableBytes == 0x0102030405060708UL, "Manifest 能力或 LittleFS 小端解码错误。" );
         // 在尾部追加未知 tag，解析器必须按 length 跳过而不拒绝兼容设备。
         byte[] withUnknownTag = [.. FakeWindowsBleTransport.ManifestBytes, 0x80, 0x03, 0xAA, 0xBB, 0xCC];
         // 未知 tag 不改变必填字段。
@@ -143,10 +143,10 @@ internal static class WindowsBleDeviceSessionTests
         badClassCrc[FindManifestValueOffset(badClassCrc, 0x08) + 1] ^= 0x01;
         // 类别顺序 CRC 不匹配必须拒绝。
         AssertManifestRejected(badClassCrc, "错误类别 CRC 未拒绝。" );
-        // 能力位移除 LittleFS，只保留振动和历史。
+        // 能力位移除 LittleFS，只保留会话历史。
         byte[] badCapabilities = FakeWindowsBleTransport.ManifestBytes.ToArray();
-        // tag 0x0A 小端 uint32 低字节写为 3。
-        badCapabilities[FindManifestValueOffset(badCapabilities, 0x0A)] = 3;
+        // tag 0x0A 小端 uint32 低字节写为 2。
+        badCapabilities[FindManifestValueOffset(badCapabilities, 0x0A)] = 2;
         // 缺少 PC 必需能力必须拒绝连接。
         AssertManifestRejected(badCapabilities, "缺少必需能力位未拒绝。" );
     }
@@ -300,7 +300,7 @@ internal static class WindowsBleDeviceSessionTests
             diagnostics.BatteryPercent == 88 &&
             diagnostics.StateRevision == 6 &&
             diagnostics.ManifestSummary.Contains("基础模型摘要=8f66e344bcfa", StringComparison.Ordinal) &&
-            diagnostics.ManifestSummary.Contains("能力标志=0x00000007", StringComparison.Ordinal) &&
+            diagnostics.ManifestSummary.Contains("能力标志=0x00000006", StringComparison.Ordinal) &&
             diagnostics.ManifestSummary.Contains("内部文件系统可用量=72623859790382856 字节", StringComparison.Ordinal),
             "连接诊断快照字段错误。" );
         // 断言控制 indication、状态和事件通知均已订阅。
@@ -336,7 +336,7 @@ internal static class WindowsBleDeviceSessionTests
         // 下发 300kcal，协议使用 300000 milli-kcal。
         await session.SetGoalAsync(DeviceGoalKind.CaloriesMilliKcal, 300_000U);
         // 打开开发者模式并保存设备偏好。
-        await session.SetPreferencesAsync(new DevicePreferencesV1(35, true, false, 30, 9U, true));
+        await session.SetPreferencesAsync(new DevicePreferencesV1(35, false, 30, 9U, true));
         // 显式打开 RawStream。
         await session.SetRawStreamEnabledAsync(true);
 
@@ -795,7 +795,7 @@ internal static class WindowsBleDeviceSessionTests
             0xC5, 0x27, 0xE9, 0xDE, 0x2D, 0xCA, 0x8F, 0x27, 0x07, 0x20, 0x57, 0xF4, 0xB2, 0xBC, 0xA0, 0x5D,
             0xB7, 0x50, 0xCA, 0x73, 0x4E, 0x67, 0x4E, 0x20, 0x38, 0x12, 0xBE, 0xC1, 0xEA, 0x88, 0x4F, 0x16,
             0xA2, 0x01, 0x8D, 0xDF, 0x2E, 0x2C, 0xC7, 0xED, 0x5B, 0x3B, 0x08, 0x05, 0x0B, 0x27, 0x39, 0x19,
-            0xD8, 0x09, 0x02, 0x01, 0x00, 0x0A, 0x04, 0x07, 0x00, 0x00, 0x00, 0x0B, 0x08, 0x08, 0x07, 0x06,
+            0xD8, 0x09, 0x02, 0x01, 0x00, 0x0A, 0x04, 0x06, 0x00, 0x00, 0x00, 0x0B, 0x08, 0x08, 0x07, 0x06,
             0x05, 0x04, 0x03, 0x02, 0x01,
         ];
         // 当前 fake 返回的 Manifest；异常连接测试可替换为破坏后的独立副本。

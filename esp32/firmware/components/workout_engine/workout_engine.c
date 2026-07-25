@@ -11,14 +11,15 @@
 /* 编译期保证领域引擎和双 M0 头使用完全相同的 11 类输出宽度。 */
 _Static_assert(WORKOUT_CLASS_COUNT == CLASS_NUM, "workout/model class count mismatch");
 
-/* 与 imu_pipeline.h 第 4 位保持一致；该位只表示马达导通污染，不表示采样时间断流。 */
-#define WORKOUT_QUALITY_HAPTIC_CONTAMINATED (UINT16_C(1) << 4U)
+/* 与 imu_pipeline.h 第 4 位保持一致；该位只兼容旧执行器污染，不表示采样时间断流。 */
+#define WORKOUT_QUALITY_LEGACY_ACTUATOR_CONTAMINATED (UINT16_C(1) << 4U)
+/* 与 imu_pipeline.h 第 7 位保持一致；该位表示双 M0 未产生可信 logits。 */
+#define WORKOUT_QUALITY_INFERENCE_FAILED (UINT16_C(1) << 7U)
 /* 位 0～3、5、6 分别表示加速度/角速度缺口、乱序、队列溢出、驱动丢样和重采样重置。 */
 #define WORKOUT_QUALITY_TIMELINE_BREAK_MASK \
     ((UINT16_C(1) << 0U) | (UINT16_C(1) << 1U) | \
      (UINT16_C(1) << 2U) | (UINT16_C(1) << 3U) | \
      (UINT16_C(1) << 5U) | (UINT16_C(1) << 6U))
-
 /* 判断动作是否属于 8 个完整周期计数动作。 */
 static bool workout_action_is_repetition(const fitness_action_t action)
 {
@@ -285,45 +286,6 @@ static void workout_buffer_prelock_sample(
     }
 }
 
-/* 初始化开合跳三轴加速度峰谷状态；任一失败都拒绝进入半初始化会话。 */
-static workout_status_t workout_init_jumping_jack_periodic(workout_engine_t *engine)
-{
-    /* 训练引擎必须存在。 */
-    if (engine == NULL) {
-        /* 空对象无法保存三个轴状态。 */
-        return WORKOUT_STATUS_ERR_ARGUMENT;
-    }
-    /* ax、ay、az 三个加速度轴分别建立 11+5 均值和峰谷配对器。 */
-    for (uint8_t axis = 0U; axis < WORKOUT_JUMPING_JACK_AXIS_COUNT; ++axis) {
-        /* 当前轴从零建立静态滤波和未配对极值状态。 */
-        if (motion_periodic_pair_init(
-                &engine->jumping_jack_pair_detectors[axis]) != MOTION_PHASE_OK) {
-            /* 任一轴初始化失败都拒绝运行，防止中位数缺轴。 */
-            return WORKOUT_STATUS_ERR_DOMAIN;
-        }
-    }
-    /* 新会话尚未把任何三轴中位数写入权威领域会话。 */
-    engine->jumping_jack_reported_repetitions = 0ULL;
-    /* 三轴峰谷状态初始化完成。 */
-    return WORKOUT_STATUS_OK;
-}
-
-/* 清空开合跳三个轴的滤波与未完成峰谷；保留各轴累计和已发布中位数。 */
-static void workout_reset_jumping_jack_periodic_cycles(workout_engine_t *engine)
-{
-    /* 空对象没有可重置状态。 */
-    if (engine == NULL) {
-        /* 防御性返回。 */
-        return;
-    }
-    /* 三个轴必须同步清空，避免暂停或采样间断两侧拼成伪峰谷对。 */
-    for (uint8_t axis = 0U; axis < WORKOUT_JUMPING_JACK_AXIS_COUNT; ++axis) {
-        /* 清空当前轴滤波、极值、不应期和时间线，但保留 total_pairs。 */
-        motion_periodic_pair_reset_cycle(
-            &engine->jumping_jack_pair_detectors[axis]);
-    }
-}
-
 /* 清空当前主动作尚未闭合的计数证据；保留会话主动作、累计次数、步数和事件序号。 */
 static void workout_reset_incomplete_counting(workout_engine_t *engine)
 {
@@ -340,14 +302,234 @@ static void workout_reset_incomplete_counting(workout_engine_t *engine)
         /* 已锁类重复动作的计数器必已初始化；失败不回滚历史累计。 */
         (void)fitness_rep_counter_reset_cycle(&engine->rep_counter);
     }
-    /* 开合跳三轴峰谷必须同步清空，禁止休息前后两段拼成一个周期。 */
-    if (engine->selected_action == (uint8_t)FITNESS_ACTION_JUMPING_JACK) {
-        /* 只清滤波、极值和不应期；各轴 total_pairs 与权威累计保留。 */
-        workout_reset_jumping_jack_periodic_cycles(engine);
-    }
 }
 
-/* 锁类后按时间顺序补算准备期样本；MetricEvent 已进入会话累计，振动进入同一 FIFO。 */
+/* 清空 25 点活动统计历史；调用方决定是否保留当前计数许可。 */
+static void workout_reset_activity_window(workout_engine_t *engine)
+{
+    /* 空对象没有可清理的活动状态。 */
+    if (engine == NULL) {
+        /* 防御性返回。 */
+        return;
+    }
+    /* 清空加速度模长环，单位 g；防止旧会话或时间线另一侧进入新方差。 */
+    (void)memset(
+        engine->activity_acceleration_magnitude_g,
+        0,
+        sizeof(engine->activity_acceleration_magnitude_g));
+    /* 清空角速度模长环，单位 deg/s。 */
+    (void)memset(
+        engine->activity_gyro_magnitude_dps,
+        0,
+        sizeof(engine->activity_gyro_magnitude_dps));
+    /* 清空逐点活动标志环。 */
+    (void)memset(
+        engine->activity_point_active,
+        0,
+        sizeof(engine->activity_point_active));
+    /* 下一干净点从槽位零写入。 */
+    engine->activity_write_index = 0U;
+    /* 当前窗没有有效点。 */
+    engine->activity_sample_count = 0U;
+    /* 当前窗没有过门活动点。 */
+    engine->activity_active_point_count = 0U;
+    /* 清空前一加速度向量，三个元素单位均为 g。 */
+    (void)memset(
+        engine->activity_previous_acceleration_g,
+        0,
+        sizeof(engine->activity_previous_acceleration_g));
+    /* 下一点的加速度差分固定为零，与 Python instantaneous_motion 首点一致。 */
+    engine->activity_previous_acceleration_valid = false;
+}
+
+/*
+ * 用一个干净 25 Hz 六轴点更新训练同源活动门。
+ * 公式为 M=std(|a|)+std(|g|)/200，且至少 5/25 点满足 |Δa|+|g|/200>T_active。
+ * 时间复杂度 O(25)，空间固定 225 字节；25 Hz 下每秒仅约 625 次标量累加。
+ */
+static workout_status_t workout_update_activity_gate(
+    workout_engine_t *engine,
+    const motion_phase_sample_t *sample)
+{
+    /* 引擎、样本和已锁定动作必须有效。 */
+    if ((engine == NULL) || (sample == NULL) ||
+        (engine->selected_action >= (uint8_t)FITNESS_ACTION_COUNT)) {
+        /* 无法安全更新活动窗。 */
+        return WORKOUT_STATUS_ERR_ARGUMENT;
+    }
+    /* 六轴任一 NaN/Inf 都会污染模长、方差和长期门状态，因此整点拒绝。 */
+    for (uint8_t axis = 0U; axis < FITNESS_IMU_AXIS_COUNT; ++axis) {
+        /* isfinite=false 表示当前物理量非法。 */
+        if (!isfinite(sample->axis[axis])) {
+            /* 原活动窗保持不变。 */
+            return WORKOUT_STATUS_ERR_ARGUMENT;
+        }
+    }
+    /* 角速度模长输入 gx、gy、gz，单位 deg/s。 */
+    const float gyro_magnitude_dps = sqrtf(
+        (sample->axis[0] * sample->axis[0]) +
+        (sample->axis[1] * sample->axis[1]) +
+        (sample->axis[2] * sample->axis[2]));
+    /* 加速度模长输入 ax、ay、az，单位 g。 */
+    const float acceleration_magnitude_g = sqrtf(
+        (sample->axis[3] * sample->axis[3]) +
+        (sample->axis[4] * sample->axis[4]) +
+        (sample->axis[5] * sample->axis[5]));
+    /* 首个干净点没有前项，|Δa| 按训练端约定为零。 */
+    float acceleration_delta_g = 0.0F;
+    /* 有前一干净加速度时计算三轴向量差模，单位 g。 */
+    if (engine->activity_previous_acceleration_valid) {
+        /* 保存 ax 差值。 */
+        const float delta_x_g =
+            sample->axis[3] - engine->activity_previous_acceleration_g[0];
+        /* 保存 ay 差值。 */
+        const float delta_y_g =
+            sample->axis[4] - engine->activity_previous_acceleration_g[1];
+        /* 保存 az 差值。 */
+        const float delta_z_g =
+            sample->axis[5] - engine->activity_previous_acceleration_g[2];
+        /* 计算 |Δa|，与 Python np.linalg.norm(diff(acc)) 一致。 */
+        acceleration_delta_g = sqrtf(
+            (delta_x_g * delta_x_g) +
+            (delta_y_g * delta_y_g) +
+            (delta_z_g * delta_z_g));
+    }
+    /* 保存当前加速度为下一干净点的差分基准，顺序固定 ax、ay、az。 */
+    engine->activity_previous_acceleration_g[0] = sample->axis[3];
+    /* 保存 ay，单位 g。 */
+    engine->activity_previous_acceleration_g[1] = sample->axis[4];
+    /* 保存 az，单位 g。 */
+    engine->activity_previous_acceleration_g[2] = sample->axis[5];
+    /* 后续点可以计算加速度向量差。 */
+    engine->activity_previous_acceleration_valid = true;
+    /* 逐点活动分数无量纲；200 deg/s 归一化与训练端完全相同。 */
+    const float point_motion_score =
+        acceleration_delta_g + (gyro_magnitude_dps / 200.0F);
+    /* 严格大于训练阈值时记为活动点，平局按非活动处理。 */
+    const uint8_t point_active =
+        point_motion_score > ACTIVE_POINT_THRESHOLD ? 1U : 0U;
+    /* 当前写槽在满窗时保存即将被移出的最旧活动标志。 */
+    const uint8_t write_index = engine->activity_write_index;
+    /* 满窗覆盖前先从 O(1) 活动计数中删除旧标志。 */
+    if (engine->activity_sample_count == WORKOUT_ACTIVITY_WINDOW_SAMPLES) {
+        /* 旧值仅为 0/1，不会使无符号计数下溢。 */
+        engine->activity_active_point_count -=
+            engine->activity_point_active[write_index];
+    } else {
+        /* 窗未满时新增一个有效槽。 */
+        engine->activity_sample_count += 1U;
+    }
+    /* 写入当前加速度模长，单位 g。 */
+    engine->activity_acceleration_magnitude_g[write_index] =
+        acceleration_magnitude_g;
+    /* 写入当前角速度模长，单位 deg/s。 */
+    engine->activity_gyro_magnitude_dps[write_index] = gyro_magnitude_dps;
+    /* 写入当前逐点活动标志。 */
+    engine->activity_point_active[write_index] = point_active;
+    /* O(1) 累加当前标志。 */
+    engine->activity_active_point_count += point_active;
+    /* 写指针循环前进，范围保持 0..24。 */
+    engine->activity_write_index = (uint8_t)(
+        (write_index + 1U) % WORKOUT_ACTIVITY_WINDOW_SAMPLES);
+    /* 未满一秒时保留锁类或上次完整窗的门状态，避免启动期人为漏掉首个慢动作。 */
+    if (engine->activity_sample_count < WORKOUT_ACTIVITY_WINDOW_SAMPLES) {
+        /* 当前样本已安全写入。 */
+        return WORKOUT_STATUS_OK;
+    }
+    /* 静坐是目标动作本身，不使用动态活动门冻结其持续时间。 */
+    if (engine->selected_action == (uint8_t)FITNESS_ACTION_SIT) {
+        /* 静坐会话始终允许 fitness_session_tick 产生整秒事件。 */
+        engine->classification_consistent = true;
+        /* 当前窗处理完成。 */
+        return WORKOUT_STATUS_OK;
+    }
+    /* 分别累计 |a|、|a|²、|g|、|g|²，按总体方差复现 NumPy std(ddof=0)。 */
+    float acceleration_sum_g = 0.0F;
+    /* 加速度平方和单位 g²。 */
+    float acceleration_square_sum_g2 = 0.0F;
+    /* 角速度和单位 deg/s。 */
+    float gyro_sum_dps = 0.0F;
+    /* 角速度平方和单位 (deg/s)²。 */
+    float gyro_square_sum_dps2 = 0.0F;
+    /* 固定遍历完整 25 点窗，时间复杂度 O(25)。 */
+    for (uint8_t index = 0U; index < WORKOUT_ACTIVITY_WINDOW_SAMPLES; ++index) {
+        /* 读取一个加速度模长。 */
+        const float acc_g = engine->activity_acceleration_magnitude_g[index];
+        /* 读取一个角速度模长。 */
+        const float gyro_dps = engine->activity_gyro_magnitude_dps[index];
+        /* 累加加速度模长。 */
+        acceleration_sum_g += acc_g;
+        /* 累加加速度模长平方。 */
+        acceleration_square_sum_g2 += acc_g * acc_g;
+        /* 累加角速度模长。 */
+        gyro_sum_dps += gyro_dps;
+        /* 累加角速度模长平方。 */
+        gyro_square_sum_dps2 += gyro_dps * gyro_dps;
+    }
+    /* 点数倒数固定为 1/25，避免运行时整数除法语义歧义。 */
+    const float inverse_count = 1.0F / (float)WORKOUT_ACTIVITY_WINDOW_SAMPLES;
+    /* 计算加速度模长总体均值。 */
+    const float acceleration_mean_g = acceleration_sum_g * inverse_count;
+    /* 计算角速度模长总体均值。 */
+    const float gyro_mean_dps = gyro_sum_dps * inverse_count;
+    /* 方差理论非负；浮点消减误差导致负小量时夹紧为零。 */
+    float acceleration_variance_g2 =
+        (acceleration_square_sum_g2 * inverse_count) -
+        (acceleration_mean_g * acceleration_mean_g);
+    /* 同样计算角速度总体方差。 */
+    float gyro_variance_dps2 =
+        (gyro_square_sum_dps2 * inverse_count) -
+        (gyro_mean_dps * gyro_mean_dps);
+    /* 夹紧加速度负零附近误差，避免 sqrtf 产生 NaN。 */
+    if (acceleration_variance_g2 < 0.0F) {
+        /* 常量窗方差定义为零。 */
+        acceleration_variance_g2 = 0.0F;
+    }
+    /* 夹紧角速度负零附近误差。 */
+    if (gyro_variance_dps2 < 0.0F) {
+        /* 常量窗方差定义为零。 */
+        gyro_variance_dps2 = 0.0F;
+    }
+    /* 组合活动分数与 Python motion_score 完全同式，无量纲。 */
+    const float window_motion_score =
+        sqrtf(acceleration_variance_g2) +
+        (sqrtf(gyro_variance_dps2) / 200.0F);
+    /* 双门同时满足才判为运动，抑制单个尖峰和纯静止姿态漂移。 */
+    const bool motion_detected =
+        (window_motion_score >= REST_MOTION_THRESHOLD) &&
+        (engine->activity_active_point_count >=
+         WORKOUT_ACTIVITY_MIN_ACTIVE_POINTS);
+    /* 首次检测到运动后，后续完整静止窗才有权关闭计数。 */
+    if (motion_detected) {
+        /* 记录本轮已越过准备上下文并进入真实运动。 */
+        engine->activity_gate_has_seen_motion = true;
+    }
+    /* 完整一秒窗没有任何逐点活动且整体低于静止门，才确认用户已经休息。 */
+    const bool rest_detected =
+        (window_motion_score < REST_MOTION_THRESHOLD) &&
+        (engine->activity_active_point_count == 0U);
+    /* 默认保持旧门状态，给 1～4 个边界活动点形成迟滞区，避免步峰附近反复开关。 */
+    bool next_counting_enabled = engine->classification_consistent;
+    /* 满足双活动门时立即打开或保持打开。 */
+    if (motion_detected) {
+        /* 真实运动恢复后允许推进当前主动作。 */
+        next_counting_enabled = true;
+    } else if (engine->activity_gate_has_seen_motion && rest_detected) {
+        /* 只有已见过运动后的完整静止窗才能关闭，准备上下文不截断首周期。 */
+        next_counting_enabled = false;
+    }
+    /* 只有门状态变化时清空一次半周期，禁止休息前后拼接成伪次数。 */
+    if (next_counting_enabled != engine->classification_consistent) {
+        /* 提交新的活动门状态。 */
+        engine->classification_consistent = next_counting_enabled;
+        /* 冻结和恢复两侧都从完整新周期开始。 */
+        workout_reset_incomplete_counting(engine);
+    }
+    /* 当前活动窗更新成功。 */
+    return WORKOUT_STATUS_OK;
+}
+
+/* 锁类后按时间顺序补算准备期样本；MetricEvent 进入会话累计和回放事件 FIFO。 */
 static workout_status_t workout_replay_prelock_samples(workout_engine_t *engine)
 {
     /* 计算最旧有效点槽位；未满时从 0 开始，满时 write_index 正好指向最旧点。 */
@@ -369,7 +551,7 @@ static workout_status_t workout_replay_prelock_samples(workout_engine_t *engine)
         fitness_metric_event_t replay_event;
         /* 保存当前补算点是否闭合一个动作周期。 */
         bool replay_emitted = false;
-        /* 复用正式运行计数链，保证相位、热量、事件和振动规则完全一致。 */
+        /* 复用正式运行计数链，保证相位、热量和事件规则完全一致。 */
         const workout_status_t replay_status = workout_engine_push_sample(
             engine,
             &buffered->sample,
@@ -398,6 +580,11 @@ static workout_status_t workout_replay_prelock_samples(workout_engine_t *engine)
             /* 有效事件数增加一。 */
             engine->replay_metric_event_count += 1U;
         }
+    }
+    /* 有准备缓存时锁类阶段已经观察过原始时间线；后续完整静止窗必须能够关闭计数。 */
+    if (engine->prelock_sample_count > 0U) {
+        /* 缓存内若尚未形成完整活动窗，模型锁类仍作为已开始运动的补充证据。 */
+        engine->activity_gate_has_seen_motion = true;
     }
     /* 补算完成后清空缓存，避免后续推理重复计数同一批样本。 */
     workout_clear_prelock_samples(engine);
@@ -437,16 +624,6 @@ static workout_status_t workout_lock_action(
             return WORKOUT_STATUS_ERR_DOMAIN;
         }
     }
-    /* 开合跳额外初始化 gx、gy、gz 三条独立周期链；通用计数器保留给统一快照合同。 */
-    if (action == FITNESS_ACTION_JUMPING_JACK) {
-        /* 初始化失败时停止已建领域会话，不能带部分轴状态进入补算。 */
-        if (workout_init_jumping_jack_periodic(engine) != WORKOUT_STATUS_OK) {
-            /* 停止领域会话。 */
-            (void)fitness_session_stop(&engine->fitness_session);
-            /* 返回领域错误。 */
-            return WORKOUT_STATUS_ERR_DOMAIN;
-        }
-    }
     /* walk/trot 初始化步峰生理去重器。 */
     if (workout_action_is_step(action)) {
         /* 初始化失败时回滚。 */
@@ -459,9 +636,12 @@ static workout_status_t workout_lock_action(
     }
     /* 保存锁定动作。 */
     engine->selected_action = (uint8_t)action;
-    /* 锁定来源就是当前累计分类，因此初始计数分类一致。 */
-    engine->classification_consistent =
-        engine->inferred_action == engine->selected_action;
+    /* 新动作从空活动窗开始，准备期补算将按真实样本重建一秒统计。 */
+    workout_reset_activity_window(engine);
+    /* 首次完整活动窗出现前只做滤波预热，禁止首动作前沿触发一次假冻结。 */
+    engine->activity_gate_has_seen_motion = false;
+    /* 锁类本身证明动作已开始；活动窗未满前先放行，避免慢动作首周期被人为截断。 */
+    engine->classification_consistent = true;
     /* 切换到运行状态。 */
     engine->state = WORKOUT_STATE_RUNNING;
     /* 补算首窗内已经完成的动作；失败时协调器不会提交候选引擎副本。 */
@@ -473,7 +653,7 @@ static workout_status_t workout_lock_action(
         /* 返回真实补算错误。 */
         return replay_status;
     }
-    /* 不发送“开始”马达反馈，避免锁类时的振动污染紧接着的第一个实时动作。 */
+    /* 锁类只建立会话和计数器，不产生任何硬件反馈。 */
     /* 锁定成功。 */
     return WORKOUT_STATUS_OK;
 }
@@ -497,8 +677,6 @@ void workout_engine_init(workout_engine_t *engine)
     engine->selected_action = WORKOUT_ACTION_UNKNOWN;
     /* 未锁定时不得推进相位和次数。 */
     engine->classification_consistent = false;
-    /* 显式初始化振动 FIFO。 */
-    fitness_haptic_queue_init(&engine->haptic_queue);
 }
 
 workout_status_t workout_engine_start(
@@ -547,10 +725,10 @@ void workout_engine_reset_bout_evidence(workout_engine_t *engine)
         /* 边界质量点随后写入准备缓存；重放时它只切断未完成半周期。 */
         return;
     }
-    /* RUNNING 的连续性边界必须冻结计数，直到新的干净同类窗口恢复。 */
+    /* RUNNING 连续性边界只切断跨缺口周期，不再等待新的模型窗口。 */
     if (engine->state == WORKOUT_STATE_RUNNING) {
-        /* 清空过期诊断累计并关闭计数门；selected_action 和权威累计保持。 */
-        workout_reset_bout(engine);
+        /* 清空跨时间线的 25 点统计和加速度差分；当前门状态暂时保留。 */
+        workout_reset_activity_window(engine);
         /* 清除边界前未完成相位，禁止与边界后的腕部动作拼接。 */
         workout_reset_incomplete_counting(engine);
     }
@@ -584,7 +762,7 @@ workout_status_t workout_engine_push_inference(
     /* 保存最新质量位供 UI/BLE 快照。 */
     engine->quality_flags = quality_flags;
 
-    /* RUNNING 保持会话主动作不变，但实时类别决定该主动作计数器是否可继续。 */
+    /* RUNNING 保持会话主动作和计数许可不变，模型窗口只进入诊断。 */
     if (engine->state == WORKOUT_STATE_RUNNING) {
         /* 保存当前窗口诊断最优类别，但该类别不成为新的 selected_action。 */
         uint8_t window_class = WORKOUT_ACTION_UNKNOWN;
@@ -604,38 +782,40 @@ workout_status_t workout_engine_push_inference(
         engine->candidate_windows = 0U;
         /* 对外公开本窗真实类别；selected_action 继续保存本次会话主动作和计数器类型。 */
         engine->inferred_action = window_class;
-        /* 保存更新前门状态，用于只在冻结或恢复边界清空一次未完成周期。 */
-        const bool was_consistent = engine->classification_consistent;
-        /* 只有实时类别与主动作一致且置信度过门，当前窗才可能允许计数。 */
-        const bool same_confident_action =
-            (window_class == engine->selected_action) &&
-            (engine->confidence_q15 >= WORKOUT_ACTION_LOCK_CONFIDENCE_Q15);
-        /* 异类或低置信窗口立即冻结；站立、静坐和切换动作均进入该分支。 */
-        if (!same_confident_action) {
-            /* 当前窗口不能证明用户仍在执行本轮主动作。 */
-            engine->classification_consistent = false;
-        } else if (quality_flags == 0U) {
-            /* 只有零质量告警的同类高置信窗口能够恢复计数。 */
-            engine->classification_consistent = true;
-        }
-        /* 同类但带质量告警的窗口保持原门状态，既不误恢复也不因边界标志重复冻结。 */
-        if (engine->classification_consistent != was_consistent) {
-            /* 冻结和恢复两侧都清空半周期，恢复后必须从全新完整周期开始。 */
-            workout_reset_incomplete_counting(engine);
-        }
-        /* 诊断更新成功。 */
+        /* 后续 Top-1、置信度和质量位只供 CSV/调试；活动门在逐样本入口独立更新。 */
+        /* 诊断更新成功，selected_action、相位和计数许可均保持。 */
         return WORKOUT_STATUS_OK;
     }
 
-    /* PREPARING 只累计零质量告警窗口；告警窗不能锁类，也不能删除先前干净证据。 */
-    if (quality_flags != 0U) {
-        /* 等待下一完整干净窗继续相同候选。 */
+    /*
+     * 62 点窗口只有在双 M0 前向失败或旧版执行器污染时拒绝。
+     * 时间线重置位属于窗口开始前的来源事实：imu_pipeline 已先清空环形区，再积满 62 个
+     * 新连续点才推理，因此该位不能让一个完整模型窗再等待 2.48 秒。
+     */
+    if ((quality_flags &
+         (WORKOUT_QUALITY_INFERENCE_FAILED |
+          WORKOUT_QUALITY_LEGACY_ACTUATOR_CONTAMINATED)) != 0U) {
+        /* 等待下一次成功且无旧执行器污染的完整窗口。 */
         return WORKOUT_STATUS_IGNORED;
     }
 
-    /* 保存当前窗口加入后的 11 类动作段平均 logits，作为准备态唯一锁类证据。 */
+    /* 保存当前独立窗口最优类别；连续门不能被更早的强错误窗口拖住。 */
+    uint8_t window_class = WORKOUT_ACTION_UNKNOWN;
+    /* 保存当前独立窗口 0..65535 的 softmax 概率。 */
+    uint16_t window_confidence_q15 = 0U;
+    /* 对本窗执行有限值校验、Top-1 和数值稳定 softmax。 */
+    const workout_status_t window_classify_status = workout_classify_single_window(
+        logits,
+        &window_class,
+        &window_confidence_q15);
+    /* 非有限 logits 或概率异常不能进入累计器或候选状态。 */
+    if (window_classify_status != WORKOUT_STATUS_OK) {
+        /* 传播精确错误。 */
+        return window_classify_status;
+    }
+    /* 保存当前窗口加入后的 11 类动作段平均 logits，供第四窗有界兜底。 */
     float averaged_logits[WORKOUT_CLASS_COUNT];
-    /* 累计器从会话起点纳入当前及历史窗口，减弱动作起步瞬态误窗。 */
+    /* 累计器从会话起点纳入当前及历史窗口，只承担不稳定会话的最终兜底。 */
     const int inferred_class = workout_update_bout_accumulator(
         engine,
         logits,
@@ -646,33 +826,43 @@ workout_status_t workout_engine_push_inference(
         return WORKOUT_STATUS_ERR_ARGUMENT;
     }
     /* 累计 argmax 已由 Python/C 同源 BpBoutAccumulator 返回，范围固定为 0..10。 */
-    const uint8_t best_class = (uint8_t)inferred_class;
-    /* 对累计平均 logits 计算数值稳定 softmax 概率，与离线策略审计一致。 */
-    const workout_status_t confidence_status = workout_confidence_from_averaged_logits(
+    const uint8_t cumulative_best_class = (uint8_t)inferred_class;
+    /* 保存累计平均 logits 的 Q15 概率，只在第四窗兜底时公开。 */
+    uint16_t cumulative_confidence_q15 = 0U;
+    /* 对累计平均 logits 计算数值稳定 softmax，与冻结验证器兜底完全一致。 */
+    const workout_status_t cumulative_confidence_status =
+        workout_confidence_from_averaged_logits(
         averaged_logits,
-        best_class,
-        &engine->confidence_q15);
+        cumulative_best_class,
+        &cumulative_confidence_q15);
     /* 计算异常直接返回。 */
-    if (confidence_status != WORKOUT_STATUS_OK) {
+    if (cumulative_confidence_status != WORKOUT_STATUS_OK) {
         /* 传播错误。 */
-        return confidence_status;
+        return cumulative_confidence_status;
     }
-    /* 每窗立即公开当前累计候选，UI 可在正式锁定前显示“识别中”的暂定动作。 */
-    engine->inferred_action = best_class;
-    /* 累计最优类保持不变时增加连续证据，否则新类从第一窗重新计数。 */
-    if (engine->candidate_action == best_class) {
+    /* 每窗立即公开独立窗口候选，UI 可准确反映起手类别如何变化。 */
+    engine->inferred_action = window_class;
+    /* 正常确认阶段公开当前独立窗口概率。 */
+    engine->confidence_q15 = window_confidence_q15;
+    /* 低置信窗口切断连续证据，后续必须重新形成两个完整可信窗口。 */
+    if (window_confidence_q15 < WORKOUT_ACTION_LOCK_CONFIDENCE_Q15) {
+        /* 未知候选表示本窗不参与连续确认。 */
+        engine->candidate_action = WORKOUT_ACTION_UNKNOWN;
+        /* 清零连续可信窗口数。 */
+        engine->candidate_windows = 0U;
+    } else if (engine->candidate_action == window_class) {
+        /* 独立窗口同类且仍过概率门时增加连续证据。 */
         /* 准备态最多四窗，uint8 不会溢出。 */
         engine->candidate_windows += 1U;
     } else {
-        /* 保存新的累计候选类。 */
-        engine->candidate_action = best_class;
+        /* 保存新的高置信独立窗口候选类。 */
+        engine->candidate_action = window_class;
         /* 当前窗口是该候选的第一份连续证据。 */
         engine->candidate_windows = 1U;
     }
-    /* stable_and_confident 表示验证集选择的正常锁定门已满足。 */
+    /* stable_and_confident 表示同一独立类别已连续两窗通过 50% 概率门。 */
     const bool stable_and_confident =
-        (engine->candidate_windows >= WORKOUT_ACTION_LOCK_WINDOWS) &&
-        (engine->confidence_q15 >= WORKOUT_ACTION_LOCK_CONFIDENCE_Q15);
+        engine->candidate_windows >= WORKOUT_ACTION_LOCK_WINDOWS;
     /* reached_bounded_limit 保证低置信会话最迟第四窗结束准备，不永久停留。 */
     const bool reached_bounded_limit =
         engine->bout_window_count >= WORKOUT_ACTION_MAX_PREPARE_WINDOWS;
@@ -681,10 +871,20 @@ workout_status_t workout_engine_push_inference(
         /* 当前已输出候选和置信度，但尚未提交 selected_action。 */
         return WORKOUT_STATUS_IGNORED;
     }
-    /* 累计确认或第四窗兜底后初始化本次唯一动作会话并补算准备点。 */
+    /* 正常门锁定连续独立候选；不稳定第四窗才锁定累计平均 Top-1。 */
+    const uint8_t lock_class =
+        stable_and_confident ? engine->candidate_action : cumulative_best_class;
+    /* 第四窗兜底时把公开诊断切换到真正提交的累计类别和概率。 */
+    if (!stable_and_confident) {
+        /* 公开最终累计兜底类别。 */
+        engine->inferred_action = cumulative_best_class;
+        /* 公开累计兜底概率，避免 UI 显示最后一个无效单窗的概率。 */
+        engine->confidence_q15 = cumulative_confidence_q15;
+    }
+    /* 连续独立确认或第四窗累计兜底后初始化本次唯一动作并补算准备点。 */
     const workout_status_t lock_status = workout_lock_action(
         engine,
-        (fitness_action_t)best_class);
+        (fitness_action_t)lock_class);
     /* 锁定失败时返回下游错误。 */
     if (lock_status != WORKOUT_STATUS_OK) {
         /* 传播错误。 */
@@ -693,147 +893,6 @@ workout_status_t workout_engine_push_inference(
     /* 标记本次发生锁定，UI 从 PREPARE 进入 RUNNING。 */
     *action_locked = true;
     /* 返回成功。 */
-    return WORKOUT_STATUS_OK;
-}
-
-/* 返回三个无符号累计值的中位数；比较法避免 a+b+c 在多年运行后溢出。 */
-static uint64_t workout_median_three_u64(
-    const uint64_t a,
-    const uint64_t b,
-    const uint64_t c)
-{
-    /* b 同时位于 a 与 c 之间时直接返回 b。 */
-    if (((a <= b) && (b <= c)) || ((c <= b) && (b <= a))) {
-        /* b 是中位数。 */
-        return b;
-    }
-    /* a 同时位于 b 与 c 之间时返回 a。 */
-    if (((b <= a) && (a <= c)) || ((c <= a) && (a <= b))) {
-        /* a 是中位数。 */
-        return a;
-    }
-    /* 其余有序关系下 c 必然位于 a 与 b 之间。 */
-    return c;
-}
-
-/*
- * 推进开合跳三轴加速度峰谷计数。
- * 每轴用 11+5 均值检测相邻峰谷；权威次数取三个单调累计的中位数，抑制单轴噪声。
- * 时间复杂度 O(3)，空间为三组固定环形数组，无堆分配；一个峰和一个谷直接计一次，不乘二。
- */
-static workout_status_t workout_push_jumping_jack_periodic(
-    workout_engine_t *engine,
-    const motion_phase_sample_t *sample,
-    bool *rep_accepted)
-{
-    /* 引擎、六轴点和输出地址必须有效。 */
-    if ((engine == NULL) || (sample == NULL) || (rep_accepted == NULL)) {
-        /* 无法安全推进三轴状态。 */
-        return WORKOUT_STATUS_ERR_ARGUMENT;
-    }
-    /* 默认当前点没有产生权威次数。 */
-    *rep_accepted = false;
-    /* true 表示检测到超过 120 ms 的采样间断，三个轴都必须清空未完成周期。 */
-    bool gap_detected = false;
-    /* 同一六轴点依次送入 ax、ay、az 三个独立流式峰谷检测器。 */
-    for (uint8_t axis = 0U; axis < WORKOUT_JUMPING_JACK_AXIS_COUNT; ++axis) {
-        /* axis_completed 保存当前点是否使该轴 total_pairs 增加一次。 */
-        bool axis_completed = false;
-        /* 加速度从六轴数组下标 3 开始，输入单位固定为 g。 */
-        const motion_phase_status_t phase_status = motion_periodic_pair_push(
-            &engine->jumping_jack_pair_detectors[axis],
-            sample->monotonic_ms,
-            sample->axis[3U + axis],
-            &axis_completed);
-        /* 显式读取轴完成标志；公开事件由累计中位数而非任一单轴决定。 */
-        (void)axis_completed;
-        /* 任一轴报告采样间断时先完成其它轴检查，随后统一重置。 */
-        if (phase_status == MOTION_PHASE_GAP_RESET) {
-            /* 记录间断，不使用当前轴观测。 */
-            gap_detected = true;
-            /* 继续让其它轴消费同一时间戳，使三个检测器时间线一致。 */
-            continue;
-        }
-        /* 其它相位错误说明输入或内部状态无效。 */
-        if (phase_status != MOTION_PHASE_OK) {
-            /* 映射为训练领域错误。 */
-            return WORKOUT_STATUS_ERR_DOMAIN;
-        }
-    }
-    /* 间断优先于当前点候选，防止跨缺口拼接和部分轴状态不一致。 */
-    if (gap_detected) {
-        /* 三个轴同步清空未完成周期。 */
-        workout_reset_jumping_jack_periodic_cycles(engine);
-        /* 真实缺口是已成功消费的非致命边界；返回 OK 使协调器提交重置后的候选副本。 */
-        return WORKOUT_STATUS_OK;
-    }
-    /* 读取三个轴的单调累计；数组顺序固定 ax、ay、az。 */
-    const uint64_t fused_repetitions = workout_median_three_u64(
-        engine->jumping_jack_pair_detectors[0].total_pairs,
-        engine->jumping_jack_pair_detectors[1].total_pairs,
-        engine->jumping_jack_pair_detectors[2].total_pairs);
-    /* 中位数未超过已发布值时，当前单轴变化不足以形成权威次数。 */
-    if (fused_repetitions <= engine->jumping_jack_reported_repetitions) {
-        /* 正常返回，不产生 MetricEvent。 */
-        return WORKOUT_STATUS_OK;
-    }
-    /* 单个原始点每轴最多增加一次，因此中位数不允许跨越两个以上次数。 */
-    if ((fused_repetitions - engine->jumping_jack_reported_repetitions) != 1ULL) {
-        /* 内部状态不一致时拒绝批量补发，避免 UI 瞬间跳数且振动次数不匹配。 */
-        return WORKOUT_STATUS_ERR_DOMAIN;
-    }
-    /* 保存已经发布的新中位累计。 */
-    engine->jumping_jack_reported_repetitions = fused_repetitions;
-    /* 告知上层写入一个且仅一个 REP MetricEvent。 */
-    *rep_accepted = true;
-    /* 当前点处理成功。 */
-    return WORKOUT_STATUS_OK;
-}
-
-/*
- * 跳过一个马达污染点但推进开合跳三轴时间线。
- * 受污染 ax/ay/az 不进入均值和峰谷；真实大于 120 ms 的间断仍同步重置三轴未完成周期。
- */
-static workout_status_t workout_skip_jumping_jack_haptic_sample(
-    workout_engine_t *engine,
-    const uint64_t monotonic_ms)
-{
-    /* 引擎必须有效；调用方已经确认当前锁定动作为开合跳。 */
-    if (engine == NULL) {
-        /* 空对象无法维护三个轴的时间线。 */
-        return WORKOUT_STATUS_ERR_ARGUMENT;
-    }
-    /* gap_detected 汇总任一轴发现的真实采样断流。 */
-    bool gap_detected = false;
-    /* 三轴必须消费同一污染时刻，防止中位数检测器的时间基准分叉。 */
-    for (uint8_t axis = 0U; axis < WORKOUT_JUMPING_JACK_AXIS_COUNT; ++axis) {
-        /* 只推进当前轴时间戳，禁止把马达振动幅值写入 11+5 均值。 */
-        const motion_phase_status_t phase_status = motion_periodic_pair_skip_transient(
-            &engine->jumping_jack_pair_detectors[axis],
-            monotonic_ms);
-        /* 真实断流先记录，循环结束后统一清空三轴未完成状态。 */
-        if (phase_status == MOTION_PHASE_GAP_RESET) {
-            /* 当前轴已自行保留累计并清空滤波。 */
-            gap_detected = true;
-            /* 继续处理剩余轴，保持时间线一致。 */
-            continue;
-        }
-        /* 参数或时间倒退属于不可恢复的本次输入错误。 */
-        if (phase_status != MOTION_PHASE_OK) {
-            /* 映射为训练领域错误，协调器不会提交候选副本。 */
-            return phase_status == MOTION_PHASE_ERR_TIMESTAMP
-                ? WORKOUT_STATUS_ERR_TIME
-                : WORKOUT_STATUS_ERR_DOMAIN;
-        }
-    }
-    /* 任一轴发现真实断流时，三个轴必须同步清空未完成周期。 */
-    if (gap_detected) {
-        /* 统一重置只影响滤波和未完成峰谷，不回滚权威累计。 */
-        workout_reset_jumping_jack_periodic_cycles(engine);
-        /* 返回成功使协调器提交时间占位触发的重置，避免下一点永久重复发现同一缺口。 */
-        return WORKOUT_STATUS_OK;
-    }
-    /* 短暂振动污染已占位，当前点不产生次数。 */
     return WORKOUT_STATUS_OK;
 }
 
@@ -893,92 +952,41 @@ workout_status_t workout_engine_push_sample(
         /* 返回领域错误。 */
         return WORKOUT_STATUS_ERR_DOMAIN;
     }
-    /* sit 整秒事件已经产生，只需按指标规则确认不振动。 */
+    /* sit 整秒事件已经产生，直接发布唯一指标事实。 */
     if (*emitted) {
-        /* sit 不会入队；函数仍执行统一规则。 */
-        bool request_enqueued = false;
-        /* 忽略队列满，权威 MetricEvent 不能回滚。 */
-        (void)fitness_haptic_enqueue_for_metric(
-            &engine->haptic_queue,
-            event,
-            &request_enqueued);
         /* 返回成功。 */
         return WORKOUT_STATUS_OK;
-    }
-    /* 检查当前无效点是否仅由马达污染导致，不包含任一真实连续性破坏位。 */
-    const bool haptic_only_invalid =
-        !count_input_valid &&
-        ((quality_flags & WORKOUT_QUALITY_HAPTIC_CONTAMINATED) != 0U) &&
-        ((quality_flags & WORKOUT_QUALITY_TIMELINE_BREAK_MASK) == 0U);
-    /* 开合跳马达污染只推进时间线，避免 30 ms 反馈反复触发 120 ms 断流重置。 */
-    if (haptic_only_invalid &&
-        (engine->selected_action == FITNESS_ACTION_JUMPING_JACK)) {
-        /* 不使用受污染加速度；当前点不会产生 MetricEvent。 */
-        return workout_skip_jumping_jack_haptic_sample(
-            engine,
-            sample->monotonic_ms);
     }
     /* 真实采样边界必须立刻清空未完成周期；已闭合次数和会话累计保持。 */
     if (!count_input_valid &&
         ((quality_flags & WORKOUT_QUALITY_TIMELINE_BREAK_MASK) != 0U)) {
+        /* 缺口两侧不能共用 25 点方差或加速度差分，但当前活动/休息状态暂时保留。 */
+        workout_reset_activity_window(engine);
         /* 当前边界点不使用幅值，只提交重置后的计数器状态。 */
         workout_reset_incomplete_counting(engine);
         /* 该点已安全消费，不让协调器回滚候选副本。 */
         return WORKOUT_STATUS_OK;
     }
-    /* 其它污染、上层冻结或实时分类不一致时，不推进相位/步峰。 */
-    if (!count_input_valid || !engine->classification_consistent) {
+    /* 其它污染点不进入活动统计或相位/步峰。 */
+    if (!count_input_valid) {
         /* 热量已按锁定会话推进；真实时间缺口会由下一干净点按原 120 ms 合同处理。 */
         return WORKOUT_STATUS_OK;
     }
-    /* 开合跳使用三轴加速度峰谷中位数；其它动作继续走通用相位路径。 */
-    if (engine->selected_action == FITNESS_ACTION_JUMPING_JACK) {
-        /* 保存当前点是否使三轴累计中位数增加一次。 */
-        bool rep_accepted = false;
-        /* 同一六轴点并行推进 ax、ay、az 三条相邻峰谷链。 */
-        const workout_status_t fusion_status = workout_push_jumping_jack_periodic(
-            engine,
-            sample,
-            &rep_accepted);
-        /* 时间缺口或领域错误必须原样上报。 */
-        if (fusion_status != WORKOUT_STATUS_OK) {
-            /* 返回具体错误，当前点不生成事件。 */
-            return fusion_status;
-        }
-        /* 三轴累计中位数没有增加时不产生权威事件。 */
-        if (!rep_accepted) {
-            /* 当前点处理成功。 */
-            return WORKOUT_STATUS_OK;
-        }
-        /* 接受一次后写入唯一 REP MetricEvent，UI、BLE、存储和振动共享该事实。 */
-        if (fitness_session_record_count(
-                &engine->fitness_session,
-                FITNESS_METRIC_REPETITION,
-                1U,
-                sample->monotonic_ms,
-                stability_q15,
-                quality_flags,
-                event) != FITNESS_STATUS_OK) {
-            /* 领域会话拒绝时不发布半完成事件。 */
-            return WORKOUT_STATUS_ERR_DOMAIN;
-        }
-        /* 通用计数器不参与开合跳融合，镜像其权威累计仅供现有诊断字段读取。 */
-        engine->rep_counter.total_repetitions = engine->fitness_session.repetitions;
-        /* 保存最近权威次数时间，保持通用诊断与融合事实一致。 */
-        engine->rep_counter.last_rep_ms = sample->monotonic_ms;
-        /* 标记事件有效。 */
-        *emitted = true;
-        /* 保存振动是否成功入队；队列满不能回滚权威次数。 */
-        bool request_enqueued = false;
-        /* 每次有效开合跳按既有合同入队一次 30 ms 振动。 */
-        (void)fitness_haptic_enqueue_for_metric(
-            &engine->haptic_queue,
-            event,
-            &request_enqueued);
-        /* 当前开合跳点处理成功。 */
+    /* 用当前干净点更新训练同源活动门；非法六轴值不允许污染长期状态。 */
+    const workout_status_t activity_status = workout_update_activity_gate(
+        engine,
+        sample);
+    /* 活动统计错误直接返回，当前点不得进入动作计数器。 */
+    if (activity_status != WORKOUT_STATUS_OK) {
+        /* 传播精确参数错误。 */
+        return activity_status;
+    }
+    /* 完整 1 秒窗判为休息时只推进时间和热量，不推进相位/步峰。 */
+    if (!engine->classification_consistent) {
+        /* 主动作、累计值和诊断类别保持。 */
         return WORKOUT_STATUS_OK;
     }
-    /* 计算当前原始点的相位或步峰。 */
+    /* 所有重复类动作统一使用主腕角速度的“主向—回向—返回”完整周期，避免把一次开合跳的开、合冲击拆成两次。 */
     motion_phase_observation_t observation;
     /* 保存相位检测状态。 */
     const motion_phase_status_t phase_status = motion_phase_push(
@@ -1006,7 +1014,7 @@ workout_status_t workout_engine_push_sample(
         observation.phase_valid) {
         /* 保存是否完成完整周期。 */
         bool rep_completed = false;
-        /* 推进两相位或五阶段计数器。 */
+        /* 推进统一主向、回向、闭合计数器。 */
         const fitness_status_t rep_status = fitness_rep_counter_update(
             &engine->rep_counter,
             observation.phase,
@@ -1043,16 +1051,11 @@ workout_status_t workout_engine_push_sample(
         observation.step_peak) {
         /* 保存步峰是否被接受。 */
         bool step_accepted = false;
-        /* 保存每 10 步提示点；实际振动仍由 MetricEvent 统一规则生成。 */
-        bool haptic_due = false;
         /* 推进步峰去重器。 */
         const fitness_status_t step_status = fitness_step_counter_accept(
             &engine->step_counter,
             sample->monotonic_ms,
-            &step_accepted,
-            &haptic_due);
-        /* 显式读取 haptic_due，实际队列由事件规则决定，避免两处振动。 */
-        (void)haptic_due;
+            &step_accepted);
         /* 时间或初始化错误必须上报。 */
         if (step_status != FITNESS_STATUS_OK) {
             /* 返回领域错误。 */
@@ -1079,16 +1082,6 @@ workout_status_t workout_engine_push_sample(
         *emitted = true;
     }
 
-    /* 新指标统一决定每次 REP、每 10 STEP 或 sit 无振动。 */
-    if (*emitted) {
-        /* 保存本次是否成功入队。 */
-        bool request_enqueued = false;
-        /* 队列满只丢反馈，不回滚权威次数。 */
-        (void)fitness_haptic_enqueue_for_metric(
-            &engine->haptic_queue,
-            event,
-            &request_enqueued);
-    }
     /* 当前点处理成功。 */
     return WORKOUT_STATUS_OK;
 }
@@ -1104,7 +1097,7 @@ workout_status_t workout_engine_pause(
     }
     /* 重复暂停保持幂等。 */
     if (engine->state == WORKOUT_STATE_PAUSED) {
-        /* 不重复振动或修改时间。 */
+        /* 不重复修改时间。 */
         return WORKOUT_STATUS_OK;
     }
     /* 只允许运行状态暂停。 */
@@ -1117,16 +1110,14 @@ workout_status_t workout_engine_pause(
         /* 时间倒退或会话错误。 */
         return WORKOUT_STATUS_ERR_TIME;
     }
-    /* 暂停统一清空主相位、重复候选、步峰历史和开合跳三轴未完成周期。 */
+    /* 暂停统一清空主相位、重复候选和步峰历史。 */
     workout_reset_incomplete_counting(engine);
-    /* 暂停结束当前连续动作证据；恢复后由新窗口重新确认锁定动作。 */
+    /* 暂停结束当前活动统计；恢复后由新的 25 Hz 样本重建，不依赖模型窗口。 */
     workout_reset_bout(engine);
+    /* 清空暂停前活动窗，防止暂停两侧样本进入同一个一秒方差。 */
+    workout_reset_activity_window(engine);
     /* 切换到暂停状态。 */
     engine->state = WORKOUT_STATE_PAUSED;
-    /* 入队一次 40 ms 暂停反馈。 */
-    (void)fitness_haptic_enqueue_reason(
-        &engine->haptic_queue,
-        FITNESS_HAPTIC_REASON_PAUSE_OR_END);
     /* 返回成功。 */
     return WORKOUT_STATUS_OK;
 }
@@ -1174,7 +1165,7 @@ workout_status_t workout_engine_stop(
     }
     /* Summary 重复停止保持幂等。 */
     if (engine->state == WORKOUT_STATE_SUMMARY) {
-        /* 不重复保存或振动。 */
+        /* 不重复保存。 */
         return WORKOUT_STATUS_OK;
     }
     /* Idle 没有会话可停止。 */
@@ -1204,17 +1195,8 @@ workout_status_t workout_engine_stop(
     }
     /* 清空未完成相位。 */
     motion_phase_reset(&engine->phase_detector);
-    /* 开合跳停止时清空三个轴未完成周期，Summary 只保留权威次数。 */
-    if (engine->selected_action == FITNESS_ACTION_JUMPING_JACK) {
-        /* 清空三个轴相位状态。 */
-        workout_reset_jumping_jack_periodic_cycles(engine);
-    }
     /* 切换到总结状态。 */
     engine->state = WORKOUT_STATE_SUMMARY;
-    /* 入队一次结束反馈；重复 stop 不再入队。 */
-    (void)fitness_haptic_enqueue_reason(
-        &engine->haptic_queue,
-        FITNESS_HAPTIC_REASON_PAUSE_OR_END);
     /* 返回成功。 */
     return WORKOUT_STATUS_OK;
 }
@@ -1226,7 +1208,7 @@ void workout_engine_return_idle(workout_engine_t *engine)
         /* 没有状态可清理。 */
         return;
     }
-    /* 重新初始化为空闲并清空振动队列。 */
+    /* 重新初始化为空闲并清空会话状态。 */
     workout_engine_init(engine);
 }
 
@@ -1249,7 +1231,7 @@ workout_status_t workout_engine_snapshot(
     snapshot->action_id = engine->selected_action;
     /* 复制当前动作段因果累计分类或 255。 */
     snapshot->inferred_action_id = engine->inferred_action;
-    /* 复制分类与计数动作一致性，供上层显示动作变化提示。 */
+    /* 复制训练同源活动门状态，供上层显示训练或休息提示。 */
     snapshot->classification_consistent = engine->classification_consistent;
     /* 复制模型置信度。 */
     snapshot->confidence_q15 = engine->confidence_q15;
@@ -1285,19 +1267,6 @@ workout_status_t workout_engine_snapshot(
     (void)workout_saturate_u64_to_u32(snapshot->metric_value);
     /* 返回成功。 */
     return WORKOUT_STATUS_OK;
-}
-
-bool workout_engine_pop_haptic(
-    workout_engine_t *engine,
-    fitness_haptic_request_t *request)
-{
-    /* 空对象或输出不能消费队列。 */
-    if ((engine == NULL) || (request == NULL)) {
-        /* 返回无请求。 */
-        return false;
-    }
-    /* 委托固定 FIFO 取最早业务振动。 */
-    return fitness_haptic_queue_pop(&engine->haptic_queue, request);
 }
 
 bool workout_engine_pop_replay_metric_event(

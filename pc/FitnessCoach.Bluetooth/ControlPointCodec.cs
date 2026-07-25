@@ -23,7 +23,7 @@ public enum ControlCommandId : byte
     SetProfile = 7,
     /// <summary>设置次数、时长或卡路里目标。</summary>
     SetGoal = 8,
-    /// <summary>设置亮度、振动、声音和熄屏时间。</summary>
+    /// <summary>设置亮度、声音和熄屏时间；旧马达保留位由编码器固定写零。</summary>
     SetPreferences = 9,
     /// <summary>要求设备发布权威 LiveState 快照。</summary>
     GetSnapshot = 10,

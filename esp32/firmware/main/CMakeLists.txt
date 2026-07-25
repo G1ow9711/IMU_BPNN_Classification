@@ -6,13 +6,13 @@ idf_component_register(
     INCLUDE_DIRS "."
     # 公开依赖覆盖真实生产数据链和 ESP-IDF 平台服务。
     REQUIRES
-        # 板级运行时负责厂家 BSP、LVGL 锁、AMOLED、触摸、TF 与马达端口。
+# 板级运行时负责厂家 BSP、LVGL 锁、AMOLED、触摸、TF 与电源端口。
         board_runtime
         # 板载传感器组件负责 QMI8658、AXP2101、PCF85063 及共享 I2C 适配。
         board_sensors
         # IMU 流水线负责异步 ODR、抗混叠、25 Hz 重采样、297 特征和双 M0。
         imu_pipeline
-        # 应用协调器是训练状态、指标、UI/BLE/存储/振动效果的唯一写者。
+# 应用协调器是训练状态、指标、UI、BLE 和存储效果的唯一写者。
         device_coordinator
         # 设备配置提供命令 TLV、范围验证和带 CRC32 的 NVS blob。
         device_config
@@ -32,7 +32,7 @@ idf_component_register(
         littlefs
         # GPIO 驱动用于 GPIO38/39 Light-sleep 低电平唤醒配置。
         esp_driver_gpio
-        # 高精度单调时钟用于 IMU 时间戳、振动污染区和任务节拍。
+# 高精度单调时钟用于 IMU 时间戳、协议事件和任务节拍。
         esp_timer
         # ESP PM 提供动态调频、自动 Light-sleep 和推理频率锁。
         esp_pm

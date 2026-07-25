@@ -23,6 +23,10 @@ public sealed class WinRtBleTransport : IWindowsBleTransport, IWindowsBlePairing
 {
     // Windows AEP 扫描 RSSI 属性键；值通常为 Int32，单位 dBm。
     private const string SignalStrengthProperty = "System.Devices.Aep.SignalStrength";
+    // 固定六位联调配对码必须与固件 BLE_SERVICE_PAIRING_PASSKEY 一致；仅用于当前真板首次绑定。
+    private const string DebugPairingPasskey = "123456";
+    // Association Endpoint 重开时请求 RSSI 扩展属性；数组只读复用，避免每次连接分配相同键集合。
+    private static readonly string[] AssociationEndpointProperties = [SignalStrengthProperty];
     // 选择器决定优先旧设备、自动产品名或未来 WPF 人工选择对话框。
     private readonly IWindowsBleDeviceSelector _deviceSelector;
     // 生命周期信号量防止扫描连接和主动断开并发释放同一 WinRT 对象。
@@ -132,9 +136,8 @@ public sealed class WinRtBleTransport : IWindowsBleTransport, IWindowsBlePairing
             // 用户已从可见列表选中设备或自动重连已有固定 ID 时，直接打开该系统记录。
             if (!string.IsNullOrWhiteSpace(preferredDeviceId))
             {
-                // 精确读取 Windows 设备记录，不回退为同名的另一台手柄。
-                selectedInformation = await DeviceInformation.CreateFromIdAsync(preferredDeviceId)
-                    .AsTask(cancellationToken)
+                // 按 Association Endpoint 类型精确读取 Windows 设备记录；默认 DeviceInterface 不支持 PairAsync。
+                selectedInformation = await OpenAssociationEndpointAsync(preferredDeviceId, cancellationToken)
                     .ConfigureAwait(false);
                 // 系统记录存在时构造选择 DTO，RSSI 使用记录中的最近值。
                 if (selectedInformation is not null)
@@ -171,9 +174,8 @@ public sealed class WinRtBleTransport : IWindowsBleTransport, IWindowsBlePairing
                     throw new InvalidOperationException("没有发现可连接的 BPNN-FIT 手柄，或用户取消了设备选择。" );
                 }
 
-                // 用主动扫描返回的精确 DeviceInformation.Id 重新打开系统配对对象。
-                selectedInformation = await DeviceInformation.CreateFromIdAsync(selected.DeviceId)
-                    .AsTask(cancellationToken)
+                // 用主动扫描返回的精确 ID 重新打开 Association Endpoint 配对对象。
+                selectedInformation = await OpenAssociationEndpointAsync(selected.DeviceId, cancellationToken)
                     .ConfigureAwait(false);
                 // 广播在扫描结束后消失或权限被撤销时明确失败。
                 if (selectedInformation is null)
@@ -185,12 +187,20 @@ public sealed class WinRtBleTransport : IWindowsBleTransport, IWindowsBlePairing
 
             // 优先使用主动广播 RSSI，缺失时回退系统 AEP 属性。
             _lastRssiDbm = selected.RssiDbm ?? ReadRssiDbm(selectedInformation);
-            // 未配对时进入 Windows 系统配对边界；弹窗和 PIN/数字确认由系统 UI 负责。
+            // 未配对时进入 Windows 自定义配对边界；Display Only 手表需要电脑主动提交其固定六位码。
             if (!selectedInformation.Pairing.IsPaired)
             {
-                // 请求加密并认证的 LE Secure Connections 配对级别。
-                DevicePairingResult pairingResult = await selectedInformation.Pairing.PairAsync(
-                    DevicePairingProtectionLevel.EncryptionAndAuthentication).AsTask(cancellationToken).ConfigureAwait(false);
+                // 只有 Association Endpoint 的 CanPair 才应为真；提前拒绝错误对象，避免含糊的 Failed 状态。
+                if (!selectedInformation.Pairing.CanPair)
+                {
+                    // 报告 WinRT 对象类型合同错误，便于区分无线链路和配对 UI 故障。
+                    throw new InvalidOperationException("Windows 蓝牙设备记录不可配对；请重新扫描 Association Endpoint 后重试。");
+                }
+
+                // 执行 Display Only 专用配对仪式，同时保持加密、MITM 认证和 LE Secure Connections 等级。
+                DevicePairingResult pairingResult = await PairDisplayOnlyWatchAsync(
+                    selectedInformation,
+                    cancellationToken).ConfigureAwait(false);
                 // Paired 和 AlreadyPaired 都表示后续允许读取受保护控制特征。
                 if ((pairingResult.Status != DevicePairingResultStatus.Paired) &&
                     (pairingResult.Status != DevicePairingResultStatus.AlreadyPaired))
@@ -382,9 +392,8 @@ public sealed class WinRtBleTransport : IWindowsBleTransport, IWindowsBlePairing
             _disconnectRequested = true;
             // 取消配对前释放 GATT 会话、服务和特征句柄。
             await DisconnectCoreAsync().ConfigureAwait(false);
-            // 用扫描保存的精确 Windows ID 重建设备信息，仅访问系统配对元数据。
-            DeviceInformation? information = await DeviceInformation.CreateFromIdAsync(deviceId)
-                .AsTask(cancellationToken)
+            // 用扫描保存的精确 Windows ID 重建 Association Endpoint，仅访问系统配对元数据。
+            DeviceInformation? information = await OpenAssociationEndpointAsync(deviceId, cancellationToken)
                 .ConfigureAwait(false);
             // 设备记录已经被系统删除时视为忘记完成，不再制造不可恢复错误。
             if (information is null)
@@ -566,6 +575,72 @@ public sealed class WinRtBleTransport : IWindowsBleTransport, IWindowsBlePairing
         return checked((ushort)Math.Clamp(maxPduSize, 23u, ushort.MaxValue));
     }
 
+    // 按 Microsoft 配对合同把稳定 BLE ID 重开为 Association Endpoint；默认重载会错误返回 DeviceInterface。
+    private static async Task<DeviceInformation?> OpenAssociationEndpointAsync(
+        string deviceId,
+        CancellationToken cancellationToken)
+    {
+        // 显式指定 AssociationEndpoint，保证 Pairing.CanPair、PairAsync 和 UnpairAsync 使用系统可配对对象。
+        DeviceInformation? information = await DeviceInformation.CreateFromIdAsync(
+            deviceId,
+            AssociationEndpointProperties,
+            DeviceInformationKind.AssociationEndpoint).AsTask(cancellationToken).ConfigureAwait(false);
+        // null 表示该广播 ID 已离线或 Windows AEP 记录被删除；调用方按自身连接/忘记语义处理。
+        return information;
+    }
+
+    // 对 Display Only 手表执行 WinRT 自定义配对；Windows 请求 PIN 时提交固件屏显的六位联调码。
+    private static async Task<DevicePairingResult> PairDisplayOnlyWatchAsync(
+        DeviceInformation information,
+        CancellationToken cancellationToken)
+    {
+        // 取得 Association Endpoint 的自定义配对对象；普通 PairAsync 不会代填 Display Only PIN。
+        DeviceInformationCustomPairing customPairing = information.Pairing.Custom;
+        // 本地事件处理器只在本次 PairAsync 生命周期内有效，防止多次连接累计系统回调。
+        void OnPairingRequested(
+            DeviceInformationCustomPairing sender,
+            DevicePairingRequestedEventArgs request)
+        {
+            // sender 仅标识当前自定义配对源；本流程无需访问其额外状态。
+            _ = sender;
+            // ConfirmOnly 表示 Windows 只要求应用确认继续，不需要用户或应用提供数字。
+            if (request.PairingKind == DevicePairingKinds.ConfirmOnly)
+            {
+                // 接受无需 PIN 的确认仪式，使部分适配器可以继续建立加密链路。
+                request.Accept();
+                // 当前请求已完成，禁止继续落入 ProvidePin 分支。
+                return;
+            }
+
+            // ProvidePin 表示手表负责显示、电脑负责输入；这与固件 DisplayOnly IO 能力一致。
+            if (request.PairingKind == DevicePairingKinds.ProvidePin)
+            {
+                // 向 Windows 提交与固件一致的六位码；不得写入日志或界面，避免泄露调试凭据。
+                request.Accept(DebugPairingPasskey);
+            }
+            // 其它仪式不调用 Accept，按失败关闭处理，避免静默降低认证等级。
+        }
+
+        // 当前硬件只允许无需数字的确认或 Display Only 的 PIN 输入，不接受无认证 Just Works。
+        DevicePairingKinds supportedPairingKinds = DevicePairingKinds.ConfirmOnly | DevicePairingKinds.ProvidePin;
+        // 在 PairAsync 前订阅请求，确保系统发出 PIN 事件时应用已能同步响应。
+        customPairing.PairingRequested += OnPairingRequested;
+        try
+        {
+            // 请求带认证的加密配对；取消令牌允许关闭应用或用户取消时及时结束系统操作。
+            DevicePairingResult pairingResult = await customPairing.PairAsync(
+                supportedPairingKinds,
+                DevicePairingProtectionLevel.EncryptionAndAuthentication).AsTask(cancellationToken).ConfigureAwait(false);
+            // 返回 Windows 原始状态，由连接入口统一接受 Paired/AlreadyPaired 并报告其它状态。
+            return pairingResult;
+        }
+        finally
+        {
+            // 无论成功、失败或取消都解绑事件，避免下一次快速连接收到重复 PIN 回调。
+            customPairing.PairingRequested -= OnPairingRequested;
+        }
+    }
+
     // 合并 Windows 缓存设备与主动广播设备；调用方已持有生命周期锁。
     private async Task<IReadOnlyList<BleDiscoveredDevice>> ScanDevicesCoreAsync(
         TimeSpan scanDuration,
@@ -578,7 +653,8 @@ public sealed class WinRtBleTransport : IWindowsBleTransport, IWindowsBlePairing
         // 枚举系统已缓存和已配对 BLE 记录，保证暂未广播的已配对手柄仍可见。
         DeviceInformationCollection cachedDevices = await DeviceInformation.FindAllAsync(
             BluetoothLEDevice.GetDeviceSelector(),
-            additionalProperties).AsTask(cancellationToken).ConfigureAwait(false);
+            additionalProperties,
+            DeviceInformationKind.AssociationEndpoint).AsTask(cancellationToken).ConfigureAwait(false);
 
         // 复制每个有名称的系统记录；空名称未配对地址对用户没有辨识价值。
         foreach (DeviceInformation information in cachedDevices)

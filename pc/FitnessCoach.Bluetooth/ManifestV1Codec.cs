@@ -37,7 +37,7 @@ public sealed class ManifestV1
         uint classTableCrc32,
         // 卡路里 MET 参数表版本；当前设备与 PC 均要求版本 1。
         ushort calorieTableVersion,
-        // 设备能力位；低三位依次表示振动、会话历史和 LittleFS。
+        // 设备能力位；位 0 为旧马达保留，位 1、2 表示会话历史和 LittleFS。
         uint capabilities,
         // 设备实时 LittleFS 可用容量，单位字节。
         ulong littleFsAvailableBytes)
@@ -108,7 +108,7 @@ public sealed class ManifestV1
     /// <summary>热量参数表版本。</summary>
     public ushort CalorieTableVersion { get; }
 
-    /// <summary>设备能力位；位 0～2 分别表示振动、会话历史和 LittleFS。</summary>
+    /// <summary>设备能力位；位 0 为旧马达保留，位 1、2 分别表示会话历史和 LittleFS。</summary>
     public uint Capabilities { get; }
 
     /// <summary>LittleFS 当前可用容量，单位字节。</summary>
@@ -160,8 +160,8 @@ public static class ManifestV1Codec
     public const uint RequiredClassTableCrc32 = 0xD8193927U;
     // 当前热量计算表版本固定为 1。
     public const ushort RequiredCalorieTableVersion = 1;
-    // 正式 PC 功能要求振动、会话历史和 LittleFS 三个位全部存在。
-    public const uint RequiredCapabilities = 0x00000007U;
+    // 正式 PC 只要求会话历史和 LittleFS；位 0 的旧马达能力不再要求。
+    public const uint RequiredCapabilities = 0x00000006U;
     // 严格 UTF-8 解码器在遇到非法字节时抛异常，不生成替换字符。
     private static readonly UTF8Encoding StrictUtf8 = new(
         encoderShouldEmitUTF8Identifier: false,
@@ -393,7 +393,7 @@ public static class ManifestV1Codec
             throw new InvalidDataException($"Manifest 热量表版本 {calorieTableVersion} 不兼容，要求 {RequiredCalorieTableVersion}。");
         }
 
-        // 正式 UI 依赖振动反馈、历史同步和 LittleFS；三位缺一即拒绝。
+        // 正式 UI 依赖历史同步和 LittleFS；旧马达保留位缺失不能拒绝无马达真表。
         if ((capabilities!.Value & RequiredCapabilities) != RequiredCapabilities)
         {
             // 未知高位允许存在，只校验必需低位。

@@ -35,10 +35,10 @@ internal static class DeviceConfigurationContractTests
         byte[] goal = DeviceConfigurationCodec.EncodeGoal(DeviceGoalKind.CaloriesMilliKcal, 300_000U);
         // 核对一字节 kind 和四字节目标值。
         Assert(goal.SequenceEqual(new byte[] { 0x01, 0x01, 0x03, 0x02, 0x04, 0xE0, 0x93, 0x04, 0x00 }), "Cmd8 训练目标 TLV 黄金字节错误。");
-        // 设备偏好覆盖亮度、振动、声音、熄屏、revision 和开发者模式。
-        byte[] preferences = DeviceConfigurationCodec.EncodePreferences(new DevicePreferencesV1(35, true, false, 30, 0x11223344U, true));
-        // 核对 bool 只能使用 0/1，熄屏为 u16LE，revision 为 u32LE。
-        Assert(preferences.SequenceEqual(new byte[] { 0x01, 0x01, 0x23, 0x02, 0x01, 0x01, 0x03, 0x01, 0x00, 0x04, 0x02, 0x1E, 0x00, 0x05, 0x04, 0x44, 0x33, 0x22, 0x11, 0x06, 0x01, 0x01 }), "Cmd9 设备偏好 TLV 黄金字节错误。");
+        // 设备偏好覆盖亮度、声音、熄屏、revision 和开发者模式；旧马达位必须固定为零。
+        byte[] preferences = DeviceConfigurationCodec.EncodePreferences(new DevicePreferencesV1(35, false, 30, 0x11223344U, true));
+        // 核对旧马达位固定为零、其它 bool 只使用 0/1、熄屏为 u16LE、revision 为 u32LE。
+        Assert(preferences.SequenceEqual(new byte[] { 0x01, 0x01, 0x23, 0x02, 0x01, 0x00, 0x03, 0x01, 0x00, 0x04, 0x02, 0x1E, 0x00, 0x05, 0x04, 0x44, 0x33, 0x22, 0x11, 0x06, 0x01, 0x01 }), "Cmd9 设备偏好 TLV 黄金字节错误。");
         // 原始流开关只包含一个 bool 项。
         Assert(DeviceConfigurationCodec.EncodeRawStreamEnabled(true).SequenceEqual(new byte[] { 0x01, 0x01, 0x01 }), "Cmd11 原始流开 TLV 黄金字节错误。");
         // 关闭值必须明确编码为零。
@@ -57,9 +57,9 @@ internal static class DeviceConfigurationContractTests
         // 大于 250 kg 必须拒绝。
         AssertThrows<ArgumentOutOfRangeException>(() => DeviceConfigurationCodec.EncodeProfile(250_001U, 1U), "高于 250kg 的资料未拒绝。");
         // 亮度必须在 5～100%。
-        AssertThrows<ArgumentOutOfRangeException>(() => DeviceConfigurationCodec.EncodePreferences(new DevicePreferencesV1(4, true, false, 30, 1U, false)), "过低亮度未拒绝。");
+        AssertThrows<ArgumentOutOfRangeException>(() => DeviceConfigurationCodec.EncodePreferences(new DevicePreferencesV1(4, false, 30, 1U, false)), "过低亮度未拒绝。");
         // 熄屏时间必须在 10～300 秒。
-        AssertThrows<ArgumentOutOfRangeException>(() => DeviceConfigurationCodec.EncodePreferences(new DevicePreferencesV1(35, true, false, 301, 1U, false)), "过长熄屏时间未拒绝。");
+        AssertThrows<ArgumentOutOfRangeException>(() => DeviceConfigurationCodec.EncodePreferences(new DevicePreferencesV1(35, false, 301, 1U, false)), "过长熄屏时间未拒绝。");
         // 未知目标类型不得发给固件。
         AssertThrows<ArgumentOutOfRangeException>(() => DeviceConfigurationCodec.EncodeGoal((DeviceGoalKind)99, 1U), "未知目标类型未拒绝。");
         // 2000-01-01T00:00:00Z 是固件 RTC 支持的最小时间。

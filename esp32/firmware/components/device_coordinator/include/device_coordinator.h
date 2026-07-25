@@ -22,7 +22,7 @@
 #include "session_store.h"
 /* 引入纯 C UI 页面状态和可见快照。 */
 #include "ui_state_machine.h"
-/* 引入推理锁类、25 Hz 样本、MetricEvent 和振动 FIFO。 */
+/* 引入推理锁类、25 Hz 样本和 MetricEvent。 */
 #include "workout_engine.h"
 
 /* 引入 bool 表达充电、连接和效果开关。 */
@@ -35,8 +35,6 @@
 extern "C" {
 #endif
 
-/* 单次业务调用最多产生 4 个振动请求，超出表示上游异常积压。 */
-#define DEVICE_COORDINATOR_MAX_HAPTIC_EFFECTS (4U)
 /* 一次锁类最多交付准备期 12 条 MetricEvent，容量与 workout 固定补算 FIFO 一致。 */
 #define DEVICE_COORDINATOR_MAX_REPLAY_METRIC_EFFECTS (WORKOUT_REPLAY_EVENT_QUEUE_CAPACITY)
 /* 未设置 UTC 时使用 0，不把单调毫秒冒充 Unix 时间。 */
@@ -62,8 +60,7 @@ typedef enum device_effect_flag {
     DEVICE_EFFECT_BLE_EVENT = 1U << 2,
     /* summary 含需交给 session_store_upsert 的幂等摘要。 */
     DEVICE_EFFECT_SUMMARY_WRITE = 1U << 3,
-    /* haptics[0..haptic_count) 含需交给非阻塞马达任务的请求。 */
-    DEVICE_EFFECT_HAPTIC = 1U << 4,
+    /* 位 4 为旧版马达 effect 保留，不得重新分配给其它线上含义。 */
     /* power_policy 含需由板级层差分应用的完整策略。 */
     DEVICE_EFFECT_POWER_POLICY = 1U << 5,
     /* 必须等 SUMMARY_WRITE 成功刷盘后再执行 PMIC 断电。 */
@@ -140,17 +137,13 @@ typedef struct device_effects {
     uint8_t replay_metric_event_count;
     /* 存储任务将该值交给 session_store_upsert，last_event_seq 是幂等键。 */
     session_summary_t summary;
-    /* 一次调用中最多交付 4 个已排序振动请求。 */
-    fitness_haptic_request_t haptics[DEVICE_COORDINATOR_MAX_HAPTIC_EFFECTS];
-    /* haptics 的有效数量，范围 0..4。 */
-    uint8_t haptic_count;
     /* 板级电源任务差分应用该策略，不在协调器内访问硬件。 */
     power_policy_t power_policy;
 } device_effects_t;
 
 /* 协调器保存纯数据状态；无堆分配、无 OS 句柄、无硬件指针。 */
 typedef struct device_coordinator {
-    /* 保存推理锁类、计数、步数、热量和振动 FIFO。 */
+    /* 保存推理锁类、计数、步数和热量。 */
     workout_engine_t workout;
     /* 保存纯 UI 页面和当前展示值。 */
     ui_context_t ui;
@@ -184,8 +177,6 @@ typedef struct device_coordinator {
     uint16_t minimum_stability_q15;
     /* 标记是否已有稳定度样本，避免空会话误报 32767。 */
     bool has_stability;
-    /* 保存低电提醒是否已发送，同一下降区间不重复振动。 */
-    bool low_battery_warning_sent;
 } device_coordinator_t;
 
 /* 自检成功后初始化到 Idle/Home；空指针或非法配置返回参数错误。 */

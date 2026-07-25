@@ -10,12 +10,12 @@
 - BLE v1 协议编解码、CRC、MTU 23/185/247 分片与重组。
 - `WindowsBleDeviceSession` 真机会话状态机：设备筛选、Manifest/快照恢复、控制 indication、LiveState/Event 通知、同 request ID 单次重试和自动重连。
 - 正式 Manifest v1 严格解析：连接控制前检查协议 1.0、297 维特征、双 M0 SHA、11 类 CRC、热量表版本、能力位和 LittleFS 容量；缺失、重复、截断或不兼容字段直接断开，未知新 tag 安全跳过。
-- `WinRtBleTransport`：使用 `Windows.Devices.Bluetooth` 完成系统扫描、LE 安全配对、Uncached 服务发现、0001～0007 特征完整性检查和 GATT 资源释放。
+- `WinRtBleTransport`：使用 `Windows.Devices.Bluetooth` 完成系统扫描、LE 安全配对、Uncached 服务发现、0001～0007 特征完整性检查和 GATT 资源释放；扫描、按 ID 重连与忘记设备均显式使用 `DeviceInformationKind.AssociationEndpoint`，首次绑定再通过 `CustomPairing` 响应 Display Only 手表的 `ProvidePin` 请求，禁止使用 WinRT 默认的不可配对 `DeviceInterface`。
 - 11 类纯 WPF 本地矢量教练人偶：每类具有可辨识关键姿态、填充躯干、胶囊四肢、关节和脚位，不依赖网络、GIF、Lottie 或第三方动画包。
 - 动画由设备权威 `action_id` 与 `AnimationRevision` 驱动；断线或 Unknown 立即显示等待态，不保留旧动作。
 - 遵循 Windows“在 Windows 中显示动画”辅助功能，并提供本次运行“减少动作动画”开关；启用后固定代表姿态并停止 30 FPS 计时器。
 - 训练历史与设置采用原子 JSON 文件；接口已按 SQLite 风格设计，后续可新增 SQLite 适配器而不修改页面。
-- 设置页本地保存后，已连接设备依次同步 UTC/时区、体重、训练目标、亮度、振动、声音、熄屏和开发者模式；设备失败会明确保留“本地已保存、设备未同步”事实。
+- 设置页本地保存后，已连接设备依次同步 UTC/时区、体重、训练目标、亮度、声音、熄屏和开发者模式；设备失败会明确保留“本地已保存、设备未同步”事实。
 - 设置页支持公制和英制。公制输入千克，英制输入磅；选择会写入本地偏好，BLE 命令 7 始终把体重换算为协议规定的整数克，设备端热量单位不随界面切换。
 - 训练总结页显示每日卡路里目标进度、设备会话保存状态和本地历史保存状态，避免把“设备已停止”误写成“两端都已保存”。
 - 设备页提供中文“忘记设备”：真机先断开并取消 Windows 系统配对，再清除本地固定设备 ID；Mock 模式只清理模拟固定状态，便于无硬件测试。
@@ -43,7 +43,7 @@
 - 电量 `≤15%`：低电告警。
 - 电量 `≤8%`：禁止开始新会话。
 - 电量 `≤5%`：保存当前会话并关机。
-- 每次有效计次：振动 30 毫秒。
+- 当前手表硬件没有振动马达；界面和配置不提供振动功能，旧协议保留位固定写零。
 - 上位机只显示设备权威动作、计数和卡路里，不自行重复推理或计数。
 
 ## 用户界面中文口径
@@ -108,7 +108,7 @@ dotnet run --project pc\FitnessCoach.App\FitnessCoach.App.csproj --no-build
 1. 默认使用 Mock，电脑没有蓝牙和开发板时仍可演示六页界面。
 2. 在“设置”页勾选“下次启动使用真实 Windows BLE”，保存后重启上位机。
 3. 真机模式点击“连接”。默认选择器优先上次 Windows 设备 ID；首次连接只自动选择广播名为 `BPNN-FIT-*` 的设备，不会误连耳机或鼠标。
-4. 未绑定设备由 Windows 系统进入 LE Secure Connections 配对界面；取消配对会中止连接，不会改连其它设备。
+4. 未绑定设备以可配对的 Association Endpoint 进入 Windows LE Secure Connections 自定义配对；当前联调固件使用固定六位码，上位机只在 WinRT `ProvidePin` 请求中自动提交该码，不在界面或日志中展示；配对失败会中止连接且不会改连其它设备。
 5. 需要解除绑定时，在设备页点击“忘记设备”；操作成功后 Windows 配对记录和本地固定设备状态均被清除，下次连接按首次配对处理。
 6. 如需显示扫描列表，可实现 `IWindowsBleDeviceSelector` 并注入 `WinRtBleTransport`，无需修改协议或会话状态机。
 
@@ -163,7 +163,7 @@ dotnet run --project pc\FitnessCoach.App\FitnessCoach.App.csproj --no-build
 
 ## 待烧录实测
 
-- Windows 配对弹窗与开发板六位码确认；
+- Windows `CustomPairing` 的 `ProvidePin` 请求与开发板六位码一致性；
 - 实际协商 MTU、RSSI 弱信号、系统蓝牙开关和休眠唤醒；
 - 标准 Device Information 在厂家固件上的实际字符串及固件升级后 Uncached 刷新；
 - indication 丢失、设备重启、超出范围后的真实退避重连；

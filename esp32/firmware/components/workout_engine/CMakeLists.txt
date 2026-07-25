@@ -1,6 +1,6 @@
 # 注册训练协调引擎；只依赖纯 C 计数和相位组件。
 idf_component_register(
-    # workout_engine.c 负责准备锁定、热量、计数、步数、暂停和振动事实链。
+# workout_engine.c 负责准备识别、热量、计数、步数、休息和暂停事实链。
     SRCS "workout_engine.c"
     # include 暴露静态引擎和快照合同。
     INCLUDE_DIRS "include"

@@ -1,4 +1,4 @@
-/* 健身计数、热量、振动领域核心实现；公式见 docs/计数卡路里与振动算法.md。 */
+/* 健身计数与热量领域核心实现；公式见 docs/计数与卡路里算法.md。 */
 #include "fitness_core.h"
 
 /* UINT64_MAX 用于时间区间加法的饱和保护。 */
@@ -12,16 +12,6 @@
 #define FITNESS_TWO_STATE_WAIT_SECONDARY 1U
 /* 两相位状态 2：已看到 SECONDARY，等待 REST 完成周期。 */
 #define FITNESS_TWO_STATE_WAIT_RETURN 2U
-/* 跳跃状态 0：等待 TAKEOFF。 */
-#define FITNESS_JUMP_STATE_WAIT_TAKEOFF 0U
-/* 跳跃状态 1：已起跳，等待 FLIGHT。 */
-#define FITNESS_JUMP_STATE_WAIT_FLIGHT 1U
-/* 跳跃状态 2：已腾空，等待 LANDING。 */
-#define FITNESS_JUMP_STATE_WAIT_LANDING 2U
-/* 跳跃状态 3：已落地，等待 RECOVERY。 */
-#define FITNESS_JUMP_STATE_WAIT_RECOVERY 3U
-/* 跳跃状态 4：已恢复，等待 REST 完成周期。 */
-#define FITNESS_JUMP_STATE_WAIT_REST 4U
 /* 一个 tick 最大允许 60 秒；更长间隔通常意味着暂停/休眠，不能计入运动热量。 */
 #define FITNESS_MAX_TICK_INTERVAL_MS 60000ULL
 /* 静坐时长按整秒发布事件，减少 BLE/UI 消息频率。 */
@@ -48,15 +38,6 @@ static bool fitness_action_is_repetition(const fitness_action_t action)
            (action == FITNESS_ACTION_SQUAT) ||
            (action == FITNESS_ACTION_TUCK_JUMP) ||
            (action == FITNESS_ACTION_WAVE);
-}
-
-/* 判断 action 是否使用腕部支持力五阶段跳跃状态机。 */
-static bool fitness_action_is_jump(const fitness_action_t action)
-{
-    /* 开合跳按手臂开合两相位计数；其余三个跳跃类要求起跳、腾空、落地和恢复。 */
-    return (action == FITNESS_ACTION_JUMPING_LUNGE) ||
-           (action == FITNESS_ACTION_JUMPING_SQUAT) ||
-           (action == FITNESS_ACTION_TUCK_JUMP);
 }
 
 /* 判断 action 是否使用步峰计数。 */
@@ -434,7 +415,7 @@ fitness_status_t fitness_session_record_count(
             /* 正常加入本次重复增量。 */
             session->repetitions += delta_value;
         }
-        /* 生成唯一重复事件，供振动/UI/BLE共同消费。 */
+    /* 生成唯一重复事件，供 UI、BLE 和日志共同消费。 */
         fitness_fill_event(
             session,
             metric_kind,
@@ -492,11 +473,9 @@ fitness_status_t fitness_rep_counter_init(
     counter->initialized = true;
     /* 保存动作类别。 */
     counter->action = action;
-    /* 三个高动态跳跃类使用五阶段；开合跳及其余四类使用腕部两相位模式。 */
-    counter->mode = fitness_action_is_jump(action) ?
-                    FITNESS_REP_MODE_JUMP :
-                    FITNESS_REP_MODE_TWO_PHASE;
-    /* 初始内部状态均为 0，分别表示等待 PRIMARY 或 TAKEOFF。 */
+    /* 手表固定佩戴在右腕，八类重复动作统一使用传感器可直接观测的正反腕部周期。 */
+    counter->mode = FITNESS_REP_MODE_TWO_PHASE;
+    /* 初始内部状态 0 表示等待 PRIMARY。 */
     counter->state = 0U;
     /* 候选相位设为哨兵，保证首次相位从计数 1 开始。 */
     counter->candidate_phase = FITNESS_PHASE_COUNT;
@@ -506,17 +485,17 @@ fitness_status_t fitness_rep_counter_init(
     counter->refractory_ms = 300U;
 
     /* 根据动作动力学设置最短完整周期。 */
-    if (counter->mode == FITNESS_REP_MODE_JUMP) {
-        /* 跳跃起飞到恢复至少 400 ms。 */
-        counter->min_cycle_ms = 400U;
-    } else if (action == FITNESS_ACTION_JUMPING_JACK) {
-        /* 开合跳手臂张开到合拢至少 400 ms，兼顾快速动作和抖动抑制。 */
+    if (action == FITNESS_ACTION_JUMPING_JACK) {
+        /* 开合跳完整腕部往返至少 400 ms，兼顾速度差异和抖动抑制。 */
         counter->min_cycle_ms = 400U;
     } else if (action == FITNESS_ACTION_WAVE) {
         /* 挥手周期允许更快，但仍至少 300 ms。 */
         counter->min_cycle_ms = 300U;
+    } else if (action == FITNESS_ACTION_JUMPING_SQUAT) {
+        /* 跳跃深蹲至少 800 ms；验证记录本身较慢，额外迟滞用于拒绝落地回弹形成的第二闭环。 */
+        counter->min_cycle_ms = 800U;
     } else {
-        /* 早安式、弓步、深蹲至少 600 ms，抑制半程抖动。 */
+        /* 其它力量和跳跃往返至少 600 ms；验证集含更快弓步/收腹跳，不能强套深蹲节奏。 */
         counter->min_cycle_ms = 600U;
     }
 
@@ -566,6 +545,14 @@ static bool fitness_rep_process_stable_phase(
             /* 尚未完成一次。 */
             return false;
         }
+        /* 静止闭合后若检测器重新发布显式 PRIMARY，用新端点重建周期起点并覆盖休息时长。 */
+        if ((counter->state == FITNESS_TWO_STATE_WAIT_SECONDARY) &&
+            (phase == FITNESS_PHASE_PRIMARY)) {
+            /* 当前主向端点是新周期真实起点，避免把短休息时间算入动作时长。 */
+            counter->cycle_start_ms = now_ms;
+            /* 仍等待反向 SECONDARY，不增加次数。 */
+            return false;
+        }
         /* 已看到 PRIMARY 后，稳定 SECONDARY 确认到达另一端。 */
         if ((counter->state == FITNESS_TWO_STATE_WAIT_SECONDARY) &&
             (phase == FITNESS_PHASE_SECONDARY)) {
@@ -585,12 +572,10 @@ static bool fitness_rep_process_stable_phase(
             /* 首次计数不需要 last_rep；后续计数必须跨过不应期。 */
             const bool refractory_valid = (counter->total_repetitions == 0ULL) ||
                                           ((now_ms - counter->last_rep_ms) >= counter->refractory_ms);
-            /* 开合跳的返回正峰同时是下一周期主峰，直接等待负峰；其它动作重新等待 PRIMARY。 */
-            counter->state = (counter->action == FITNESS_ACTION_JUMPING_JACK) ?
-                             FITNESS_TWO_STATE_WAIT_SECONDARY :
-                             FITNESS_TWO_STATE_WAIT_PRIMARY;
-            /* 开合跳从当前返回正峰开始下一周期；其它动作清除周期起点。 */
-            counter->cycle_start_ms = (counter->action == FITNESS_ACTION_JUMPING_JACK) ? now_ms : 0ULL;
+            /* REST 可能来自返回主向端点；先把它保存为下一周期起点，显式 PRIMARY 到来时可安全重建。 */
+            counter->state = FITNESS_TWO_STATE_WAIT_SECONDARY;
+            /* 保存闭合时刻；连续动作直接沿用，静止后新 PRIMARY 会覆盖该时间。 */
+            counter->cycle_start_ms = now_ms;
             /* 任一约束失败时丢弃该周期。 */
             if (!duration_valid || !refractory_valid) {
                 /* 周期不计数。 */
@@ -607,65 +592,7 @@ static bool fitness_rep_process_stable_phase(
         return false;
     }
 
-    /* 跳跃状态机依次确认 TAKEOFF、FLIGHT、LANDING、RECOVERY、REST。 */
-    if ((counter->state == FITNESS_JUMP_STATE_WAIT_TAKEOFF) &&
-        (phase == FITNESS_PHASE_TAKEOFF)) {
-        /* 起跳作为周期起点。 */
-        counter->cycle_start_ms = now_ms;
-        /* 下一状态等待腾空。 */
-        counter->state = FITNESS_JUMP_STATE_WAIT_FLIGHT;
-        /* 尚未完成一次。 */
-        return false;
-    }
-    if ((counter->state == FITNESS_JUMP_STATE_WAIT_FLIGHT) &&
-        (phase == FITNESS_PHASE_FLIGHT)) {
-        /* 确认腾空后等待落地冲击。 */
-        counter->state = FITNESS_JUMP_STATE_WAIT_LANDING;
-        /* 尚未完成一次。 */
-        return false;
-    }
-    if ((counter->state == FITNESS_JUMP_STATE_WAIT_LANDING) &&
-        (phase == FITNESS_PHASE_LANDING)) {
-        /* 确认落地后等待冲击恢复。 */
-        counter->state = FITNESS_JUMP_STATE_WAIT_RECOVERY;
-        /* 尚未完成一次。 */
-        return false;
-    }
-    if ((counter->state == FITNESS_JUMP_STATE_WAIT_RECOVERY) &&
-        (phase == FITNESS_PHASE_RECOVERY)) {
-        /* 恢复阶段后等待回到稳定基线。 */
-        counter->state = FITNESS_JUMP_STATE_WAIT_REST;
-        /* 尚未完成一次。 */
-        return false;
-    }
-    if ((counter->state == FITNESS_JUMP_STATE_WAIT_REST) &&
-        (phase == FITNESS_PHASE_REST)) {
-        /* 计算起跳到稳定恢复的完整周期。 */
-        const uint64_t cycle_ms = now_ms - counter->cycle_start_ms;
-        /* 验证生理合理周期区间。 */
-        const bool duration_valid = (cycle_ms >= counter->min_cycle_ms) &&
-                                    (cycle_ms <= counter->max_cycle_ms);
-        /* 验证两次计数之间的不应期。 */
-        const bool refractory_valid = (counter->total_repetitions == 0ULL) ||
-                                      ((now_ms - counter->last_rep_ms) >= counter->refractory_ms);
-        /* 周期结束后立即回到等待起跳，防止 REST 连续点重复计数。 */
-        counter->state = FITNESS_JUMP_STATE_WAIT_TAKEOFF;
-        /* 清除当前周期起点。 */
-        counter->cycle_start_ms = 0ULL;
-        /* 不合法周期被丢弃。 */
-        if (!duration_valid || !refractory_valid) {
-            /* 不产生重复事件。 */
-            return false;
-        }
-        /* 累计有效跳跃次数。 */
-        counter->total_repetitions += 1ULL;
-        /* 保存最近计数时刻。 */
-        counter->last_rep_ms = now_ms;
-        /* 通知调用方一次完整跳跃已完成。 */
-        return true;
-    }
-
-    /* 顺序不匹配时保持当前状态。 */
+    /* 两相位顺序不匹配时保持当前状态。 */
     return false;
 }
 
@@ -757,11 +684,10 @@ fitness_status_t fitness_step_counter_init(
 fitness_status_t fitness_step_counter_accept(
     fitness_step_counter_t *counter,
     const uint64_t now_ms,
-    bool *step_accepted,
-    bool *haptic_due)
+    bool *step_accepted)
 {
-    /* 计数器和两个结果指针必须有效。 */
-    if ((counter == NULL) || (step_accepted == NULL) || (haptic_due == NULL)) {
+    /* 计数器和结果指针必须有效。 */
+    if ((counter == NULL) || (step_accepted == NULL)) {
         /* 缺少结果缓冲时不修改计数。 */
         return FITNESS_STATUS_INVALID_ARGUMENT;
     }
@@ -771,10 +697,8 @@ fitness_status_t fitness_step_counter_accept(
         return FITNESS_STATUS_INVALID_STATE;
     }
 
-    /* 默认拒绝当前步峰且不触发反馈。 */
+    /* 默认拒绝当前步峰。 */
     *step_accepted = false;
-    /* 默认不振动。 */
-    *haptic_due = false;
     /* 已有步峰时检查时间不能倒退。 */
     if ((counter->total_steps != 0ULL) && (now_ms < counter->last_step_ms)) {
         /* 乱序步峰返回明确错误。 */
@@ -793,416 +717,6 @@ fitness_status_t fitness_step_counter_accept(
     counter->last_step_ms = now_ms;
     /* 告知调用方应生成 STEP MetricEvent。 */
     *step_accepted = true;
-    /* 每满 10 步触发一次短振动，避免每一步持续扰动 IMU。 */
-    *haptic_due = ((counter->total_steps % 10ULL) == 0ULL);
     /* 步峰处理成功。 */
-    return FITNESS_STATUS_OK;
-}
-
-void fitness_haptic_queue_init(fitness_haptic_queue_t *queue)
-{
-    /* void 接口遇到空指针只能安全忽略；调用方应在静态初始化时传有效地址。 */
-    if (queue == NULL) {
-        /* 无状态可清除。 */
-        return;
-    }
-    /* 清除全部槽位和环形索引。 */
-    memset(queue, 0, sizeof(*queue));
-}
-
-/*
- * 根据业务原因构造导通时长、关闭间隔和重复次数；本领域层不直接驱动 GPIO。
- * 板级运行时实际使用 GPIO18、5 kHz、10 位 LEDC，正式有效计数以 75% 占空比异步输出一次 30 ms 脉冲。
- * 一次性 esp_timer 负责硬件关断，haptic FreeRTOS 任务只阻塞等待队列/脉冲间隔，不执行占用 CPU 的忙等待。
- */
-static bool fitness_haptic_pattern_for_reason(
-    const fitness_haptic_reason_t reason,
-    fitness_haptic_request_t *request)
-{
-    /* 输出指针为空或原因越界时无法生成波形。 */
-    if ((request == NULL) || ((int)reason < 0) || (reason >= FITNESS_HAPTIC_REASON_COUNT)) {
-        /* 返回 false 表示没有合法请求。 */
-        return false;
-    }
-
-    /* 先写入业务原因，后续分支补充脉冲参数。 */
-    request->reason = reason;
-    /* 各原因使用方案固定波形。 */
-    switch (reason) {
-        /* 会话开始使用双短脉冲。 */
-        case FITNESS_HAPTIC_REASON_START:
-            request->on_ms = 20U;
-            request->off_ms = 40U;
-            request->repeat_count = 2U;
-            break;
-        /* 每次重复使用单个 30 ms 脉冲。 */
-        case FITNESS_HAPTIC_REASON_REPETITION:
-            request->on_ms = 30U;
-            request->off_ms = 0U;
-            request->repeat_count = 1U;
-            break;
-        /* 每 10 步使用单个 30 ms 脉冲。 */
-        case FITNESS_HAPTIC_REASON_STEP_BATCH:
-            request->on_ms = 30U;
-            request->off_ms = 0U;
-            request->repeat_count = 1U;
-            break;
-        /* 暂停或结束使用单个 40 ms 脉冲。 */
-        case FITNESS_HAPTIC_REASON_PAUSE_OR_END:
-            request->on_ms = 40U;
-            request->off_ms = 0U;
-            request->repeat_count = 1U;
-            break;
-        /* 目标完成使用三个 25 ms 脉冲。 */
-        case FITNESS_HAPTIC_REASON_GOAL:
-            request->on_ms = 25U;
-            request->off_ms = 35U;
-            request->repeat_count = 3U;
-            break;
-        /* 低电量使用两个 40 ms 脉冲。 */
-        case FITNESS_HAPTIC_REASON_LOW_BATTERY:
-            request->on_ms = 40U;
-            request->off_ms = 60U;
-            request->repeat_count = 2U;
-            break;
-        /* 枚举已在入口验证，default 仍作为编译器防御。 */
-        default:
-            return false;
-    }
-
-    /* 波形生成成功。 */
-    return true;
-}
-
-fitness_status_t fitness_haptic_enqueue_reason(
-    fitness_haptic_queue_t *queue,
-    const fitness_haptic_reason_t reason)
-{
-    /* 队列必须有效。 */
-    if (queue == NULL) {
-        /* 空队列指针无法写入。 */
-        return FITNESS_STATUS_INVALID_ARGUMENT;
-    }
-    /* 固定容量已满时保持 FIFO 内容不变。 */
-    if (queue->count >= FITNESS_HAPTIC_QUEUE_CAPACITY) {
-        /* 调用方可记录丢弃或稍后重试。 */
-        return FITNESS_STATUS_QUEUE_FULL;
-    }
-
-    /* 在栈上构造一个小型请求，避免先写槽位后发现原因非法。 */
-    fitness_haptic_request_t request;
-    /* 非法原因不进入队列。 */
-    if (!fitness_haptic_pattern_for_reason(reason, &request)) {
-        /* 返回参数错误。 */
-        return FITNESS_STATUS_INVALID_ARGUMENT;
-    }
-
-    /* 把完整请求写入 tail 指向的空槽。 */
-    queue->items[queue->tail] = request;
-    /* tail 环形前进一格。 */
-    queue->tail = (uint8_t)((queue->tail + 1U) % FITNESS_HAPTIC_QUEUE_CAPACITY);
-    /* 增加有效元素数量。 */
-    queue->count += 1U;
-    /* 入队成功。 */
-    return FITNESS_STATUS_OK;
-}
-
-fitness_status_t fitness_haptic_enqueue_for_metric(
-    fitness_haptic_queue_t *queue,
-    const fitness_metric_event_t *event,
-    bool *request_enqueued)
-{
-    /* 队列、事件和结果标记必须有效。 */
-    if ((queue == NULL) || (event == NULL) || (request_enqueued == NULL)) {
-        /* 缺少任一对象均无法确定反馈。 */
-        return FITNESS_STATUS_INVALID_ARGUMENT;
-    }
-
-    /* 默认当前指标不需要振动。 */
-    *request_enqueued = false;
-    /* 每次有效重复都生成一个 30 ms 请求。 */
-    if (event->metric_kind == FITNESS_METRIC_REPETITION) {
-        /* 只有正增量事件才允许反馈。 */
-        if (event->delta_value == 0U) {
-            /* 零增量事件违反 MetricEvent 合同。 */
-            return FITNESS_STATUS_INVALID_ARGUMENT;
-        }
-        /* 入队固定重复波形。 */
-        const fitness_status_t status = fitness_haptic_enqueue_reason(
-            queue,
-            FITNESS_HAPTIC_REASON_REPETITION);
-        /* 入队成功才置 true。 */
-        *request_enqueued = (status == FITNESS_STATUS_OK);
-        /* 透传成功或队列满错误。 */
-        return status;
-    }
-
-    /* walk/trot 仅在总步数恰好跨到 10 的倍数时反馈。 */
-    if (event->metric_kind == FITNESS_METRIC_STEP) {
-        /* total=0 或非 10 的倍数无需振动。 */
-        if ((event->total_value == 0ULL) || ((event->total_value % 10ULL) != 0ULL)) {
-            /* 正常无反馈。 */
-            return FITNESS_STATUS_OK;
-        }
-        /* 入队固定每十步波形。 */
-        const fitness_status_t status = fitness_haptic_enqueue_reason(
-            queue,
-            FITNESS_HAPTIC_REASON_STEP_BATCH);
-        /* 入队成功才置 true。 */
-        *request_enqueued = (status == FITNESS_STATUS_OK);
-        /* 透传队列结果。 */
-        return status;
-    }
-
-    /* sit 时长事件不产生周期振动，避免持续干扰佩戴。 */
-    if (event->metric_kind == FITNESS_METRIC_DURATION_MS) {
-        /* 正常无反馈。 */
-        return FITNESS_STATUS_OK;
-    }
-
-    /* 未知指标类型属于参数错误。 */
-    return FITNESS_STATUS_INVALID_ARGUMENT;
-}
-
-bool fitness_haptic_queue_pop(
-    fitness_haptic_queue_t *queue,
-    fitness_haptic_request_t *request)
-{
-    /* 队列或输出为空时不能取出。 */
-    if ((queue == NULL) || (request == NULL)) {
-        /* 返回 false 表示没有有效输出。 */
-        return false;
-    }
-    /* 空队列保持索引不变。 */
-    if (queue->count == 0U) {
-        /* 没有请求。 */
-        return false;
-    }
-
-    /* 复制最早请求给消费者。 */
-    *request = queue->items[queue->head];
-    /* head 环形前进一格。 */
-    queue->head = (uint8_t)((queue->head + 1U) % FITNESS_HAPTIC_QUEUE_CAPACITY);
-    /* 减少有效元素数量。 */
-    queue->count -= 1U;
-    /* 成功取出一个请求。 */
-    return true;
-}
-
-void fitness_haptic_guard_init(fitness_haptic_guard_t *guard)
-{
-    /* void 初始化接口对空指针安全忽略。 */
-    if (guard == NULL) {
-        /* 无状态可清除。 */
-        return;
-    }
-    /* 清除端点、待插值时间、冻结位和污染区间。 */
-    memset(guard, 0, sizeof(*guard));
-}
-
-fitness_status_t fitness_haptic_guard_mark_pulse(
-    fitness_haptic_guard_t *guard,
-    const uint64_t pulse_start_ms,
-    const uint32_t pulse_on_ms)
-{
-    /* guard 必须有效，通电脉冲必须至少 1 ms。 */
-    if ((guard == NULL) || (pulse_on_ms == 0U)) {
-        /* 空对象或零脉冲不建立污染区。 */
-        return FITNESS_STATUS_INVALID_ARGUMENT;
-    }
-
-    /* 需要增加的保护长度包含通电和固定 80 ms 余振。 */
-    const uint64_t guard_length_ms = ((uint64_t)pulse_on_ms) + FITNESS_HAPTIC_TAIL_GUARD_MS;
-    /* 时间加法接近 uint64 上限时使用饱和终点。 */
-    const uint64_t new_until_ms = (UINT64_MAX - pulse_start_ms < guard_length_ms) ?
-                                  UINT64_MAX :
-                                  (pulse_start_ms + guard_length_ms);
-
-    /* 新脉冲与现有区间不相交时，用新脉冲替换已结束区间。 */
-    if ((guard->contaminated_until_ms == 0ULL) ||
-        (pulse_start_ms > guard->contaminated_until_ms)) {
-        /* 保存新污染起点。 */
-        guard->contaminated_from_ms = pulse_start_ms;
-        /* 保存新污染终点。 */
-        guard->contaminated_until_ms = new_until_ms;
-        /* 登记成功。 */
-        return FITNESS_STATUS_OK;
-    }
-
-    /* 重叠脉冲可能更早开始，区间起点取较小值。 */
-    if (pulse_start_ms < guard->contaminated_from_ms) {
-        /* 向前扩展污染起点。 */
-        guard->contaminated_from_ms = pulse_start_ms;
-    }
-    /* 重叠脉冲可能延长尾部，终点取较大值。 */
-    if (new_until_ms > guard->contaminated_until_ms) {
-        /* 向后扩展污染终点。 */
-        guard->contaminated_until_ms = new_until_ms;
-    }
-    /* 合并完成。 */
-    return FITNESS_STATUS_OK;
-}
-
-bool fitness_haptic_guard_is_contaminated(
-    const fitness_haptic_guard_t *guard,
-    const uint64_t sample_ms)
-{
-    /* 空 guard 表示没有已知振动，不把采样误判为污染。 */
-    if (guard == NULL) {
-        /* 安全返回未污染。 */
-        return false;
-    }
-    /* 只有闭区间 [from, until] 内的时间才标记污染。 */
-    return (guard->contaminated_until_ms != 0ULL) &&
-           (sample_ms >= guard->contaminated_from_ms) &&
-           (sample_ms <= guard->contaminated_until_ms);
-}
-
-fitness_status_t fitness_haptic_guard_push_sample(
-    fitness_haptic_guard_t *guard,
-    const fitness_imu_sample_t *input_sample,
-    fitness_imu_sample_t output_samples[FITNESS_HAPTIC_MAX_OUTPUT_SAMPLES],
-    size_t *output_count,
-    bool *counter_frozen)
-{
-    /* 所有输入输出缓冲都必须有效。 */
-    if ((guard == NULL) || (input_sample == NULL) || (output_samples == NULL) ||
-        (output_count == NULL) || (counter_frozen == NULL)) {
-        /* 缺少缓冲时不改变 guard。 */
-        return FITNESS_STATUS_INVALID_ARGUMENT;
-    }
-
-    /* 默认本次尚无可交付采样。 */
-    *output_count = 0U;
-    /* 先报告进入本次调用前的硬冻结状态。 */
-    *counter_frozen = guard->hard_freeze;
-
-    /* 判断当前时间是否受电机通电或余振污染。 */
-    if (fitness_haptic_guard_is_contaminated(guard, input_sample->monotonic_ms)) {
-        /* 没有左侧干净端点时无法插值，直接进入硬冻结。 */
-        if (!guard->has_previous_clean) {
-            /* 冻结计数直到下一干净采样。 */
-            guard->hard_freeze = true;
-            /* 清除无法使用的待插值点。 */
-            guard->pending_count = 0U;
-            /* 返回最新冻结状态。 */
-            *counter_frozen = true;
-            /* 污染采样被有意丢弃。 */
-            return FITNESS_STATUS_OK;
-        }
-
-        /* 尚未硬冻结且污染长度不超过 3 点时，只保存时间戳等待右端点。 */
-        if (!guard->hard_freeze &&
-            (guard->pending_count < FITNESS_HAPTIC_MAX_INTERPOLATED_SAMPLES)) {
-            /* 保存待修复采样时刻，不保存被污染的六轴值。 */
-            guard->pending_timestamps[guard->pending_count] = input_sample->monotonic_ms;
-            /* 增加待插值点数。 */
-            guard->pending_count += 1U;
-            /* 3 点以内暂不硬冻结；下一个干净点到来后会补发。 */
-            *counter_frozen = false;
-            /* 当前没有可交付采样。 */
-            return FITNESS_STATUS_OK;
-        }
-
-        /* 第 4 个连续污染点触发硬冻结，不再尝试构造长段虚假波形。 */
-        guard->hard_freeze = true;
-        /* 丢弃此前 3 个待插值时间，状态机应整体重置当前周期。 */
-        guard->pending_count = 0U;
-        /* 通知调用方冻结计数。 */
-        *counter_frozen = true;
-        /* 污染采样被丢弃。 */
-        return FITNESS_STATUS_OK;
-    }
-
-    /* 时间必须晚于已保存的干净端点，才能执行因果流重建。 */
-    if (guard->has_previous_clean &&
-        (input_sample->monotonic_ms < guard->previous_clean.monotonic_ms)) {
-        /* 乱序采样不会覆盖端点。 */
-        return FITNESS_STATUS_INVALID_TIME;
-    }
-
-    /* 硬冻结后的首个干净点只用于恢复，不回填超过 3 点的污染区。 */
-    if (guard->hard_freeze) {
-        /* 复制当前干净点作为唯一输出。 */
-        output_samples[0] = *input_sample;
-        /* 该点之后计数器可以重新建立新周期。 */
-        output_samples[0].quality_flags |= FITNESS_QUALITY_COUNTER_FROZEN;
-        /* 保存新的干净左端点。 */
-        guard->previous_clean = *input_sample;
-        /* 标记已有可用端点。 */
-        guard->has_previous_clean = true;
-        /* 清除冻结状态。 */
-        guard->hard_freeze = false;
-        /* 清除任何残留待插值点。 */
-        guard->pending_count = 0U;
-        /* 本次输出一个恢复采样。 */
-        *output_count = 1U;
-        /* 调用结束后不再冻结，但调用方看到输出质量位后应重置动作周期。 */
-        *counter_frozen = false;
-        /* 恢复成功。 */
-        return FITNESS_STATUS_OK;
-    }
-
-    /* 有 1..3 个待修复点时，用前后干净点做逐轴线性插值。 */
-    if ((guard->pending_count > 0U) && guard->has_previous_clean) {
-        /* 两端时间跨度必须为正，避免除零。 */
-        const uint64_t span_ms = input_sample->monotonic_ms - guard->previous_clean.monotonic_ms;
-        /* 同一时间戳无法定义插值比例。 */
-        if (span_ms == 0ULL) {
-            /* 保留待处理状态，要求调用方修正时间源。 */
-            return FITNESS_STATUS_INVALID_TIME;
-        }
-
-        /* 依次重建每个污染点，时间顺序与原采样一致。 */
-        for (uint8_t sample_index = 0U; sample_index < guard->pending_count; ++sample_index) {
-            /* 当前待修复点时间必须严格位于两个干净端点之间。 */
-            const uint64_t pending_ms = guard->pending_timestamps[sample_index];
-            /* 越界时间表示上游乱序或重复时间戳。 */
-            if ((pending_ms <= guard->previous_clean.monotonic_ms) ||
-                (pending_ms >= input_sample->monotonic_ms)) {
-                /* 不输出部分结果，保持状态供诊断。 */
-                return FITNESS_STATUS_INVALID_TIME;
-            }
-            /* 线性比例 r 位于 (0,1)，float 精度足够覆盖 25 Hz 时间间隔。 */
-            const float ratio = (float)(pending_ms - guard->previous_clean.monotonic_ms) /
-                                (float)span_ms;
-            /* 写入原污染点的时间戳。 */
-            output_samples[sample_index].monotonic_ms = pending_ms;
-            /* 标记该点原受振动污染且已经插值修复。 */
-            output_samples[sample_index].quality_flags =
-                FITNESS_QUALITY_HAPTIC_CONTAMINATED | FITNESS_QUALITY_INTERPOLATED;
-            /* 对固定六轴逐轴插值，保持 gx..az 顺序和原单位。 */
-            for (uint8_t axis_index = 0U; axis_index < FITNESS_IMU_AXIS_COUNT; ++axis_index) {
-                /* 读取左端点对应轴物理值。 */
-                const float left_value = guard->previous_clean.axis[axis_index];
-                /* 读取右端点对应轴物理值。 */
-                const float right_value = input_sample->axis[axis_index];
-                /* y=(1-r)*left+r*right，避免使用污染中心值。 */
-                output_samples[sample_index].axis[axis_index] =
-                    left_value + ratio * (right_value - left_value);
-            }
-        }
-
-        /* 当前干净点紧跟在全部插值点之后输出。 */
-        output_samples[guard->pending_count] = *input_sample;
-        /* 输出数量为待插值点数加当前点，最大 4。 */
-        *output_count = (size_t)guard->pending_count + 1U;
-        /* 当前干净点成为下一段插值左端点。 */
-        guard->previous_clean = *input_sample;
-        /* 清空待插值队列。 */
-        guard->pending_count = 0U;
-        /* 本次完成短污染区修复。 */
-        return FITNESS_STATUS_OK;
-    }
-
-    /* 普通干净点直接输出，不引入延迟。 */
-    output_samples[0] = *input_sample;
-    /* 保存为未来可能插值的左端点。 */
-    guard->previous_clean = *input_sample;
-    /* 标记端点有效。 */
-    guard->has_previous_clean = true;
-    /* 输出一个采样。 */
-    *output_count = 1U;
-    /* 正常输入处理成功。 */
     return FITNESS_STATUS_OK;
 }

@@ -72,8 +72,8 @@ static int test_defaults(void)
     CHECK((config.goal_kind == DEVICE_GOAL_NONE) && (config.goal_value == 0U));
     /* 默认 AMOLED 亮度为 35%。 */
     CHECK(config.brightness_percent == 35U);
-    /* 默认振动开启、声音关闭。 */
-    CHECK(config.haptic_enabled && !config.sound_enabled);
+    /* 真表没有马达，旧振动保留位与声音默认都关闭。 */
+    CHECK(!config.haptic_enabled && !config.sound_enabled);
     /* 默认熄屏时间为 30 秒，偏好修订从 1 开始。 */
     CHECK((config.screen_timeout_seconds == 30U) && (config.preferences_revision == 1U));
     /* 默认关闭开发者模式与原始流。 */
@@ -125,7 +125,7 @@ static int test_decode_remaining_commands(void)
         1U, 1U, 0x01U,
         2U, 4U, 0x14U, 0x00U, 0x00U, 0x00U,
     };
-    /* 偏好为 60% 亮度、振动关、声音开、45 秒、revision 7、开发模式开。 */
+    /* 偏好为 60% 亮度、旧保留位关、声音开、45 秒、revision 7、开发模式开。 */
     const uint8_t preferences_tlv[] = {
         1U, 1U, 60U,
         2U, 1U, 0U,
@@ -343,13 +343,13 @@ static int test_command_range_boundaries(void)
     test_write_u32_le(&preferences_tlv[15], UINT32_C(0));
     /* revision 0 必须拒绝。 */
     CHECK(device_command_v1_decode(9U, 1U, preferences_tlv, sizeof(preferences_tlv), &command) == DEVICE_CONFIG_ERR_RANGE);
-    /* 恢复 revision 1 并制造 haptic 布尔 2。 */
+    /* 恢复 revision 1 并制造旧保留布尔 2。 */
     test_write_u32_le(&preferences_tlv[15], UINT32_C(1));
-    /* 写入非法 haptic。 */
+    /* 写入非法保留位。 */
     preferences_tlv[5] = 2U;
     /* 非法布尔必须拒绝。 */
     CHECK(device_command_v1_decode(9U, 1U, preferences_tlv, sizeof(preferences_tlv), &command) == DEVICE_CONFIG_ERR_RANGE);
-    /* 恢复 haptic，制造 sound 布尔 2。 */
+    /* 恢复保留位，制造 sound 布尔 2。 */
     preferences_tlv[5] = 1U;
     /* 写入非法 sound。 */
     preferences_tlv[8] = 2U;
@@ -432,11 +432,11 @@ static int test_config_blob(void)
     /* 独立 zlib/CRC32 生成的默认配置黄金向量用于锁定全部偏移和 CRC。 */
     const uint8_t expected_blob[DEVICE_CONFIG_BLOB_SIZE] = {
         0x44U, 0x43U, 0x46U, 0x47U, 0x01U, 0x00U, 0x20U, 0x00U,
-        0x02U, 0x23U, 0x00U, 0x00U, 0x00U, 0x00U, 0x1EU, 0x00U,
+        0x00U, 0x23U, 0x00U, 0x00U, 0x00U, 0x00U, 0x1EU, 0x00U,
         0x70U, 0x11U, 0x01U, 0x00U, 0x01U, 0x00U, 0x00U, 0x00U,
         0x00U, 0x00U, 0x00U, 0x00U, 0x01U, 0x00U, 0x00U, 0x00U,
         0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U,
-        0x46U, 0x67U, 0x3AU, 0xE0U,
+        0x53U, 0x6AU, 0xFFU, 0xD8U,
     };
     /* 全部 44 字节必须逐字节一致。 */
     CHECK(memcmp(blob, expected_blob, sizeof(expected_blob)) == 0);

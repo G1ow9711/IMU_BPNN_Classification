@@ -122,8 +122,6 @@ static void test_board_runtime_mock(void)
     CHECK_TRUE(adapter != NULL);
     /* Mock 共用 I2C 句柄必须非空，独立驱动可据此完成接口联调。 */
     CHECK_TRUE(board_runtime_i2c_handle(&runtime) != NULL);
-    /* 请求计数一次时的 30 ms、75% 振动。 */
-    CHECK_EQ(BOARD_ADAPTER_OK, board_adapter_pulse_haptic(adapter, 30U, 75U));
     /* 读取 Mock 电池。 */
     uint8_t percent = 0U;
     /* 保存充电输出。 */
@@ -207,7 +205,6 @@ static void test_ui_presenter_pages(void)
     context.view.ble_connected = true;
     /* 写入真实设置快照，presenter 不得继续硬编码默认值。 */
     context.view.brightness_percent = 60U;
-    context.view.haptic_enabled = false;
     context.view.screen_timeout_seconds = 60U;
     context.view.preferences_revision = 7U;
     /* 保存 presenter 输出。 */
@@ -228,23 +225,23 @@ static void test_ui_presenter_pages(void)
     CHECK_TRUE(strcmp(page.buttons[0].label, "暂停") == 0);
     CHECK_TRUE(strcmp(page.buttons[1].label, "停止") == 0);
     CHECK_TRUE(strstr(page.secondary, "12 次") != NULL);
-    CHECK_TRUE(strstr(page.secondary, "3.456 千卡") != NULL);
+    CHECK_TRUE(strstr(page.footer, "3.456千卡") != NULL);
     CHECK_TRUE(strstr(page.status, "电量 64%") != NULL);
     CHECK_TRUE(strstr(page.status, "蓝牙 已连") != NULL);
-    /* 模拟训练中静坐休息：主动作仍为跳跃深蹲，但实时类别变成静坐并冻结计数。 */
+    /* 模拟训练中休息：主动作仍为跳跃深蹲，诊断类别可变成静坐但不参与界面主动作。 */
     context.view.inferred_action_id = 5U;
-    /* 关闭计数门，禁止把休息期间腕部噪声送入主动作计数器。 */
+    /* 模拟活动门关闭，禁止把休息期间腕部噪声送入主动作计数器。 */
     context.view.counting_enabled = false;
     /* 重新构建同一训练页，不切换会话或计数器。 */
     CHECK_TRUE(ui_presenter_build(&context, &page));
     /* 标题必须明确当前不计数。 */
-    CHECK_TRUE(strcmp(page.title, "计数已暂停") == 0);
-    /* 主区域必须显示实时静坐，不能继续伪装为跳跃深蹲。 */
-    CHECK_TRUE(strcmp(page.primary, "静坐") == 0);
+    CHECK_TRUE(strcmp(page.title, "休息  计数暂停") == 0);
+    /* 主区域必须保持本轮跳跃深蹲，禁止噪声类别把页面改成“静坐若干次”。 */
+    CHECK_TRUE(strcmp(page.primary, "跳跃深蹲") == 0);
     /* 权威累计保持 12 次，不因休息清零。 */
     CHECK_TRUE(strstr(page.secondary, "12 次") != NULL);
     /* 页脚说明恢复本轮主动作后自动继续。 */
-    CHECK_TRUE(strcmp(page.footer, "继续跳跃深蹲后自动记录") == 0);
+    CHECK_TRUE(strcmp(page.footer, "累计保持  恢复完整动作后继续") == 0);
     /* 恢复正常状态，后续页面遍历继续使用一致快照。 */
     context.view.inferred_action_id = 3U;
     /* 同类干净窗口重新允许计数。 */
@@ -252,44 +249,42 @@ static void test_ui_presenter_pages(void)
     /* PREPARE 页面必须立即要求用户做动作，不能再显示会延后动作的 2 秒倒计时。 */
     context.state = UI_STATE_PREPARE;
     CHECK_TRUE(ui_presenter_build(&context, &page));
-    CHECK_TRUE(strcmp(page.title, "正在识别") == 0);
+    CHECK_TRUE(strcmp(page.title, "动作识别") == 0);
     /* 主文案明确点击开始后立即开始动作。 */
-    CHECK_TRUE(strcmp(page.primary, "开始运动") == 0);
-    /* 次文案明确当前产品固定使用右手腕佩戴域。 */
-    CHECK_TRUE(strcmp(page.secondary, "保持右手佩戴") == 0);
+    CHECK_TRUE(strcmp(page.primary, "开始做动作") == 0);
+    /* 次文案说明设备正在建立本轮单一动作模型。 */
+    CHECK_TRUE(strcmp(page.secondary, "正在建立动作模型") == 0);
     /* 页脚必须说明锁类后的自动记录行为，不能暴露内部窗口术语。 */
-    CHECK_TRUE(strcmp(page.footer, "识别后自动记录") == 0);
+    CHECK_TRUE(strcmp(page.footer, "右手佩戴  识别后自动记录") == 0);
     /* 停止确认页必须同时提供确认和取消，防止训练中误触直接结束。 */
     context.state = UI_STATE_STOP_CONFIRM;
     CHECK_TRUE(ui_presenter_build(&context, &page));
     CHECK_EQ(UI_COMMAND_CONFIRM_STOP, page.buttons[0].command);
     CHECK_EQ(UI_COMMAND_BACK, page.buttons[1].command);
-    /* 检查设置页显示真实快照并提供五个可操作入口。 */
+    /* 检查设置页显示真实快照并提供四个可操作入口。 */
     context.state = UI_STATE_SETTINGS;
     CHECK_TRUE(ui_presenter_build(&context, &page));
     CHECK_TRUE(strstr(page.primary, "60%") != NULL);
-    CHECK_TRUE(strstr(page.secondary, "关") != NULL);
     CHECK_TRUE(strstr(page.secondary, "60秒") != NULL);
     CHECK_EQ(UI_COMMAND_CYCLE_BRIGHTNESS, page.buttons[0].command);
-    CHECK_EQ(UI_COMMAND_TOGGLE_HAPTIC, page.buttons[1].command);
-    CHECK_EQ(UI_COMMAND_OPEN_DIAGNOSTICS, page.buttons[2].command);
-    CHECK_EQ(UI_COMMAND_FORGET_COMPUTER, page.buttons[3].command);
-    CHECK_EQ(UI_COMMAND_BACK, page.buttons[4].command);
+    CHECK_EQ(UI_COMMAND_OPEN_DIAGNOSTICS, page.buttons[1].command);
+    CHECK_EQ(UI_COMMAND_FORGET_COMPUTER, page.buttons[2].command);
+    CHECK_EQ(UI_COMMAND_BACK, page.buttons[3].command);
+    CHECK_EQ(UI_COMMAND_NONE, page.buttons[4].command);
     CHECK_TRUE(strcmp(page.buttons[0].label, "亮度") == 0);
-    CHECK_TRUE(strcmp(page.buttons[1].label, "振动") == 0);
-    CHECK_TRUE(strcmp(page.buttons[2].label, "诊断") == 0);
-    CHECK_TRUE(strcmp(page.buttons[3].label, "忘记电脑") == 0);
-    CHECK_TRUE(strcmp(page.buttons[4].label, "返回") == 0);
+    CHECK_TRUE(strcmp(page.buttons[1].label, "诊断") == 0);
+    CHECK_TRUE(strcmp(page.buttons[2].label, "忘记电脑") == 0);
+    CHECK_TRUE(strcmp(page.buttons[3].label, "返回") == 0);
     CHECK_TRUE(strstr(page.footer, "400毫安时") != NULL);
-    /* 检查诊断页质量位图、配置修订号、振动测试和熄屏门槛入口。 */
+    /* 检查诊断页质量位图、配置修订号和熄屏门槛入口。 */
     context.state = UI_STATE_DIAGNOSTICS;
     context.view.data_quality_flags = 0x0021U;
     CHECK_TRUE(ui_presenter_build(&context, &page));
     CHECK_TRUE(strstr(page.secondary, "0021") != NULL);
     CHECK_TRUE(strstr(page.footer, "7") != NULL);
-    CHECK_EQ(UI_COMMAND_TEST_HAPTIC, page.buttons[0].command);
-    CHECK_EQ(UI_COMMAND_CYCLE_TIMEOUT, page.buttons[1].command);
-    CHECK_EQ(UI_COMMAND_BACK, page.buttons[2].command);
+    CHECK_EQ(UI_COMMAND_CYCLE_TIMEOUT, page.buttons[0].command);
+    CHECK_EQ(UI_COMMAND_BACK, page.buttons[1].command);
+    CHECK_EQ(UI_COMMAND_NONE, page.buttons[2].command);
     /* 检查熄屏页保留唯一全屏唤醒命令。 */
     context.state = UI_STATE_SCREEN_OFF;
     CHECK_TRUE(ui_presenter_build(&context, &page));

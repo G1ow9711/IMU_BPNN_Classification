@@ -53,7 +53,7 @@ public enum DataQualityFlags : ushort
     LowConfidence = 1 << 1,
     /// <summary>IMU 读取失败或样本时间不连续。</summary>
     SensorFault = 1 << 2,
-    /// <summary>振动反馈期间使用了替代样本以避免马达污染。</summary>
+    /// <summary>旧固件执行器保护期使用了替代样本；当前无马达固件不产生该位。</summary>
     HapticSampleSubstituted = 1 << 3,
     /// <summary>设备还没有获得可信 UTC 时间。</summary>
     TimeUnsynchronized = 1 << 4,

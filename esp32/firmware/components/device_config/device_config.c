@@ -20,12 +20,10 @@
 #define DEVICE_CONFIG_BLOB_PAYLOAD_SIZE UINT16_C(32)
 /* CRC 覆盖 8 字节头和 32 字节 payload。 */
 #define DEVICE_CONFIG_BLOB_CRC_OFFSET ((size_t)40U)
-/* flags 只允许 UTC、振动、声音、开发者和原始流五位。 */
+/* flags 允许 UTC、旧协议保留、声音、开发者和原始流五位。 */
 #define DEVICE_CONFIG_KNOWN_FLAGS UINT8_C(0x1F)
 /* UTC 有效标志位。 */
 #define DEVICE_CONFIG_FLAG_UTC_VALID UINT8_C(0x01)
-/* 振动启用标志位。 */
-#define DEVICE_CONFIG_FLAG_HAPTIC UINT8_C(0x02)
 /* 声音启用标志位。 */
 #define DEVICE_CONFIG_FLAG_SOUND UINT8_C(0x04)
 /* 开发者模式标志位。 */
@@ -233,8 +231,8 @@ void device_config_set_defaults(device_config_t *config)
     config->goal_value = UINT32_C(0);
     /* 默认 AMOLED 亮度为 35%。 */
     config->brightness_percent = UINT8_C(35);
-    /* 默认开启计次振动。 */
-    config->haptic_enabled = true;
+    /* 协议 v1 振动位只为兼容旧上位机保留；实物没有马达，固定关闭。 */
+    config->haptic_enabled = false;
     /* 默认关闭声音，避免公共环境打扰。 */
     config->sound_enabled = false;
     /* 默认 30 秒无交互熄屏。 */
@@ -330,7 +328,7 @@ static uint8_t device_known_tlv_length(
     }
     /* Cmd9 定义六个偏好字段。 */
     if (command_id == (uint8_t)DEVICE_COMMAND_SET_PREFERENCES) {
-        /* 亮度、振动、声音和开发者模式均为一字节。 */
+    /* 亮度、旧马达保留位、声音和开发者模式均为一字节。 */
         if ((type == 1U) || (type == 2U) || (type == 3U) || (type == 6U)) {
             /* 返回一字节。 */
             return 1U;
@@ -424,7 +422,7 @@ static device_config_status_t device_assign_known_tlv(
                 /* 返回成功。 */
                 return DEVICE_CONFIG_OK;
             }
-            /* type2 为振动布尔。 */
+            /* type2 是旧协议保留布尔；仍严格校验 0/1，应用阶段固定忽略。 */
             if (type == 2U) {
                 /* 严格解码 0/1。 */
                 return device_decode_bool(value[0], &command->value.preferences.haptic_enabled);
@@ -675,8 +673,8 @@ device_config_status_t device_config_apply_command(
         case DEVICE_COMMAND_SET_PREFERENCES:
             /* 保存亮度。 */
             candidate.brightness_percent = command->value.preferences.brightness_percent;
-            /* 保存振动开关。 */
-            candidate.haptic_enabled = command->value.preferences.haptic_enabled;
+            /* 真表没有马达；无论旧客户端写入何值，持久状态都固定为 false。 */
+            candidate.haptic_enabled = false;
             /* 保存声音开关。 */
             candidate.sound_enabled = command->value.preferences.sound_enabled;
             /* 保存熄屏秒。 */
@@ -750,18 +748,14 @@ device_config_status_t device_config_blob_encode(
     device_write_u16_le(&output[4], DEVICE_CONFIG_BLOB_VERSION);
     /* 偏移 6 写入 u16 payload 长度。 */
     device_write_u16_le(&output[6], DEVICE_CONFIG_BLOB_PAYLOAD_SIZE);
-    /* 组装五个布尔标志。 */
+    /* 组装四个有效布尔标志；旧协议 bit1 保持零。 */
     uint8_t flags = UINT8_C(0);
     /* UTC 已同步时置位 bit0。 */
     if (config->utc_valid) {
         /* 写入 UTC 有效位。 */
         flags |= DEVICE_CONFIG_FLAG_UTC_VALID;
     }
-    /* 振动开启时置位 bit1。 */
-    if (config->haptic_enabled) {
-        /* 写入振动位。 */
-        flags |= DEVICE_CONFIG_FLAG_HAPTIC;
-    }
+    /* bit1 为旧振动配置保留位；当前硬件没有马达，编码时始终保持 0。 */
     /* 声音开启时置位 bit2。 */
     if (config->sound_enabled) {
         /* 写入声音位。 */
@@ -853,12 +847,12 @@ device_config_status_t device_config_blob_decode(
     device_config_t candidate;
     /* 清零包括填充字节。 */
     (void)memset(&candidate, 0, sizeof(candidate));
-    /* 读取五个 flags。 */
+    /* 读取协议 flags；旧协议 bit1 被忽略。 */
     const uint8_t flags = blob[8];
     /* 解码 UTC 有效位。 */
     candidate.utc_valid = (flags & DEVICE_CONFIG_FLAG_UTC_VALID) != 0U;
-    /* 解码振动位。 */
-    candidate.haptic_enabled = (flags & DEVICE_CONFIG_FLAG_HAPTIC) != 0U;
+    /* 忽略旧 blob 的 bit1；升级后真表无马达合同固定为 false。 */
+    candidate.haptic_enabled = false;
     /* 解码声音位。 */
     candidate.sound_enabled = (flags & DEVICE_CONFIG_FLAG_SOUND) != 0U;
     /* 解码开发者位。 */
