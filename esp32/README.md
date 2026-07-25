@@ -87,7 +87,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File `
 
 把 `COM7` 换成设备管理器中实际串口。脚本不会自动猜串口，避免误刷其它设备。串口监视使用 `Ctrl+]` 退出。
 
-烧录后必须验证：AMOLED 与触摸坐标、QMI8658 的 `0x6A/0x6B` 探测、RTC、AXP2101 SOC/关机、BLE 配对与 MTU、LittleFS 掉电恢复、实际功耗、任务栈/堆和一小时稳定运行。详见[手表与上位机软件详细设计](../docs/手柄与上位机软件详细设计.md)。
+烧录后必须验证：AMOLED 与触摸坐标、QMI8658 的 `0x6A/0x6B` 探测、RTC、AXP2101 SOC/关机、BLE 配对与 MTU、LittleFS 掉电恢复、实际功耗、任务栈/堆和一小时稳定运行。详见[手表与上位机软件详细设计](../docs/系统架构与业务流程.md)。
 
 ## 6. 无硬件测试
 
@@ -104,11 +104,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File `
 
 ## 7. 文档入口
 
-- [完整算法文档](../docs/算法文档.md)
-- [IMU 采样、重采样与推理链](../docs/IMU采样重采样与推理链.md)
-- [计数与卡路里算法](../docs/计数与卡路里算法.md)
-- [设备 UI 与低功耗](../docs/设备UI与低功耗.md)
-- [设备端 BLE 服务](../docs/设备端BLE服务.md)
-- [BLE 通信协议](../docs/BLE通信协议.md)
-- [设备配置与命令 TLV v1](../docs/设备配置与命令TLV.md)
-- [板载传感器驱动](../docs/板载QMI8658_AXP2101_PCF85063驱动.md)
+- [文档索引](../docs/README.md)
+- [算法原理、训练与实时计数](../docs/算法原理、训练与实时计数.md)
+- [系统架构与业务流程](../docs/系统架构与业务流程.md)
+- [BLE 通信、设备配置与会话存储](../docs/BLE通信、设备配置与会话存储.md)
+- [硬件平台、手表界面与低功耗](../docs/硬件平台、手表界面与低功耗.md)
+- [测试验收、故障排查与后续计划](../docs/测试验收、故障排查与后续计划.md)

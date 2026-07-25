@@ -55,7 +55,7 @@ typedef enum ble_service_message_type {
     BLE_SERVICE_MESSAGE_INFERENCE_DIAGNOSTIC = 9
 } ble_service_message_type_t;
 
-// v1 控制命令编号与 docs/BLE通信协议.md 第 9.3 节保持逐项一致。
+// v1 控制命令编号与 docs/BLE通信、设备配置与会话存储.md 第 9.3 节保持逐项一致。
 typedef enum ble_service_command_id {
     // 从 Idle 或 Summary 状态开始新训练会话。
     BLE_SERVICE_COMMAND_START_SESSION = 1,
@@ -137,7 +137,7 @@ typedef enum ble_service_error_code {
     BLE_SERVICE_ERROR_HANDLER_FAILED = 0x0105
 } ble_service_error_code_t;
 
-// EventV1 事件类型与 docs/BLE通信协议.md 第 10 节保持固定数值，未知类型不得猜测解释。
+// EventV1 事件类型与 docs/BLE通信、设备配置与会话存储.md 第 10 节保持固定数值，未知类型不得猜测解释。
 typedef enum ble_service_event_type {
     // 新会话已创建并进入准备或运行状态。
     BLE_SERVICE_EVENT_SESSION_STARTED = 1,

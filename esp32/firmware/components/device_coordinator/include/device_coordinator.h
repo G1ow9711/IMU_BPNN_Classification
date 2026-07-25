@@ -9,7 +9,7 @@
  * fitness_metric_event_t，协调器不重算任何业务指标。
  *
  * 公式、单位、幂等键、复杂度和错误回滚见：
- * docs/应用协调器与事件事实链.md。
+ * docs/系统架构与业务流程.md。
  */
 
 /* 引入 BLE LiveState 和 command 1..11 稳定线上合同。 */

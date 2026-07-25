@@ -1,7 +1,7 @@
 #ifndef IMU_BLE_PROTOCOL_H
 #define IMU_BLE_PROTOCOL_H
 
-// 完整帧、CRC、分片公式和边界条件见 docs/BLE通信协议.md 第 4～6 节。
+// 完整帧、CRC、分片公式和边界条件见 docs/BLE通信、设备配置与会话存储.md 第 4～6 节。
 // 引入 size_t 和固定宽度整数类型，保证 PC 与 ESP32 使用相同字段宽度。
 #include <stddef.h>
 // 引入 uint8_t、uint16_t 和 uint32_t，避免平台相关的 int 宽度差异。
