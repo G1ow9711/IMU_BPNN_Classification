@@ -1,6 +1,6 @@
 {
     "schema_version":  1,
-    "generator":  "lv_font_conv via tools/generate_lvgl_ui_fonts.ps1",
+    "generator":  "lv_font_conv via esp32/firmware/tools/generate_lvgl_ui_fonts.ps1",
     "source_font":  "Noto Sans SC (TrueType).otf",
     "source_font_sha256":  "a2b93e6c2db05d6bbbf6f27d413ec73269735b7b679019c8a5aa9670ff0ffbf2",
     "license":  "SIL Open Font License 1.1",
@@ -14,32 +14,32 @@
                                 "size_px":  16,
                                 "bpp":  2,
                                 "file":  "esp32/firmware/components/ui/fonts/ui_font_noto_sans_sc_16.c",
-                                "bytes":  103040,
-                                "sha256":  "a13874a22410b29ced621f39c5cdfea99d96e4c78c5750a64d4de005c06760c1"
+                                "bytes":  103055,
+                                "sha256":  "3320d79ef0863ebc64dbdc5a0be441084c8120b523a34265777c30d6a4d41178"
                             },
                             {
                                 "name":  "ui_font_noto_sans_sc_20",
                                 "size_px":  20,
                                 "bpp":  2,
                                 "file":  "esp32/firmware/components/ui/fonts/ui_font_noto_sans_sc_20.c",
-                                "bytes":  139257,
-                                "sha256":  "44f0b8bda6bd38e17e37d3e4bbe5e46dedc91de620d76720d02794de3c1db1eb"
+                                "bytes":  139272,
+                                "sha256":  "de252a0450082fcc9bf03ae040ae3fd74769aaa464ffcc11d2ea5851e4060adc"
                             },
                             {
                                 "name":  "ui_font_noto_sans_sc_28",
                                 "size_px":  28,
                                 "bpp":  2,
                                 "file":  "esp32/firmware/components/ui/fonts/ui_font_noto_sans_sc_28.c",
-                                "bytes":  229418,
-                                "sha256":  "fe858554841825688b03ae1c20a9f63f7bb8d0d5a560d2b5c03317bf651d97e8"
+                                "bytes":  229433,
+                                "sha256":  "de4c01a1adc0f248181e45ee76a51717f6e254a216d67a149502cfe05fa6b804"
                             },
                             {
                                 "name":  "ui_font_noto_sans_sc_36",
                                 "size_px":  36,
                                 "bpp":  2,
                                 "file":  "esp32/firmware/components/ui/fonts/ui_font_noto_sans_sc_36.c",
-                                "bytes":  348528,
-                                "sha256":  "0cd1dca51085678210778f25443ed8ee93effabeb4777d1ed7829e9db6930fd1"
+                                "bytes":  348543,
+                                "sha256":  "dd03d91495518372b933d274f5d914487a0712746b0dbb97f273fae885808a1f"
                             }
                         ]
 }

@@ -1,6 +1,6 @@
 # Python 数据、特征与 BP 训练教程
 
-`python/` 是算法的可复现源头：读取六轴 IMU、建立文件级划分、清洗窗口、提取 297 项特征、训练双轻量 BP、评估验证边界、导出 ESP32 C 产物，并生成算法文档图。
+`python/` 是算法的可复现源头：读取六轴 IMU、建立文件级划分、清洗窗口、提取 297 项特征、训练双轻量 BP、导出 ESP32 C 产物，并生成算法文档图。
 
 ## 从哪里开始
 
@@ -8,12 +8,8 @@
 |---|---|
 | 看懂数据到模型的完整流程 | [`train_export.py`](train_export.py) |
 | 复现四张算法图 | [`visualize_action_features.py`](visualize_action_features.py) |
-| 检查特征分离度 | [`analyze_feature_separability.py`](analyze_feature_separability.py) |
+| 准备清单约束的数据集 | [`prepare_finals_dataset.py`](prepare_finals_dataset.py) |
 | 导出双模型到 ESP32 | [`dual_m0_export.py`](dual_m0_export.py) |
-| 验证 C/Python 数值一致 | [`verify_dual_m0_c.py`](verify_dual_m0_c.py) |
-| 复现当前双模型评估 | [`evaluate_fixed_ensemble.py`](evaluate_fixed_ensemble.py) |
-| 对齐 44 列真板日志与计数事件 | [`analysis/count_event_alignment.py`](analysis/count_event_alignment.py) |
-| 跑全部自动测试 | `python -m unittest discover -s python -p "test_*.py"` |
 
 算法公式、每项特征的物理意义和资源影响见[算法原理、训练与实时计数](../docs/算法原理、训练与实时计数.md)。
 
@@ -223,45 +219,15 @@ esp32_dual_m0_model.h
 .\.venv\Scripts\python.exe python\dual_m0_export.py --help
 ```
 
-验证真实 C 头：
+发布前必须核对 `dual_m0_manifest.json` 中的 297 项特征、两个模型、固定融合权重和生成文件 SHA-256；部署必须以清单与同目录工件为准。
 
-```powershell
-.\.venv\Scripts\python.exe python\verify_dual_m0_c.py --help
-```
+## 数据准备与发布边界
 
-发布前必须核对 297 项特征、两个模型 logits、融合结果和最终类别；部署必须以双模型清单为准。
-
-## 评估与诊断入口
-
-- [`evaluate_fixed_ensemble.py`](evaluate_fixed_ensemble.py)：当前双模型评估与最终确认，不提供测试集调参开关。
-- [`evaluate_validation_generalization.py`](evaluate_validation_generalization.py)：只读固定验证文件，检查旋转、幅度和持续时间压力。
-- [`evaluate_validation_candidate_grid.py`](evaluate_validation_candidate_grid.py)：比较预声明模型组合，先执行干净验证不退化门。
-- [`evaluate_validation_tri_m0.py`](evaluate_validation_tri_m0.py)：只比较预声明三模型方案，不搜索外部会话权重。
-- [`analyze_feature_separability.py`](analyze_feature_separability.py)：窗口级和文件级 Fisher、稳定效应量与相关性。
-- [`analyze_wrist_candidates.py`](analyze_wrist_candidates.py)：文件分组交叉验证的手腕特征分析。
 - [`prepare_finals_dataset.py`](prepare_finals_dataset.py)：按 [`finals_jumping_squat_manifest.json`](finals_jumping_squat_manifest.json) 校验补充会话哈希、行数和角色。
-- [`analysis/README.md`](analysis/README.md)：44 列真板日志事件对齐和峰谷配对可视验证；外部参考实现不随仓库分发。
 
 外部真板 CSV 只用于独立确认，不参与增强范围、模型、融合权重或阈值选择。
 
-## 测试
-
-全部 Python 测试：
-
-```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s python -p "test_*.py"
-```
-
-可视化定向测试：
-
-```powershell
-.\.venv\Scripts\python.exe -m unittest `
-  python.test_visualize_action_features
-```
-
-测试覆盖数据形状、单位、窗口、文件隔离、特征顺序、有限值、增强边界、训练日志、导出清单、C 代码生成、可视化聚合和异常输入。Python 测试通过不等于 ESP32 真板发布通过。
-
-## 当前验证边界
+## 模型适用边界
 
 - 文件级划分阻止同一文件泄漏，但没有受试者 ID，不能声称严格跨人泛化。
 - 没有可靠佩戴侧标签；当前产品固定右手腕，不承诺左腕。

@@ -71,7 +71,7 @@ QMI8658 六轴 IMU
 
 ```text
 IMU_BPNN_Classification/
-├─ python/                     数据、特征、训练、评估、导出、可视化与测试
+├─ python/                     数据、特征、训练、模型导出与可视化
 ├─ esp32/                      ESP32-S3 固件、模型包、主机测试与烧录入口
 ├─ pc/                         .NET 8 WPF 上位机、BLE、Mock、历史与测试
 ├─ docs/

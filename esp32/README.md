@@ -149,15 +149,7 @@ HOST_TESTS_OK count=12
 
 十二组覆盖 BLE、板载传感器、UI runtime、设备配置、健身核心、IMU pipeline、动作相位、功耗/UI、会话传输、会话存储、训练引擎和总协调器。
 
-### 6.2 固件源码合同
-
-```powershell
-& '.venv\Scripts\python.exe' tools\test_firmware_source_contract.py
-```
-
-源码合同用于锁定启动顺序、栈/堆边界、BLE 配对、设置页四宫格、亮度按钮、返回路径、双模型和分类/计数语义。
-
-### 6.3 ESP-IDF 构建
+### 6.2 ESP-IDF 构建
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
@@ -353,19 +345,9 @@ New-Item -ItemType Directory -Force -Path $candidateDir | Out-Null
 
 候选目录只用于验证，完成后删除，不能留在仓库根或提交 Git。
 
-### 11.2 Python/C 逐值验证
+### 11.2 发布前逐值核对
 
-```powershell
-$verifyDir = '.codex-local\tmp\dual-m0-verify'
-New-Item -ItemType Directory -Force -Path $verifyDir | Out-Null
-
-& '.venv\Scripts\python.exe' python\verify_dual_m0_c.py `
-    --base-artifact-dir $baseArtifact `
-    --masked-artifact-dir $maskedArtifact `
-    --header-dir $candidateDir `
-    --work-dir $verifyDir `
-    --report (Join-Path $verifyDir 'report.json')
-```
+正式替换模型头文件前，必须在本地验证环境中用同一批窗口分别运行 Python 和候选 C 实现，并保存逐特征、逐模型和融合输出的误差报告。测试与验证脚本属于本地发布工具，不进入公开源码树；公开仓库只保留可审计的输入合同、误差阈值和最终模型清单。
 
 硬门：
 
@@ -391,14 +373,19 @@ Copy-Item -LiteralPath (Join-Path $candidateDir 'esp32_dual_m0_model.h') `
     -Destination 'esp32\include\esp32_dual_m0_model.h'
 ```
 
-随后运行完整软件门：
+随后依次运行公开工程门：
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
-  tools\verify_software.ps1
+  esp32\host_tests\run_all.ps1 -StopOnFailure
+
+dotnet build pc\FitnessCoach.sln -c Release
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  esp32\firmware\tools\idf_project.ps1 -Action build
 ```
 
-只有完整软件门、ESP-IDF 新链接和真板验收均通过，才能更新 manifest 的硬件验证状态。单次用户日志不得参与训练、选模后又作为独立验证。
+只有主机测试、PC Release 构建、ESP-IDF 新链接和真板验收均通过，才能更新 manifest 的硬件验证状态。单次用户日志不得参与训练、选模后又作为独立验证。
 
 完成后清理候选目录：
 

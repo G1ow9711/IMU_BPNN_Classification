@@ -1,4 +1,4 @@
-"""交互模式用 Tkinter 模拟 410×502 AMOLED 产品界面。
+"""文档工具使用 Tkinter 模拟 410×502 AMOLED 产品界面。
 
 本工具只验证页面层级、文字布局、按钮流程和轻量动画观感，不验证 LVGL
 字体度量、触摸坐标、驱动刷新时序或 ESP32 性能。页面文字与当前
@@ -1223,7 +1223,7 @@ def write_documentation_watch_manifest(
         )
     # 清单明确安全边界，防止文档把语义预览误称为真板逐像素截图。
     manifest: dict[str, object] = {
-        "Generator": "tools/watch_ui_preview/watch_ui_preview.py",
+        "Generator": "docs/tools/watch_ui_preview/watch_ui_preview.py",
         "GeneratorSha256": calculate_file_sha256(generator_source_path),
         "CaptureMode": "deterministic-pillow-production-semantics-preview",
         "UsesBluetooth": False,

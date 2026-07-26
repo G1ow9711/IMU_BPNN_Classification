@@ -27,6 +27,15 @@ task_plan.md
 findings.md
 progress.md
 
+# Local collaboration rules and validation suite
+/Agents.md
+/python/**/test_*.py
+/python/**/verify_*.py
+/python/**/evaluate_*.py
+/python/**/analyze_*.py
+/python/analysis/
+/tools/
+
 # OS files
 Thumbs.db
 .DS_Store

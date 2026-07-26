@@ -16,7 +16,7 @@
 先安装 Node.js，并准备 SIL Open Font License 1.1 授权的 Noto Sans SC 字体，然后在工作树根执行：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\generate_lvgl_ui_fonts.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File esp32\firmware\tools\generate_lvgl_ui_fonts.ps1
 ```
 
 脚本只从 `esp32/firmware/components/ui/ui_presenter.c` 与 `ui_lvgl_renderer.c` 的 C 字符串字面量提取汉字。修改设备可见文案后必须重新生成；禁止手改四个字体 C 文件中的位图、字形描述或 Unicode 映射。
@@ -25,11 +25,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\generate_lvgl_ui_f
 
 字体依照 SIL Open Font License 1.1 使用，完整许可见 [OFL-1.1.txt](OFL-1.1.txt)，上游许可见 [Noto CJK LICENSE](https://github.com/notofonts/noto-cjk/blob/main/Sans/LICENSE)。
 
-`tools/check_agents_compliance.py` 会检查：
+发布前应核对：
 
 - 四个字号固定为 `16/20/28/36 px`、`2 bpp` 和非压缩 `bitmap_format=0`；
 - manifest 文件长度与 SHA-256 和真实生成物一致；
 - `ui_presenter.c` 与 `ui_lvgl_renderer.c` 的全部可见汉字均在子集中；
 - 许可证、生成头和 `lv_font_t` 符号存在。
 
-当前三个自动生成 C 源文件合计约 363 KiB；编译后的中文字形位图约 41 KiB，另有少量字形描述与 Unicode 映射。权重和字体均作为只读常量进入 Flash，不占用等量运行时堆。
+当前四个自动生成 C 源文件合计约 801 KiB；编译后的中文字形位图约 41 KiB，另有少量字形描述与 Unicode 映射。权重和字体均作为只读常量进入 Flash，不占用等量运行时堆。

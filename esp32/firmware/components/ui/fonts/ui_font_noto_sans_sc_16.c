@@ -1,6 +1,6 @@
 /*
  * 自动生成中文界面字体：Noto Sans SC 16px、2 bpp 非压缩位图、ASCII 0x20～0x7E 与设备可见中文子集。
- * 输入文案：esp32/firmware/components/ui/ui_presenter.c 与 ui_lvgl_renderer.c；生成脚本：tools/generate_lvgl_ui_fonts.ps1。
+ * 输入文案：esp32/firmware/components/ui/ui_presenter.c 与 ui_lvgl_renderer.c；生成脚本：esp32/firmware/tools/generate_lvgl_ui_fonts.ps1。
  * 字体许可：SIL Open Font License 1.1，完整文本见同目录 OFL-1.1.txt。
  * 位图、字形描述和 Unicode 映射均由 lv_font_conv 生成，禁止手工调整数组；修改文案后必须重跑脚本。
  */

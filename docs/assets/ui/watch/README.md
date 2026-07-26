@@ -1,13 +1,13 @@
 # 手表界面预览图
 
-这些图片由 `tools/watch_ui_preview/watch_ui_preview.py` 使用 Pillow 离屏绘制，固定复现当前手表页面的产品语义、信息层级和交互状态。它们不是对 LVGL 帧缓冲的逐像素抓取，也不能替代真板显示、触摸、圆角安全区和刷新稳定性验收。
+这些图片由 `docs/tools/watch_ui_preview/watch_ui_preview.py` 使用 Pillow 离屏绘制，固定复现当前手表页面的产品语义、信息层级和交互状态。它们不是对 LVGL 帧缓冲的逐像素抓取，也不能替代真板显示、触摸、圆角安全区和刷新稳定性验收。
 
 ## 生成
 
 交互预览使用 Python 标准库 Tk；PNG 导出还需要 Pillow 和可用中文字体。在仓库根目录执行：
 
 ```powershell
-python .\tools\watch_ui_preview\watch_ui_preview.py --export-all .\docs\assets\ui\watch
+python .\docs\tools\watch_ui_preview\watch_ui_preview.py --export-all .\docs\assets\ui\watch
 ```
 
 成功标记：
@@ -19,7 +19,7 @@ WATCH_UI_PNG_EXPORT_OK count=8 size=410x502
 单页导出示例：
 
 ```powershell
-python .\tools\watch_ui_preview\watch_ui_preview.py --export-png .\docs\assets\ui\watch\running_rest.png --page RUNNING --rest-preview
+python .\docs\tools\watch_ui_preview\watch_ui_preview.py --export-png .\docs\assets\ui\watch\running_rest.png --page RUNNING --rest-preview
 ```
 
 ## 页面

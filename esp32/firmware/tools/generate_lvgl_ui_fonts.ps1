@@ -1,4 +1,5 @@
 ﻿param(
+    # 本脚本随 ESP32 固件工程发布，用于重建 LVGL 中文字体子集。
     # FontPath 指向 SIL OFL 1.1 授权的 Noto Sans SC OpenType 字体；文件必须覆盖简体中文。
     [string]$FontPath = 'C:\Windows\Fonts\Noto Sans SC (TrueType).otf'
 )
@@ -8,8 +9,8 @@ Set-StrictMode -Version Latest
 # 任一外部命令或文件错误都终止生成，禁止留下部分更新的字体集合。
 $ErrorActionPreference = 'Stop'
 
-# repositoryRoot 是当前脚本所在 tools 目录的父目录，即 Git 工作树根目录。
-$repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
+# repositoryRoot 从 esp32/firmware/tools 上溯三级，得到唯一 Git 工作树根目录。
+$repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..')).Path
 # presenterPath 是业务页面所有用户可见中文字符串的权威来源。
 $presenterPath = Join-Path $repositoryRoot 'esp32\firmware\components\ui\ui_presenter.c'
 # rendererPath 包含固定品牌、产品副标题、电池和连接状态文案。
@@ -126,7 +127,7 @@ foreach ($fontSize in $fontSizes) {
     $chineseHeader = @"
 /*
  * 自动生成中文界面字体：Noto Sans SC ${fontSize}px、2 bpp 非压缩位图、ASCII 0x20～0x7E 与设备可见中文子集。
- * 输入文案：esp32/firmware/components/ui/ui_presenter.c 与 ui_lvgl_renderer.c；生成脚本：tools/generate_lvgl_ui_fonts.ps1。
+ * 输入文案：esp32/firmware/components/ui/ui_presenter.c 与 ui_lvgl_renderer.c；生成脚本：esp32/firmware/tools/generate_lvgl_ui_fonts.ps1。
  * 字体许可：SIL Open Font License 1.1，完整文本见同目录 OFL-1.1.txt。
  * 位图、字形描述和 Unicode 映射均由 lv_font_conv 生成，禁止手工调整数组；修改文案后必须重跑脚本。
  */
@@ -157,7 +158,7 @@ $sourceHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $FontPath).Hash.ToLow
 # manifest 按固定字段顺序描述输入、字符集合、授权和四个生成物。
 $manifest = [ordered]@{
     schema_version = 1
-    generator = 'lv_font_conv via tools/generate_lvgl_ui_fonts.ps1'
+    generator = 'lv_font_conv via esp32/firmware/tools/generate_lvgl_ui_fonts.ps1'
     source_font = (Split-Path -Leaf $FontPath)
     source_font_sha256 = $sourceHash
     license = 'SIL Open Font License 1.1'

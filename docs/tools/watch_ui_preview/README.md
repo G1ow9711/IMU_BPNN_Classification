@@ -1,6 +1,6 @@
 # 智能手表界面桌面预览器
 
-本目录提供仅依赖 Python 标准库 Tkinter 的 410×502 AMOLED 预览工具，用于检查“毕昇杯——智慧运动助手”的智能手表产品界面。
+本目录位于文档工程内，提供仅依赖 Python 标准库 Tkinter 的 410×502 AMOLED 预览工具，用于检查“毕昇杯——智慧运动助手”的智能手表产品界面。
 
 ## 当前视觉系统
 
@@ -43,7 +43,7 @@
 需要 Python 3.10 或更高版本且包含 Tkinter。无需安装第三方包。
 
 ```powershell
-python tools\watch_ui_preview\watch_ui_preview.py
+python docs\tools\watch_ui_preview\watch_ui_preview.py
 ```
 
 左侧 410×502 区域代表设备 AMOLED。右侧页面导航和演示控制均是开发工具，不属于设备屏幕。
@@ -65,12 +65,11 @@ python tools\watch_ui_preview\watch_ui_preview.py
 - `O`：模拟熄屏；
 - `Space`：在 RUNNING 页面增加一次计数。
 
-## 自动检查
+## 冒烟检查
 
 ```powershell
-python -m py_compile tools\watch_ui_preview\watch_ui_preview.py
-python tools\watch_ui_preview\watch_ui_preview.py --smoke-test
-python -m unittest discover -s tools\watch_ui_preview -p "test*.py"
+python -m py_compile docs\tools\watch_ui_preview\watch_ui_preview.py
+python docs\tools\watch_ui_preview\watch_ui_preview.py --smoke-test
 ```
 
 冒烟成功标志：

@@ -1,6 +1,6 @@
 {
-  "Generator": "tools/watch_ui_preview/watch_ui_preview.py",
-  "GeneratorSha256": "4e704c3184eb58f9d82ed9a67bde413cc0bda843fed347336b7a9d7a4e8e948c",
+  "Generator": "docs/tools/watch_ui_preview/watch_ui_preview.py",
+  "GeneratorSha256": "60bad3ee62fc3e5ae25ee8344f10eb0797705fa9b6f297710727d5f893dfa21e",
   "CaptureMode": "deterministic-pillow-production-semantics-preview",
   "UsesBluetooth": false,
   "ReadsDevice": false,
