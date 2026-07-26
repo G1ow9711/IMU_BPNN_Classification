@@ -1,0 +1,285 @@
+{
+  "dataset": {
+    "class_file_counts": {
+      "good_morning": 17,
+      "jumping_jack": 18,
+      "jumping_lunge": 15,
+      "jumping_squat": 16,
+      "lunge": 18,
+      "sit": 19,
+      "squat": 15,
+      "trot": 20,
+      "tuck_jump": 15,
+      "walk": 18,
+      "wave": 18
+    },
+    "file_count": 189,
+    "name": "imu_dataset_for_final",
+    "sha256": "682aefa8aa6f88a428f4775fc6909eae53be690075743ff22d92013d56870310"
+  },
+  "figures": {
+    "01_六类派生信号曲线.png": {
+      "class_summary": "pointwise_file_median_and_iqr",
+      "classes": [
+        "jumping_jack",
+        "squat",
+        "jumping_squat",
+        "jumping_lunge",
+        "wave",
+        "walk"
+      ],
+      "per_file_summary": "joint_shape_medoid_then_objective_peak_alignment",
+      "sha256": "54f55ae68f8bf796cd570fffdbdea4ae9efa6b4ccf4dbdbee861922377da0607",
+      "signals": [
+        "acc_vertical",
+        "gyro_mag"
+      ]
+    },
+    "02_十一类功率谱对比.png": {
+      "class_summary": "pointwise_file_median_and_iqr",
+      "classes": [
+        "good_morning",
+        "jumping_jack",
+        "jumping_lunge",
+        "jumping_squat",
+        "lunge",
+        "sit",
+        "squat",
+        "trot",
+        "tuck_jump",
+        "walk",
+        "wave"
+      ],
+      "maximum_frequency_hz": 5.0,
+      "per_file_summary": "pointwise_window_median_relative_power",
+      "sha256": "1a6e987d7080bca05562829d72b5abafef1d66ac09077a3eec0bf1778e2df1a6",
+      "signal": "gyro_mag"
+    },
+    "03_关键特征分布.png": {
+      "class_summary": "boxplot_across_equal_weight_files_without_rendered_outliers",
+      "classes": [
+        "good_morning",
+        "jumping_jack",
+        "jumping_lunge",
+        "jumping_squat",
+        "lunge",
+        "sit",
+        "squat",
+        "trot",
+        "tuck_jump",
+        "walk",
+        "wave"
+      ],
+      "features": [
+        "gyro_mag_rms",
+        "acc_vertical_std",
+        "gyro_mag_dominant_frequency_hz",
+        "gyro_mag_autocorr_peak",
+        "acc_vertical_spectral_high_band_ratio",
+        "gyro_mag_spectral_peak_power_ratio",
+        "wrist_reversal_rate_hz",
+        "aligned_takeoff_to_landing_seconds"
+      ],
+      "per_file_summary": "componentwise_window_median",
+      "sha256": "e22f5f7899f1cd84b0a100ffeb128ec377f2e1137b8d4443c8678234c40d8c3d"
+    },
+    "04_特征中位数热力图.png": {
+      "class_summary": "file_median_then_cross_class_median_iqr_scaling",
+      "classes": [
+        "good_morning",
+        "jumping_jack",
+        "jumping_lunge",
+        "jumping_squat",
+        "lunge",
+        "sit",
+        "squat",
+        "trot",
+        "tuck_jump",
+        "walk",
+        "wave"
+      ],
+      "display_clip": [
+        -3.0,
+        3.0
+      ],
+      "features": [
+        "gyro_mag_rms",
+        "acc_vertical_std",
+        "gyro_mag_dominant_frequency_hz",
+        "gyro_mag_autocorr_peak",
+        "acc_vertical_spectral_high_band_ratio",
+        "gyro_mag_spectral_peak_power_ratio",
+        "wrist_reversal_rate_hz",
+        "aligned_takeoff_to_landing_seconds"
+      ],
+      "per_file_summary": "componentwise_window_median",
+      "sha256": "b1a457e97c6a787204b3d3089e18055ed4a4bd612ba76004a9ca4128e81df250"
+    }
+  },
+  "generator": {
+    "path": "python/visualize_action_features.py",
+    "version": 2
+  },
+  "limitations": [
+    "图表只使用固定文件级验证划分，不使用测试集，也不用于选择模型或阈值。",
+    "数据集未提供完整受试者身份和佩戴侧元数据，图表不能证明跨人或左右手泛化。",
+    "时域不人工挑选窗口；文件内算法 medoid 和客观运动峰对齐只用于可视化，不改变模型输入。",
+    "每个验证文件权重相同；文件内重叠窗口仅用于形成该文件代表，不能解释为独立样本。"
+  ],
+  "schema_version": 1,
+  "signal_contract": {
+    "acceleration_unit": "g",
+    "channel_order": [
+      "gx",
+      "gy",
+      "gz",
+      "ax",
+      "ay",
+      "az"
+    ],
+    "gyro_unit": "deg/s",
+    "sample_rate_hz": 25,
+    "step_points": 12,
+    "step_seconds": 0.5,
+    "window_points": 62,
+    "window_seconds": 2.5
+  },
+  "split": {
+    "seed": 20260709,
+    "test_file_count": 29,
+    "test_ratio": 0.15,
+    "train_file_count": 132,
+    "train_ratio": 0.7,
+    "validation_file_count": 28,
+    "validation_files": [
+      "good_morning/IMU-2023-05-11-15_37_01_good_morning.txt",
+      "good_morning/IMU-2023-06-01-14_32_45_good_morning.txt",
+      "jumping_jack/IMU-2023-05-12-17_44_53_jumping_jack.txt",
+      "jumping_jack/IMU-2023-05-15-17_16_55_jumping_jack.txt",
+      "jumping_lunge/IMU-2023-06-01-15_31_23_jumping_lunge.txt",
+      "jumping_lunge/IMU-2023-06-01-17_16_06_jumping_lunge.txt",
+      "jumping_squat/IMU-2023-06-01-09_48_38_jumping_squat.txt",
+      "jumping_squat/IMU-2023-06-01-15_14_30_jumping_squat.txt",
+      "jumping_squat/IMU-2023-06-02-10_14_01_jumping_squat.txt",
+      "lunge/IMU-2023-06-01-17_13_00_lunge.txt",
+      "lunge/IMU-2023-06-02-10_02_14_lunge.txt",
+      "lunge/IMU-2023-06-02-11_07_47_lunge.txt",
+      "sit/IMU-2023-05-12-15_29_30_sit.txt",
+      "sit/IMU-2023-05-12-17_52_34_sit.txt",
+      "sit/IMU-2023-05-15-16_32_13_sit.txt",
+      "squat/IMU-2023-05-11-17_29_48_squat.txt",
+      "squat/IMU-2023-05-12-13_39_07_squat.txt",
+      "squat/IMU-2023-05-12-17_37_23_squat.txt",
+      "trot/IMU-2023-05-11-16_57_16_trot.txt",
+      "trot/IMU-2023-05-15-11_12_09_trot.txt",
+      "trot/IMU-2023-05-15-15_51_34_trot.txt",
+      "tuck_jump/IMU-2023-06-01-17_01_58_tuck_jump.txt",
+      "tuck_jump/IMU-2023-06-01-17_40_48_tuck_jump.txt",
+      "walk/IMU-2023-05-11-16_43_43_walk.txt",
+      "walk/IMU-2023-05-15-11_33_28_walk.txt",
+      "walk/IMU-2023-05-15-16_34_51_walk.txt",
+      "wave/IMU-2023-05-11-18_09_49_wave.txt",
+      "wave/IMU-2023-05-12-10_43_38_wave.txt"
+    ],
+    "validation_ratio": 0.15
+  },
+  "statistics_contract": {
+    "features": {
+      "class_distribution_unit": "file",
+      "heatmap": "class_file_median_then_cross_class_median_iqr_scaling",
+      "per_file": "componentwise_window_median",
+      "per_window_dimension": 297
+    },
+    "overlapping_windows_are_not_independent_samples": true,
+    "power_spectrum": {
+      "class_summary": "pointwise_median_q25_q75_across_files",
+      "per_file": "pointwise_window_median",
+      "per_window": "demean_hann_rfft_power_normalized_by_total_power"
+    },
+    "time_domain": {
+      "alignment_padding": "nan_without_wrap_or_interpolation",
+      "class_summary": "pointwise_median_q25_q75_across_files",
+      "medoid_shape": "robust_scaled_acc_vertical_concatenated_with_robust_scaled_gyro_mag",
+      "peak_score": "equal_weight_robust_acc_deviation_and_positive_gyro_activity",
+      "peak_smoothing_kernel": [
+        0.25,
+        0.5,
+        0.25
+      ],
+      "peak_target_point": 31,
+      "per_file_representative": "minimum_total_pairwise_squared_distance_medoid"
+    },
+    "weighting_unit": "validation_file"
+  },
+  "training_split_thresholds": {
+    "active_point_score": 0.13165436685085297,
+    "rest_motion_score": 0.08418715745210648
+  },
+  "validation": {
+    "class_file_counts": {
+      "good_morning": 2,
+      "jumping_jack": 2,
+      "jumping_lunge": 2,
+      "jumping_squat": 3,
+      "lunge": 3,
+      "sit": 3,
+      "squat": 3,
+      "trot": 3,
+      "tuck_jump": 2,
+      "walk": 3,
+      "wave": 2
+    },
+    "class_window_counts": {
+      "good_morning": 405,
+      "jumping_jack": 380,
+      "jumping_lunge": 458,
+      "jumping_squat": 687,
+      "lunge": 554,
+      "sit": 756,
+      "squat": 735,
+      "trot": 740,
+      "tuck_jump": 518,
+      "walk": 733,
+      "wave": 489
+    },
+    "file_window_counts": {
+      "good_morning/IMU-2023-05-11-15_37_01_good_morning.txt": 215,
+      "good_morning/IMU-2023-06-01-14_32_45_good_morning.txt": 190,
+      "jumping_jack/IMU-2023-05-12-17_44_53_jumping_jack.txt": 133,
+      "jumping_jack/IMU-2023-05-15-17_16_55_jumping_jack.txt": 247,
+      "jumping_lunge/IMU-2023-06-01-15_31_23_jumping_lunge.txt": 201,
+      "jumping_lunge/IMU-2023-06-01-17_16_06_jumping_lunge.txt": 257,
+      "jumping_squat/IMU-2023-06-01-09_48_38_jumping_squat.txt": 194,
+      "jumping_squat/IMU-2023-06-01-15_14_30_jumping_squat.txt": 192,
+      "jumping_squat/IMU-2023-06-02-10_14_01_jumping_squat.txt": 301,
+      "lunge/IMU-2023-06-01-17_13_00_lunge.txt": 184,
+      "lunge/IMU-2023-06-02-10_02_14_lunge.txt": 182,
+      "lunge/IMU-2023-06-02-11_07_47_lunge.txt": 188,
+      "sit/IMU-2023-05-12-15_29_30_sit.txt": 275,
+      "sit/IMU-2023-05-12-17_52_34_sit.txt": 241,
+      "sit/IMU-2023-05-15-16_32_13_sit.txt": 240,
+      "squat/IMU-2023-05-11-17_29_48_squat.txt": 247,
+      "squat/IMU-2023-05-12-13_39_07_squat.txt": 245,
+      "squat/IMU-2023-05-12-17_37_23_squat.txt": 243,
+      "trot/IMU-2023-05-11-16_57_16_trot.txt": 244,
+      "trot/IMU-2023-05-15-11_12_09_trot.txt": 247,
+      "trot/IMU-2023-05-15-15_51_34_trot.txt": 249,
+      "tuck_jump/IMU-2023-06-01-17_01_58_tuck_jump.txt": 281,
+      "tuck_jump/IMU-2023-06-01-17_40_48_tuck_jump.txt": 237,
+      "walk/IMU-2023-05-11-16_43_43_walk.txt": 244,
+      "walk/IMU-2023-05-15-11_33_28_walk.txt": 230,
+      "walk/IMU-2023-05-15-16_34_51_walk.txt": 259,
+      "wave/IMU-2023-05-11-18_09_49_wave.txt": 246,
+      "wave/IMU-2023-05-12-10_43_38_wave.txt": 243
+    },
+    "filter_statistics": {
+      "files_without_valid_window": 0,
+      "kept_windows": 6455,
+      "motion_edge_trimmed_points": 546,
+      "rest_filtered": 808,
+      "too_short": 0
+    },
+    "total_window_count": 6455,
+    "valid_file_count": 28
+  }
+}

@@ -47,9 +47,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--extra-train-dir", type=Path, required=True)
     # 外部留出目录可省略；提供时沿用基础类别映射执行独立会话确认。
     parser.add_argument("--external-holdout-dir", type=Path)
-    # 基础工件目录应包含 Round29 的 validation_report.json、scaler_and_config.npz 和 best_model.pt。
+    # 基础 M0 工件目录应包含 validation_report.json、scaler_and_config.npz 和 best_model.pt。
     parser.add_argument("--base-artifact-dir", type=Path, required=True)
-    # 掩码工件目录应包含 Round37 同名文件并声明 suppress_normalized_phase=True。
+    # 相位掩码 M0 工件目录应包含同名文件并声明 suppress_normalized_phase=True。
     parser.add_argument("--masked-artifact-dir", type=Path, required=True)
     # 输出 JSON 保存文件角色、固定参数、逐类召回、支持数和混淆矩阵。
     parser.add_argument("--output", type=Path, required=True)
@@ -205,9 +205,9 @@ def evaluate_records(
     if base_suppress or not masked_suppress:
         # 错误角色会改变模型输入分布，因此不能继续评估。
         raise ValueError("Expected unmasked base artifact and masked secondary artifact")
-    # 基础输入按 Round29 训练统计做 z=(x-mean)/std 标准化。
+    # 基础 M0 输入按自身训练统计做 z=(x-mean)/std 标准化。
     base_features = ((raw_x - base_mean) / base_std).astype(np.float32)
-    # 第二模型先按 Round37 训练统计标准化。
+    # 相位掩码 M0 输入先按自身训练统计标准化。
     masked_features = ((raw_x - masked_mean) / masked_std).astype(np.float32)
     # 再把索引 184:232 固定为零标准分，即对应训练均值。
     masked_features = training.apply_model_feature_mask(masked_features, True)
@@ -239,7 +239,7 @@ def main() -> None:
     validation_report = json.loads(
         (args.base_artifact_dir / "validation_report.json").read_text(encoding="utf-8"),
     )
-    # 最终 Round29 只训练一个 2.5 秒窗口实验，取第零项复现。
+    # 基础 M0 验证报告只保存一个固定窗口配置，取第零项复现同一文件角色。
     experiment = validation_report["all_experiments"][0]
     # class_names 是两个模型和 ESP32 输出共享的固定类别顺序。
     class_names = list(validation_report["class_names"])
@@ -267,9 +267,9 @@ def main() -> None:
     if actual_val_paths != expected_val_paths:
         # 任何新增、删除或移动都要求重新训练并重新冻结角色。
         raise ValueError("Frozen validation role no longer matches current split")
-    # 加载未掩码 Round29 基础工件。
+    # 加载保留全部输入特征的基础 M0 工件。
     base_artifact = load_artifact(args.base_artifact_dir, len(class_names))
-    # 加载掩码 Round37 第二工件。
+    # 加载屏蔽归一化相位特征的相位掩码 M0 工件。
     masked_artifact = load_artifact(args.masked_artifact_dir, len(class_names))
     # 在固定基础测试角色上执行最终确认，不搜索任何参数。
     test_metrics = evaluate_records(

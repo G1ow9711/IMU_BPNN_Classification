@@ -1,3 +1,16 @@
+"""在训练集与验证集上审计六轴 IMU 候选特征的可分性和稳定性。
+
+输入窗口形状固定为 ``[时间点数, 6]``，列顺序为 ``gx、gy、gz、ax、ay、az``；
+前三列角速度单位为 ``deg/s``，后三列加速度单位为 ``g``，采样率沿用训练端 25 Hz。
+本模块把生产特征、事件对齐特征和周期特征组合成 ``[窗口数, 特征数]`` 矩阵，再分别
+计算 Fisher 分数与 Cohen's d。候选特征只用于“无训练筛选”，不能因单次报告直接加入
+ESP32 的生产特征顺序。
+
+防泄漏原则有两层：训练记录与验证记录沿用训练器的文件级切分；评分除窗口级结果外，
+还先对每个原始文件的重叠窗口取中位数，再做文件级评分。只有训练/验证方向一致且文件级
+证据同样稳定的特征才值得继续实验。脚本明确不读取测试集或外部留出集。
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -15,7 +28,9 @@ except ModuleNotFoundError:
     import train_export as training
 
 
+# 默认比较跳跃深蹲容易混淆的四类动作；英文键必须与训练类别目录一致。
 DEFAULT_PAIR_CLASSES = ["jumping_jack", "jumping_lunge", "squat", "tuck_jump"]
+# 弱混淆对覆盖当前验证报告中易互判类别，顺序只影响报告展示。
 DEFAULT_WEAK_CONFUSION_PAIRS = [
     ("lunge", "squat"),
     ("jumping_jack", "jumping_squat"),
@@ -27,6 +42,7 @@ DEFAULT_WEAK_CONFUSION_PAIRS = [
     ("wave", "jumping_lunge"),
     ("wave", "lunge"),
 ]
+# 事件候选名称顺序必须与 candidate_event_features 返回向量逐项一致。
 CANDIDATE_EVENT_FEATURE_NAMES = [
     "event_takeoff_position",
     "event_landing_position",
@@ -61,12 +77,14 @@ EVENT_ALIGNED_FEATURE_NAMES = [
     "aligned_landing_impulse_sign_switch_rate",
 ]
 
+# 四条周期源序列均由训练端 build_feature_series 生成，物理单位随源序列保留。
 CYCLE_SOURCES = [
     "acc_vertical",
     "acc_horizontal_mag",
     "gyro_mag",
     "acc_delta_mag",
 ]
+# 每条源序列提取相同十二项频域、自相关和峰间稳定性指标。
 CYCLE_FEATURE_SUFFIXES = [
     "spectral_dominant_hz",
     "spectral_peak_power_ratio",
@@ -81,11 +99,13 @@ CYCLE_FEATURE_SUFFIXES = [
     "positive_peak_interval_cv",
     "positive_peak_amplitude_cv",
 ]
+# 笛卡尔积顺序是“源序列优先、特征后缀次序”，不可与数值拼接顺序分离修改。
 CANDIDATE_CYCLE_FEATURE_NAMES = [
     f"{source}_{suffix}"
     for source in CYCLE_SOURCES
     for suffix in CYCLE_FEATURE_SUFFIXES
 ]
+# 交叉相关对描述垂直加速度、水平加速度、变化量和角速度之间的相位关系。
 CROSS_SERIES_PAIRS = [
     ("acc_vertical", "gyro_mag"),
     ("acc_vertical", "acc_horizontal_mag"),
@@ -362,18 +382,36 @@ def candidate_event_aligned_features(window: np.ndarray) -> np.ndarray:
 
 
 def candidate_event_features(window: np.ndarray) -> np.ndarray:
+    """提取十二项粗事件候选，返回形状为 ``[12]`` 的 float32 向量。
+
+    输入 ``window`` 为 ``[N,6]``，通道是 ``gx、gy、gz、ax、ay、az``。函数使用训练端
+    的重力对齐垂直加速度、加速度模长和角速度模长，提取归一化起跳/落地位置、低于
+    ``0.70 g`` 的腾空比例、垂直差分、陀螺峰相位、相关系数及起跳后角速度能量比例。
+    时间位置除以 ``max(N-1,1)``，因此对窗口长度无量纲；空序列返回固定长度零向量。
+    """
+    # 复用训练端派生序列，确保候选审计与生产特征采用同一重力和单位合同。
     series = training.build_feature_series(window)
+    # acc_vertical 是沿估计重力方向的加速度，单位为 g，形状为 [N]。
     vertical = np.asarray(series["acc_vertical"], dtype=np.float32)
+    # acc_mag 是三轴加速度模长，单位为 g，用于低支持力腾空判定。
     acc_mag = np.asarray(series["acc_mag"], dtype=np.float32)
+    # gyro_mag 是三轴角速度模长，单位为 deg/s，用于姿态调整强度。
     gyro_mag = np.asarray(series["gyro_mag"], dtype=np.float32)
+    # n 是当前窗口采样点数；正常生产窗口为 62 点。
     n = len(vertical)
+    # 空窗口没有动作事件，返回有限零值保持后续矩阵维度稳定。
     if n == 0:
         return np.zeros(len(CANDIDATE_EVENT_FEATURE_NAMES), dtype=np.float32)
+    # 归一化位置的分母至少为 1，单点输入不会除零。
     position_denominator = float(max(n - 1, 1))
 
+    # 最小垂直加速度位置作为粗起跳时刻，不宣称它是生产计数事件。
     takeoff_index = int(np.argmin(vertical))
+    # 起跳位置映射到 [0,1]，使不同窗口长度可比较。
     takeoff_position = takeoff_index / position_denominator
+    # 起跳点后至少还有一个点时才可能寻找落地峰。
     has_landing = takeoff_index + 1 < n
+    # 有落地搜索区间时，在起跳后垂直序列取最大值作为粗落地。
     if has_landing:
         landing_index = takeoff_index + 1 + int(
             np.argmax(vertical[takeoff_index + 1 :])
@@ -386,14 +424,18 @@ def candidate_event_features(window: np.ndarray) -> np.ndarray:
             if takeoff_peak > 1e-6
             else 0.0
         )
+    # 起跳已位于末点时没有完整事件，各落地特征退化为零。
     else:
         landing_index = 0
         landing_position = 0.0
         takeoff_to_landing = 0.0
         landing_peak_ratio = 0.0
 
+    # 加速度模长小于 0.70g 视为低支持力点；这是候选阈值而非生产计数阈值。
     free_flight = acc_mag < 0.70
+    # 布尔均值给出腾空点比例，范围为 [0,1]。
     free_flight_ratio = float(np.mean(free_flight))
+    # longest_run 与 current_run 追踪最长连续低支持力点数。
     longest_run = 0
     current_run = 0
     for is_free_flight in free_flight.tolist():
@@ -401,6 +443,7 @@ def candidate_event_features(window: np.ndarray) -> np.ndarray:
         longest_run = max(longest_run, current_run)
     longest_free_flight_run_ratio = longest_run / float(n)
 
+    # 至少两点才能定义一阶垂直差分。
     if n > 1:
         vertical_diff = np.abs(np.diff(vertical))
         vertical_diff_index = int(np.argmax(vertical_diff))
@@ -410,6 +453,7 @@ def candidate_event_features(window: np.ndarray) -> np.ndarray:
         vertical_diff_max = 0.0
         vertical_diff_position = 0.0
 
+    # 最大角速度位置描述全窗姿态变化最剧烈时刻。
     gyro_peak_index = int(np.argmax(gyro_mag))
     gyro_peak_position = gyro_peak_index / position_denominator
     gyro_to_landing_lag = (
@@ -419,6 +463,7 @@ def candidate_event_features(window: np.ndarray) -> np.ndarray:
     )
     centered_gyro = gyro_mag - float(np.mean(gyro_mag))
     centered_vertical = vertical - float(np.mean(vertical))
+    # 皮尔逊相关分母为两条中心化序列二范数乘积。
     correlation_denominator = math.sqrt(
         float(np.dot(centered_gyro, centered_gyro))
         * float(np.dot(centered_vertical, centered_vertical))
@@ -428,6 +473,7 @@ def candidate_event_features(window: np.ndarray) -> np.ndarray:
         if correlation_denominator > 1e-12
         else 0.0
     )
+    # 总角速度能量代理为 Σ|ω|²，单位为 (deg/s)²；比例计算后无量纲。
     total_gyro_energy = float(np.dot(gyro_mag, gyro_mag))
     post_takeoff_gyro_energy_ratio = (
         float(np.dot(gyro_mag[takeoff_index + 1 :], gyro_mag[takeoff_index + 1 :]))
@@ -435,6 +481,7 @@ def candidate_event_features(window: np.ndarray) -> np.ndarray:
         if has_landing and total_gyro_energy > 1e-12
         else 0.0
     )
+    # 返回顺序与 CANDIDATE_EVENT_FEATURE_NAMES 一一对应。
     return np.asarray(
         [
             takeoff_position,
@@ -455,24 +502,49 @@ def candidate_event_features(window: np.ndarray) -> np.ndarray:
 
 
 def _coefficient_of_variation(values: np.ndarray) -> float:
+    """返回 ``std(x)/mean(abs(x))``；少于两项或均值近零时返回 0。
+
+    该无量纲指标用于峰间时间和峰幅度的周期稳定性。分母门限 ``1e-12`` 防止静止窗口
+    中的浮点噪声被放大为无穷大。
+    """
+    # float64 提高短序列标准差和均值计算稳定性。
     values = np.asarray(values, dtype=np.float64)
+    # 少于两个观测无法衡量离散程度，定义为无可用变化证据。
     if len(values) < 2:
         return 0.0
+    # 绝对均值允许带符号幅度序列仍得到正分母。
     mean = float(np.mean(np.abs(values)))
+    # 分母有效时返回变异系数，否则返回有限零值。
     return float(np.std(values) / mean) if mean > 1e-12 else 0.0
 
 
 def _cycle_series_features(values: np.ndarray) -> List[float]:
+    """从一条 ``[N]`` 时序提取十二项周期候选。
+
+    频域使用 Hann 窗后的单边功率 ``P_k=|FFT(x-mean)|²``，输出主频、主峰占比、谱质心、
+    三个频带能量比和二次谐波比；时域使用归一化自相关、首个过零时间、正峰间隔与幅值
+    变异系数。频率单位为 Hz，时间单位为秒，其余比值无量纲。少于四点时返回十二个零。
+    """
+    # 统一为 float64 一维时序，降低 FFT 和相关计算舍入误差。
     x = np.asarray(values, dtype=np.float64)
+    # n 是序列采样点数。
     n = len(x)
+    # 四点以下无法形成稳定频率栅格和局部峰，返回固定长度零列表。
     if n < 4:
         return [0.0] * len(CYCLE_FEATURE_SUFFIXES)
+    # 去均值删除直流分量，保留周期波动。
     centered = x - float(np.mean(x))
+    # Hann 窗降低有限窗口边界的频谱泄漏。
     spectrum = np.fft.rfft(centered * np.hanning(n))
+    # 功率谱为复频谱模长平方。
     power = np.square(np.abs(spectrum))
+    # 频率栅格按训练端采样率生成，单位为 Hz。
     frequencies = np.fft.rfftfreq(n, d=1.0 / training.SAMPLE_RATE)
+    # 直流分量不参与运动周期判断。
     power[0] = 0.0
+    # total_power 是全部非直流频点功率和。
     total_power = float(np.sum(power))
+    # 有效动态能量时计算归一化频域指标。
     if total_power > 1e-12:
         dominant_index = int(np.argmax(power))
         dominant_hz = float(frequencies[dominant_index])
@@ -480,18 +552,24 @@ def _cycle_series_features(values: np.ndarray) -> List[float]:
         centroid = float(np.dot(frequencies, power) / total_power)
 
         def band_ratio(low: float, high: float) -> float:
+            """返回半开频带 ``[low, high)`` 占总功率比例，输入单位为 Hz。"""
+            # mask 选择当前频带内频率栅格。
             mask = (frequencies >= low) & (frequencies < high)
+            # 总功率已通过门限，直接相除不会除零。
             return float(np.sum(power[mask]) / total_power)
 
         harmonic_hz = 2.0 * dominant_hz
         harmonic_index = int(np.argmin(np.abs(frequencies - harmonic_hz)))
         harmonic_ratio = float(power[harmonic_index] / max(power[dominant_index], 1e-12))
+    # 静止或常量序列没有频域证据，全部频域指标定义为零。
     else:
         dominant_hz = peak_power_ratio = centroid = harmonic_ratio = 0.0
         band_ratio = lambda _low, _high: 0.0
 
+    # energy 是中心化时序平方和，用于归一化自相关。
     energy = float(np.dot(centered, centered))
     max_lag = min(n // 2, int(training.SAMPLE_RATE * 3.0))
+    # 仅在动态能量和滞后范围有效时计算自相关。
     if energy > 1e-12 and max_lag >= 2:
         autocorr = np.asarray(
             [float(np.dot(centered[:-lag], centered[lag:]) / energy) for lag in range(1, max_lag + 1)],
@@ -513,12 +591,14 @@ def _cycle_series_features(values: np.ndarray) -> List[float]:
     else:
         prominent_count = secondary_peak = first_zero_seconds = 0.0
 
+    # 正峰门限使用均值加半个标准差，抑制低幅噪声局部极值。
     threshold = float(np.mean(x) + 0.5 * np.std(x))
     peaks = np.flatnonzero(
         (x[1:-1] > x[:-2]) & (x[1:-1] >= x[2:]) & (x[1:-1] >= threshold)
     ) + 1
     intervals = np.diff(peaks).astype(np.float64)
     peak_values = x[peaks] - float(np.median(x))
+    # 返回顺序必须与 CYCLE_FEATURE_SUFFIXES 保持一致。
     return [
         dominant_hz,
         peak_power_ratio,
@@ -536,9 +616,18 @@ def _cycle_series_features(values: np.ndarray) -> List[float]:
 
 
 def _max_cross_correlation(left: np.ndarray, right: np.ndarray) -> Tuple[float, float]:
+    """返回两条时序最大绝对归一化互相关及其滞后秒数。
+
+    两条输入会裁到共同长度 ``N``、分别去均值，并在 ``±min(N/4,25)`` 点内搜索：
+    ``r(l)=<a,b_l>/(||a||·||b_l||)``。常量、近零或少于四点的输入返回 ``(0,0)``。
+    正滞后表示 ``right`` 相对 ``left`` 向后移动。
+    """
+    # 两条输入统一为 float64，相关系数无物理单位。
     a = np.asarray(left, dtype=np.float64)
     b = np.asarray(right, dtype=np.float64)
+    # 只比较两序列共有的前 n 点。
     n = min(len(a), len(b))
+    # 少于四点时相关峰没有教学意义，返回稳定退化值。
     if n < 4:
         return 0.0, 0.0
     a = a[:n] - float(np.mean(a[:n]))
@@ -546,6 +635,7 @@ def _max_cross_correlation(left: np.ndarray, right: np.ndarray) -> Tuple[float, 
     max_lag = min(n // 4, int(training.SAMPLE_RATE))
     best_corr = 0.0
     best_lag = 0
+    # 穷举有限滞后，时间复杂度 O(N·L)，L 不超过 25。
     for lag in range(-max_lag, max_lag + 1):
         if lag < 0:
             left_slice, right_slice = a[-lag:], b[: n + lag]
@@ -564,16 +654,27 @@ def _max_cross_correlation(left: np.ndarray, right: np.ndarray) -> Tuple[float, 
         if abs(correlation) > abs(best_corr):
             best_corr = correlation
             best_lag = lag
+    # 点滞后除以 25 Hz 换算为秒。
     return best_corr, best_lag / float(training.SAMPLE_RATE)
 
 
 def candidate_cycle_features(window: np.ndarray) -> np.ndarray:
+    """从 ``[N,6]`` 六轴窗口提取全部周期与跨序列候选，返回 float32 一维向量。
+
+    四条派生序列各产生十二项周期指标，三对序列各增加互相关和滞后，共 54 项。输入单位
+    沿用训练端：角速度 ``deg/s``、加速度 ``g``；只有比值和相关系数是无量纲。
+    """
+    # 构建与生产训练一致的重力对齐和模长序列。
     series = training.build_feature_series(window)
+    # features 按名称表固定顺序累计标量。
     features: List[float] = []
+    # 每个周期源按 CYCLE_SOURCES 顺序追加十二项。
     for source in CYCLE_SOURCES:
         features.extend(_cycle_series_features(series[source]))
+    # 每个跨序列对追加最大相关系数和滞后秒数。
     for left, right in CROSS_SERIES_PAIRS:
         features.extend(_max_cross_correlation(series[left], series[right]))
+    # 返回 float32 与训练特征矩阵和 ESP32 数值精度一致。
     return np.asarray(features, dtype=np.float32)
 
 
@@ -585,8 +686,19 @@ def build_analysis_samples(
     active_point_threshold: float,
     progress_label: str,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, int]]:
+    """从文件级记录生成窗口特征、类别、文件编号和过滤统计。
+
+    返回形状分别是 ``X=[窗口数, 特征数]``、``y=[窗口数]``、
+    ``file_ids=[窗口数]``。每个源文件获得唯一 ``file_id``，后续必须用它先聚合同源
+    重叠窗口，不能把窗口当成独立受试样本。窗口仍为 ``[window_len,6]``，六轴顺序和
+    单位与模块说明一致。高动态类没有合格窗口时不使用静止回退；低动态类只保留一个
+    最符合运动强度语义的回退窗。
+    """
+    # features 保存生产特征与候选特征拼接后的一维向量。
     features: List[np.ndarray] = []
+    # labels 保存每个窗口的整数类别索引。
     labels: List[int] = []
+    # file_ids 保存窗口所属原始文件，供文件级中位数聚合防泄漏。
     file_ids: List[int] = []
     stats = {
         "too_short": 0,
@@ -594,6 +706,7 @@ def build_analysis_samples(
         "kept_windows": 0,
         "files_without_valid_window": 0,
     }
+    # 逐原始文件加载，不跨文件拼接动作周期。
     for file_id, record in enumerate(records):
         if file_id == 0 or file_id % 10 == 0:
             print(
@@ -601,11 +714,13 @@ def build_analysis_samples(
                 f"kept={stats['kept_windows']}",
                 flush=True,
             )
+        # load_imu_file 返回 [采样点数,6]，列顺序 gx、gy、gz、ax、ay、az。
         data = training.load_imu_file(record.path)
         if len(data) < window_len:
             stats["too_short"] += 1
             continue
         record_kept = 0
+        # 仅在当前文件内部滑窗，避免训练/验证文件边界泄漏。
         for window in training.iter_windows(data, window_len, step_len):
             if not training.keep_window_for_label(
                 window,
@@ -615,6 +730,7 @@ def build_analysis_samples(
             ):
                 stats["rest_filtered"] += 1
                 continue
+            # 四组特征按名称表顺序拼接成同一窗口向量。
             features.append(
                 np.concatenate(
                     [
@@ -653,6 +769,7 @@ def build_analysis_samples(
                 labels.append(record.label_idx)
                 file_ids.append(file_id)
                 stats["kept_windows"] += 1
+    # 全部记录均无有效窗口时直接失败，禁止输出空分析报告。
     if not features:
         raise ValueError("No samples generated for feature analysis")
     print(
@@ -660,6 +777,7 @@ def build_analysis_samples(
         f"kept={stats['kept_windows']} complete=true",
         flush=True,
     )
+    # 堆叠为模型分析需要的定长矩阵，同时保留原始文件归属。
     return (
         np.vstack(features).astype(np.float32),
         np.asarray(labels, dtype=np.int64),
@@ -669,16 +787,26 @@ def build_analysis_samples(
 
 
 def fisher_scores(features: np.ndarray, labels: np.ndarray) -> np.ndarray:
+    """按特征计算多类 Fisher 分数 ``S_B/S_W``。
+
+    输入 ``features=[样本数,特征数]``、``labels=[样本数]``。类间离差
+    ``S_B=Σ_c n_c(μ_c-μ)^2``，类内离差 ``S_W=Σ_cΣ_i(x_ci-μ_c)^2``；
+    ``S_W<=1e-12`` 时输出 0，防止常量特征产生无穷大。返回 ``[特征数]``。
+    """
+    # float64 保证平方和在大量重叠窗口上保持稳定。
     x = np.asarray(features, dtype=np.float64)
+    # 类别索引统一为 int64，用布尔掩码分组。
     y = np.asarray(labels, dtype=np.int64)
     overall_mean = np.mean(x, axis=0)
     between = np.zeros(x.shape[1], dtype=np.float64)
     within = np.zeros(x.shape[1], dtype=np.float64)
+    # 每个类别分别累计类间和类内离差。
     for label in np.unique(y):
         group = x[y == label]
         group_mean = np.mean(group, axis=0)
         between += len(group) * np.square(group_mean - overall_mean)
         within += np.sum(np.square(group - group_mean), axis=0)
+    # 仅在类内离差有效时相除，常量特征保持零分。
     return np.divide(
         between,
         within,
@@ -688,11 +816,19 @@ def fisher_scores(features: np.ndarray, labels: np.ndarray) -> np.ndarray:
 
 
 def cohens_d(target: np.ndarray, other: np.ndarray) -> np.ndarray:
+    """计算两组每项特征的 Cohen's d，正号表示 target 均值更大。
+
+    输入均为 ``[样本数,特征数]``。合并方差为
+    ``s_p²=((n1-1)s1²+(n2-1)s2²)/(n1+n2-2)``，效应量为
+    ``d=(mean(target)-mean(other))/s_p``。自由度不足或合并标准差近零时返回 0。
+    """
+    # 两组转为 float64，保持方差与平方根精度。
     target_values = np.asarray(target, dtype=np.float64)
     other_values = np.asarray(other, dtype=np.float64)
     target_var = np.var(target_values, axis=0, ddof=1)
     other_var = np.var(other_values, axis=0, ddof=1)
     degrees = len(target_values) + len(other_values) - 2
+    # 总自由度不足时无法估计样本方差，返回固定长度零向量。
     if degrees <= 0:
         return np.zeros(target_values.shape[1], dtype=np.float64)
     pooled_var = (
@@ -701,6 +837,7 @@ def cohens_d(target: np.ndarray, other: np.ndarray) -> np.ndarray:
     ) / float(degrees)
     denominator = np.sqrt(np.maximum(pooled_var, 0.0))
     difference = np.mean(target_values, axis=0) - np.mean(other_values, axis=0)
+    # 仅对非退化合并标准差求效应量。
     return np.divide(
         difference,
         denominator,
@@ -715,6 +852,12 @@ def stable_pair_effect(
     val_target: np.ndarray,
     val_other: np.ndarray,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """保留训练与验证方向一致的保守效应，并同时返回两端原始 Cohen's d。
+
+    ``stable_j=min(|d_train,j|,|d_val,j|)`` 仅在二者符号相同时成立；方向相反时置零。
+    四个输入矩阵均为 ``[样本数,特征数]``。该规则抑制只在单一切分偶然分离的候选。
+    """
+    # 分别计算训练和验证效应，禁止先混合两个集合后再统计。
     train_effect = cohens_d(train_target, train_other)
     val_effect = cohens_d(val_target, val_other)
     same_direction = np.sign(train_effect) == np.sign(val_effect)
@@ -723,6 +866,7 @@ def stable_pair_effect(
         np.minimum(np.abs(train_effect), np.abs(val_effect)),
         0.0,
     )
+    # 返回稳定绝对效应以及可审计的带符号训练/验证效应。
     return stable, train_effect, val_effect
 
 
@@ -731,12 +875,26 @@ def aggregate_file_medians(
     labels: np.ndarray,
     file_ids: np.ndarray,
 ) -> Tuple[np.ndarray, np.ndarray]:
+    """按原始文件对重叠窗口取特征中位数，返回文件级矩阵和标签。
+
+    输入为 ``features=[窗口数,特征数]``、``labels=[窗口数]`` 和
+    ``file_ids=[窗口数]``；输出为 ``[文件数,特征数]`` 与 ``[文件数]``。
+    同一文件的高度相关窗口只贡献一个中位数样本，避免窗口数量较多的单一采集文件在
+    Fisher 或 Cohen's d 中获得不成比例权重。
+    """
+    # medians 每项对应一个原始文件的稳健特征中心。
     medians: List[np.ndarray] = []
+    # file_labels 与 medians 按文件编号顺序一一对应。
     file_labels: List[int] = []
+    # 每个唯一文件编号只生成一个统计样本。
     for file_id in np.unique(file_ids):
+        # mask 选择该文件的全部重叠窗口。
         mask = file_ids == file_id
+        # 中位数降低少量窗口截断、起止相位和异常峰的影响。
         medians.append(np.median(features[mask], axis=0))
+        # 一个文件只允许一个监督标签，读取首窗标签作为文件标签。
         file_labels.append(int(labels[mask][0]))
+    # 返回 float32 文件特征和 int64 类别索引。
     return np.vstack(medians).astype(np.float32), np.asarray(file_labels, dtype=np.int64)
 
 
@@ -748,6 +906,12 @@ def feature_record(
     file_train_fisher: np.ndarray,
     file_val_fisher: np.ndarray,
 ) -> Dict[str, object]:
+    """把单一特征的窗口级与文件级 Fisher 结果整理为 JSON 记录。
+
+    ``stable_fisher=sqrt(train_fisher*val_fisher)`` 是两个切分分数的几何均值；
+    任一切分接近零都会压低总分，不能由另一个切分的高分补偿。
+    """
+    # 按稳定字段名返回，供 JSON、CSV 和教程表格共同消费。
     return {
         "index": index,
         "name": names[index],
@@ -760,6 +924,8 @@ def feature_record(
 
 
 def parse_args() -> argparse.Namespace:
+    """解析训练/验证特征可分性审计参数，不提供测试集或外部留出集入口。"""
+    # 参数解析器明确该脚本只做训练/验证无训练分析。
     parser = argparse.ArgumentParser(description="训练/验证特征类间分离度分析")
     parser.add_argument("--dataset-dir", type=Path, required=True)
     parser.add_argument("--extra-train-dir", type=Path)
@@ -769,18 +935,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-class", default="jumping_squat")
     parser.add_argument("--pair-class", action="append", dest="pair_classes")
     parser.add_argument("--top-k", type=int, default=30)
+    # 返回 Path 和标量参数，由 main 执行唯一分析流程。
     return parser.parse_args()
 
 
 def main() -> None:
+    """执行文件级切分、窗口/文件双重评分，并写出 JSON 与 CSV 报告。
+
+    本入口从既有验证报告读取窗口和过滤参数，保证审计对象与模型实验一致；不会读取
+    测试集或外部留出集。所有候选结论同时包含训练、验证和文件级证据。
+    """
+    # 解析命令行，所有输出位置由调用方显式指定。
     args = parse_args()
+    # 验证报告只提供已冻结的窗口和过滤超参数，不读取测试预测。
     report = json.loads(args.validation_report.read_text(encoding="utf-8"))
+    # 扫描基础数据并获得稳定类别顺序。
     base_records, class_names, label_to_idx = training.scan_dataset(args.dataset_dir)
     extra_records = (
         training.scan_labeled_dataset(args.extra_train_dir, label_to_idx)
         if args.extra_train_dir is not None
         else []
     )
+    # 使用训练器的文件级切分，保证同一源文件不会同时出现在训练与验证。
     train_records, val_records, _ = training.split_records_for_experiment(
         base_records,
         extra_records,
@@ -789,6 +965,7 @@ def main() -> None:
     step_len = int(report["all_experiments"][0]["step_len"])
     rest_threshold = float(report["all_experiments"][0]["rest_threshold"])
     active_threshold = float(report["all_experiments"][0]["active_point_threshold"])
+    # 分别构建训练矩阵，file_ids 保留同源窗口关系。
     train_x, train_y, train_file_ids, train_stats = build_analysis_samples(
         train_records,
         window_len,
@@ -797,6 +974,7 @@ def main() -> None:
         active_threshold,
         progress_label="separability_train",
     )
+    # 验证矩阵独立构建，不与训练窗口拼接后再切分。
     val_x, val_y, val_file_ids, val_stats = build_analysis_samples(
         val_records,
         window_len,
@@ -815,6 +993,7 @@ def main() -> None:
     )
     train_fisher = fisher_scores(train_x, train_y)
     val_fisher = fisher_scores(val_x, val_y)
+    # 先按文件聚合再评分，作为抵御重叠窗口伪重复的第二道证据。
     file_train_x, file_train_y = aggregate_file_medians(train_x, train_y, train_file_ids)
     file_val_x, file_val_y = aggregate_file_medians(val_x, val_y, val_file_ids)
     file_train_fisher = fisher_scores(file_train_x, file_train_y)
@@ -849,6 +1028,7 @@ def main() -> None:
         pair_ranked = np.argsort(-stable)
 
         def effect_record(index: int) -> Dict[str, object]:
+            """整理当前目标类别对的窗口级与文件级效应记录。"""
             return {
                 "index": int(index),
                 "name": feature_names[index],
@@ -945,6 +1125,7 @@ def main() -> None:
         for index in ranked_indices[: args.top_k]
     ]
     def ranked_feature_records(indices: Sequence[int]) -> List[Dict[str, object]]:
+        """按训练/验证稳定 Fisher 降序整理指定特征索引。"""
         return [
             feature_record(
                 index,
@@ -978,6 +1159,7 @@ def main() -> None:
     event_features = ranked_feature_records(event_indices)
     event_aligned_features = ranked_feature_records(aligned_indices)
     cycle_features = ranked_feature_records(cycle_indices)
+    # scope 与两个 false 字段明确声明没有用最终测试或外部留出数据调特征。
     result = {
         "scope": "train_validation_only",
         "test_read": False,
@@ -1003,11 +1185,13 @@ def main() -> None:
         "target_pair_effects": pair_reports,
         "weak_confusion_effects": weak_confusion_effects,
     }
+    # 创建正式 JSON 输出目录，并以 UTF-8 中文可读格式保存全部证据。
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
     args.output_json.write_text(
         json.dumps(result, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    # CSV 只写总体排名摘要，UTF-8 BOM 方便 Windows Excel 直接查看。
     args.output_csv.parent.mkdir(parents=True, exist_ok=True)
     with args.output_csv.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(top_features[0].keys()))

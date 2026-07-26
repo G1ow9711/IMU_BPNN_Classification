@@ -1,27 +1,182 @@
 # BLE 通信、设备配置与会话存储
 
-> 本文由原 docs/ 分散文档于 2026-07-25 按主题收敛。原文件名保留在章节来源字段中，旧文件不再单独维护。
-
-> 文档状态约定：**当前规范**可作为实现与测试依据；**当前参考**用于解释设计；**验证证据/验收快照**记录当时结果；**历史基线/历史实验/历史校准/历史路线图**仅保留决策轨迹，不覆盖当前代码、模型清单和测试合同。
->
-> 当前产品边界：右手腕佩戴；一次会话只做一种主动作；休息、静坐、低置信度或异类噪声不得切换主动作、不得增加次数；实体无振动马达；10 次动作的计数验收容差为 ±2 次。若文内历史章节与该边界冲突，以本段、当前源码和自动化测试为准。
+> 产品边界：右手腕佩戴；一次会话只做一种主动作；次数和步数动作在休息、静止和无效数据时由活动门与质量门冻结；低置信度或异类分类只作诊断，不切换主动作；`sit` 在运行态按合法单调 tick 累计时长；实体无振动马达；10 次动作的计数验收容差为 ±2 次。本文、当前源码和自动化测试共同构成实现依据。
 
 ## 1. 文档范围
 
 统一说明 GATT、逻辑帧、控制点、设备端服务、安全配对、配置 TLV、会话快照、断线补传和恢复。
 
-## 2. 章节与来源映射
+## 2. 阅读导航
 
-| 章节 | 原文件 | 状态 | 用途 |
-|---:|---|---|---|
-| 3 | `BLE通信协议.md` | 当前规范 | 端到端 BLE 协议、消息、分片、CRC 和恢复 |
-| 4 | `设备端BLE服务.md` | 当前规范 | ESP32 NimBLE 服务、线程、权限和生命周期 |
-| 5 | `设备配置与命令TLV.md` | 当前规范 | 配置命令、TLV、稳定 blob 和事务应用 |
-| 6 | `会话存储与恢复.md` | 当前规范 | 双槽快照、CRC、幂等、轮转和原始块 |
+| 章节 | 用途 |
+|---:|---|
+| 开源教程 | 从首次配对、逻辑帧、MTU 分片到断线补传 |
+| 3 | 端到端 BLE 协议、消息、CRC 和恢复 |
+| 4 | ESP32 NimBLE 服务、线程、权限和生命周期 |
+| 5 | 配置命令、TLV、稳定 blob 和事务应用 |
+| 6 | 双槽快照、CRC、幂等、轮转和原始块 |
+
+## 开源教程：从首次配对到断线补传
+
+本节给第一次接触 BLE 的读者一条完整主线。后续正文保留逐字段规范；实现协议时必须以固定表、黄金向量和自动测试为准，不能只照抄教程里的示意值。
+
+### 1. 首次连接为什么不是“发现设备就成功”
+
+```mermaid
+sequenceDiagram
+    actor User as 用户
+    participant PC as Windows 上位机
+    participant OS as Windows BLE
+    participant ESP as ESP32 NimBLE
+    participant APP as 设备业务状态机
+
+    PC->>OS: 扫描 Association Endpoint
+    OS-->>PC: BPNN-FIT-XXXX
+    PC->>ESP: LE Secure Connections 配对
+    ESP-->>User: AMOLED 显示六位码
+    PC->>OS: ProvidePin
+    OS-->>PC: 系统绑定成功
+    PC->>ESP: Uncached 发现服务与 0001～0007
+    PC->>ESP: 读取 Manifest
+    ESP-->>PC: 协议/特征/模型/能力清单
+    PC->>PC: 严格兼容检查
+    PC->>ESP: 订阅 Control indication
+    PC->>ESP: 订阅 LiveState/Event notification
+    PC->>ESP: Control command 10 请求快照
+    ESP->>APP: 读取当前权威状态
+    APP-->>PC: ControlResponse + LiveState
+    PC->>ESP: LIST(cursor=本地最大 session_seq)
+    ESP-->>PC: 缺失会话摘要页
+    Note over PC,ESP: 全部成功后界面才显示“已连接”
+```
+
+广播只证明“附近存在一个名字匹配的设备”。系统配对、GATT 完整性、Manifest 兼容、订阅和权威快照任一失败，上位机都必须保持“未连接”，并显示失败发生在哪一层。
+
+### 2. 一条逻辑帧怎样逐字节解释
+
+共享黄金帧为：
+
+```text
+7E B1 01 00 03 01 34 12 04 03 02 01 05 00 10 20 30 40 50 92 F9
+```
+
+| 字节范围 | 值 | 解释 |
+|---|---|---|
+| 0～1 | `7E B1` | 小端魔数 `0xB17E` |
+| 2 | `01` | 协议主版本 1 |
+| 3 | `00` | 协议次版本 0 |
+| 4 | `03` | `LiveState` 消息类型 |
+| 5 | `01` | 标志位 |
+| 6～7 | `34 12` | 逻辑序号 `0x1234` |
+| 8～11 | `04 03 02 01` | 单调毫秒 `0x01020304` |
+| 12～13 | `05 00` | payload 长度 5 |
+| 14～18 | `10 20 30 40 50` | 示例 payload |
+| 19～20 | `92 F9` | 小端 CRC `0xF992` |
+
+CRC 只覆盖偏移 2 到 payload 末尾，不覆盖魔数和 CRC 自身。修改任一字段后必须由 codec 重新计算 CRC，不能沿用示例末尾两字节。
+
+### 3. MTU 23 时为什么会变成两片
+
+MTU 23 可承载的 ATT Value 为 20 字节；减去 8 字节分片包络后，每片只有 12 字节逻辑帧数据。上面的 21 字节黄金帧因此拆成：
+
+```text
+# 第 0 片：sequence=0x1234, index=0, count=2, data_length=12
+34 12 00 00 02 00 0C 00  7E B1 01 00 03 01 34 12 04 03 02 01
+
+# 第 1 片：sequence=0x1234, index=1, count=2, data_length=9
+34 12 01 00 02 00 09 00  05 00 10 20 30 40 50 92 F9
+```
+
+接收端先验证 8 字节包络，再按 `index=0,1,...` 严格拼接，最后才验证完整帧长度和 CRC。不能对每片分别做逻辑帧 CRC，也不能缓存乱序片等待补齐。
+
+### 4. START 命令的完整业务追踪
+
+假设上位机分配 `request_id=0x01020304`，无 TLV 的 START payload 为：
+
+```text
+04 03 02 01  01  01
+| request_id |cmd |ver
+```
+
+完整路径如下：
+
+1. `ControlPointCodec` 生成 6 字节请求 payload。
+2. `BleFrameCodec` 包装为 `message_type=1` 的逻辑帧并计算 CRC。
+3. `BleFragmentCodec` 按实际 ATT MTU 分片；MTU 23 时该 22 字节逻辑帧需要两片。
+4. Windows 对 `0001` 执行加密写入。
+5. ESP32 严格重组、验 CRC，并按 `request_id` 查最近 16 项幂等缓存。
+6. 新请求只执行业务回调一次，设备进入 Preparing，并把响应缓存。
+7. 设备通过 `0001` indication 返回同一 `request_id`、命令号、状态、错误码和新 `state_revision`。
+8. 设备随后用 LiveState 通知发布权威状态；Event 只用于及时动画或提示，不能由 PC 自行 `+1`。
+9. 两秒没有 indication 时，PC 只能重发**同一 request_id、同一 sequence、同一完整帧字节**一次。若改用新 ID，设备会把它视为第二条命令。
+
+### 5. 断线后如何恢复，而不是猜测
+
+```mermaid
+sequenceDiagram
+    participant PC as Windows 上位机
+    participant ESP as ESP32
+    participant DB as PC 原子 JSON
+
+    Note over PC,ESP: 训练中 BLE 断开；ESP 继续独立计数和保存
+    PC->>ESP: 退避重连 1/2/4/8/15 秒
+    PC->>ESP: 重读 Manifest、重订阅、请求 LiveState
+    ESP-->>PC: 当前 session_seq/state_revision/metric_value
+    PC->>DB: 读取本地最大 session_seq 作为 cursor
+    PC->>ESP: LIST(cursor, page_size<=12)
+    ESP-->>PC: 冻结响应页 + TransferData
+    loop 每条摘要
+        PC->>DB: UPSERT(device_id, session_seq)
+    end
+    PC->>DB: 本页全部落盘后推进 cursor
+    PC->>ESP: 下一页 LIST(new_cursor)
+    ESP-->>PC: END=1
+```
+
+PC 不按断线秒数推算次数，也不把 Event 缺口换算成动作。实时结果由新 LiveState 恢复；历史结果按 `(device_id, session_seq)` 幂等补传。必须先成功落盘整页再推进游标，否则应用崩溃会制造永久缺口。
+
+### 6. 增加新字段时怎样保持兼容
+
+1. 先判断字段是否可选。可选配置优先新增 TLV tag；解码器遇到完整且未知的 tag 必须安全跳过。
+2. 固定长度结构只能使用已有 `reserved` 位或发布新结构版本；不得在中间插入字段、改变现有偏移。
+3. 新能力用 Manifest capability bit 宣告。发送新字段前先确认对端能力，不能以固件版本字符串猜测。
+4. 小端整数、范围、默认值、缺失语义和重复 tag 策略必须写入本文件的权威表。
+5. 同步修改 ESP32 C codec、Windows C# codec、共享黄金向量和异常输入测试。
+6. 可安全忽略的兼容变化递增 minor；无法安全忽略的语义变化递增 major，并让不兼容客户端拒绝控制。
+7. 真表没有振动马达。执行器 capability、偏好和质量保留位固定为 0，不能把保留位重新解释成其它功能。
+
+### 7. 常见连接与同步故障
+
+| 现象 | 优先检查 | 正确恢复 |
+|---|---|---|
+| 扫描到设备但配对失败 | Windows 是否保留旧绑定；手表六位码是否仍有效 | 手表“忘记电脑”与 PC“忘记设备”分别清理各自绑定，再重新扫描 |
+| 配对成功但找不到 0001～0007 | Windows GATT 缓存或固件服务表不一致 | 释放旧 GATT 对象，使用 Uncached 重新发现；不要跳过 Manifest |
+| Manifest 后立即断开 | 协议主版本、297 维、类别 CRC、模型摘要或能力位不匹配 | 烧录/启动匹配版本；禁止忽略兼容错误继续控制 |
+| 显示连接但没有实时状态 | indication/notification 订阅顺序、快照命令和 CCCD 结果 | 重新按握手顺序订阅并读取权威快照 |
+| MTU 23 下 CRC 或分片错误 | 是否错误假定 244 字节；包络长度、索引和 sequence 是否一致 | 使用 `MTU-11` 计算片容量，并运行共享黄金向量 |
+| 点击开始后执行两次 | 超时重试是否换了 request ID 或重新编码了帧 | 复用同一 request ID、sequence 和帧字节；只重试一次 |
+| 重连后历史重复 | 本地主键是否缺少 device ID；是否在落盘前推进 cursor | 按 `(device_id, session_seq)` UPSERT，整页成功后再推进 |
+| 重连后历史缺口 | 是否从最后“收到”而非最后“已持久化”序号续传 | cursor 只取本地成功落盘最大序号 |
+| Raw Stream 没有数据 | 开发者模式、命令 11、0007 订阅是否全部成立 | 显式启用；普通连接默认不占用诊断带宽 |
+
+### 8. 源码、黄金向量与测试入口
+
+- 共享 C 帧/CRC/分片：[imu_ble_protocol.c](../shared/protocol/imu_ble_protocol.c)
+- 共享黄金向量：[golden_vectors.json](../shared/protocol/golden_vectors.json)
+- ESP32 业务协议：[ble_service_core.c](../esp32/firmware/components/ble_service/src/ble_service_core.c)
+- ESP32 NimBLE 适配：[ble_service_nimble.c](../esp32/firmware/components/ble_service/src/ble_service_nimble.c)
+- ESP32 会话传输：[session_transfer.c](../esp32/firmware/components/session_transfer/session_transfer.c)
+- C# 逻辑帧：[BleFrameCodec.cs](../pc/FitnessCoach.Bluetooth/BleFrameCodec.cs)
+- C# 分片与重组：[BleFragmentCodec.cs](../pc/FitnessCoach.Bluetooth/BleFragmentCodec.cs)、[BleFrameReassembler.cs](../pc/FitnessCoach.Bluetooth/BleFrameReassembler.cs)
+- C# 控制点：[ControlPointCodec.cs](../pc/FitnessCoach.Bluetooth/ControlPointCodec.cs)
+- Windows 会话状态机：[WindowsBleDeviceSession.cs](../pc/FitnessCoach.Bluetooth/WindowsBleDeviceSession.cs)
+- WinRT 扫描/配对/GATT：[WinRtBleTransport.cs](../pc/FitnessCoach.Bluetooth.Windows/WinRtBleTransport.cs)
+- ESP32 BLE 主机测试：[run_tests.ps1](../esp32/host_tests/ble_service/run_tests.ps1)
+- ESP32 会话传输测试：[run_tests.ps1](../esp32/host_tests/session_transfer/run_tests.ps1)
+- Windows BLE 状态机测试：[WindowsBleDeviceSessionTests.cs](../pc/FitnessCoach.Tests/WindowsBleDeviceSessionTests.cs)
+- Windows 会话同步测试：[SessionTransferContractTests.cs](../pc/FitnessCoach.Tests/SessionTransferContractTests.cs)
 
 ## 3. 端到端 BLE 协议、消息、分片、CRC 和恢复
-
-> 状态：**当前规范**；原始来源：`BLE通信协议.md`。
 
 ### 1. 文档目的
 
@@ -696,7 +851,7 @@ uint16 quality_flags
 - 陀螺仪诊断码：`code / 16.4 = filtered_dps`；
 - 加速度计诊断码：`code / 4096 = filtered_g`；
 - `code` 按 `round(physical_value / units_per_lsb)` 生成，并饱和到 `[-32768, 32767]`；
-- `quality_flags` 描述滤波、重采样、时间线重置或丢样等设备端质量事实；旧执行器位只为历史日志兼容。
+- `quality_flags` 描述滤波、重采样、采样连续性重置或丢样等设备端质量事实；协议版本 1 的执行器保留位固定为 0。
 
 因此，字段名中的 `_raw` 只为保持已经冻结的 v1 线上字段和 PC API 兼容；它表示“未在 PC 端换算的固定点码”，不表示“未经过设备端处理的 FIFO 原始码”。后续协议版本若要传输芯片 FIFO 原始样本，必须使用新的版本或特征，不得静默改变本记录语义。
 
@@ -772,7 +927,7 @@ $$
 | `0x0A` | 4 | 能力位 `u32LE` | 见 12.4 节 |
 | `0x0B` | 8 | Manifest 构建时 LittleFS 可用字节 `u64LE` | `total_bytes-used_bytes`，异常下溢钳制为 0 |
 
-本版只发布实际部署的基础 M0 与掩码 M0 两个 SHA。`dual_m0_manifest.json` 组合清单没有独立编译期常量，因此 v1 不把“组合清单 SHA”列为必填 tag；以后需要时必须分配新 tag，旧客户端按未知 TLV 跳过，不能复用 `0x06` 或 `0x07`。
+Manifest v1 发布实际部署的基础 M0 与掩码 M0 两个 SHA。`dual_m0_manifest.json` 组合清单没有独立编译期常量，因此 v1 不把“组合清单 SHA”列为必填 tag；若协议增加该摘要，必须分配新 tag，并由解码器按未知 TLV 规则跳过，不能复用 `0x06` 或 `0x07`。
 
 `0x0B` 只是启动/Manifest 构建时快照。后续保存会话会减少剩余容量，PC 只能把它当诊断提示，不能当作写入承诺。`esp_littlefs_info` 失败时设备不发布缺字段 Manifest，BLE 保持离线，设备仍可独立训练。
 
@@ -818,7 +973,7 @@ CRC 时间复杂度为 $O(S)$，$S$ 为全部类名 UTF-8 字节数；额外空�
 
 | bit | 掩码 | 语义 | 当前发布 |
 |---:|---:|---|---|
-| 0 | `0x00000001` | 旧马达能力保留位 | 否，真表没有马达 |
+| 0 | `0x00000001` | 执行器能力保留位 | 否，真表没有马达，固定为 0 |
 | 1 | `0x00000002` | LittleFS 最近会话摘要 LIST/GET 分页补传 | 是 |
 | 2 | `0x00000004` | 内部 Flash LittleFS 双槽会话持久化 | 是 |
 | 3 | `0x00000008` | 开发者 25 Hz 六轴同步诊断流已接入主应用 | 是 |
@@ -996,36 +1151,28 @@ CSHARP_PROTOCOL_TESTS_OK
 
 ---
 
-### 17. 当前实现范围
+### 17. 发布验证范围
 
-当前已经实现：
+自动化门必须覆盖：
 
-- C 逻辑帧编码和解码；
-- C CRC-16/CCITT-FALSE；
-- C MTU 自适应分片和严格顺序重组；
-- C# 同结构编解码；
-- C# CRC、分片、重组；
-- C# LiveStateV1 编解码与领域对象；
-- C/C# 共用黄金向量测试；
-- ESP-NimBLE GATT 服务、broker、安全参数、控制命令、Manifest、LiveState、Event和Transfer；
-- 设备LittleFS最近200条双槽会话摘要与BLE分页传输；
-- Windows扫描、WinRT连接、订阅、同ID重试、退避重连和历史同步；
-- 设备六位码邮箱/中文显示/全生命周期清除、设备端忘记电脑和 Windows 端忘记设备；
-- Windows六页WPF、11类30 FPS本地矢量动画和Mock BLE演示；
-- PC原子JSON会话/偏好仓储、公英制体重显示、目标与双端保存状态、连接后自动校时、设置配置同步、重连历史补传和开发者 RawStream 内存诊断；
-- 2026-07-15 ESP-IDF 5.5.4整机构建，应用镜像`0x13def0`，4 MiB应用分区余`0x2c2110`，约69%。
+- C 与 C# 逻辑帧、CRC-16/CCITT-FALSE、MTU 自适应分片和严格顺序重组；
+- LiveStateV1、Control、Manifest、Event、Transfer 和 RawStream 编解码；
+- C/C# 共用黄金向量、异常长度、坏 CRC、缺片、乱序和重复请求；
+- ESP-NimBLE GATT 服务、broker、安全权限、命令幂等和连接生命周期；
+- LittleFS 最近 200 条双槽会话摘要、分页传输和重复同步；
+- Windows 扫描、WinRT 连接、订阅、同 ID 重试、退避重连和会话幂等保存；
+- 六位码生命周期、设备端忘记电脑和 Windows 端忘记设备；
+- ESP-IDF 5.5.4 整机构建，并从当次构建记录镜像大小、分区余量和 SHA-256。
 
-尚待真板验证：
+真板发布门必须覆盖：
 
-- AMOLED六位码安全配对与绑定删除；
-- MTU23和实际协商MTU下的分片、通知与indication；
-- 弱信号、断线重连、历史恢复和一小时持续通信；
-- LittleFS写入阶段掉电、真实Flash寿命、TF拔卡和可选原始日志续传；
-- 真板BLE、UI、存储并发时的任务栈、堆、功耗和长时间稳定性。
+- AMOLED 六位码安全配对、绑定重连和双端绑定删除；
+- MTU 23 和协商 MTU 下的分片、notification 与 indication；
+- 弱信号、断线重连、会话补传和一小时持续通信；
+- 分别在 LittleFS 写头、payload、sync 和提交标记时断电，检查有效槽恢复；
+- TF 拔卡、可选原始日志续传，以及 BLE、UI、存储并发时的栈、堆、功耗和长时间稳定性。
 
 ## 4. ESP32 NimBLE 服务、线程、权限和生命周期
-
-> 状态：**当前规范**；原始来源：`设备端BLE服务.md`。
 
 ### 1. 目的与边界
 
@@ -1362,7 +1509,7 @@ CONFIG_BT_NIMBLE_GATT_SERVER=y
 CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
 ```
 
-当前 NimBLE API 已按官方 ESP-IDF v5.5.4 源码核对。没有真实开发板时，只能完成编译和主机测试；烧录后仍需验证：
+NimBLE API 以 ESP-IDF v5.5.4 为准。每个发布镜像必须在目标手表上验证：
 
 1. Windows 枚举自定义 0001～0007、Battery 和 Device Information；
 2. 六位配对码、成功/失败/断线/超时清除、绑定重连和忘记电脑；
@@ -1373,8 +1520,6 @@ CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
 7. 熄屏、待机和低电量模式的连接间隔与平均电流。
 
 ## 5. 配置命令、TLV、稳定 blob 和事务应用
-
-> 状态：**当前规范**；原始来源：`设备配置与命令TLV.md`。
 
 ### 1. 目的与边界
 
@@ -1394,7 +1539,7 @@ esp32/firmware/components/device_config/
 
 组件为纯 C11，不依赖 NimBLE、FreeRTOS、NVS、LittleFS 或动态内存。传输层负责从完整 BLE 控制帧取得 `command_id`、`command_version` 和 TLV 字节；本组件只负责确定性解码、范围验证、配置事务和 blob 编解码。
 
-当前实现未修改生产 `main.c`。因此，codec 和协调器 API 已可调用，但 BLE 命令回调、RTC、显示亮度、原始流发布和实际配置介质仍需由总编排层接线。
+生产 `main.c` 负责解码 BLE 配置命令、在候选副本上事务应用、持久化配置，并把 RTC、显示亮度、目标、用户资料和 Raw Stream 开关投影到对应运行组件。任一解码、范围检查或持久化步骤失败时，当前配置保持不变并返回明确错误码。
 
 ### 2. 通用 TLV 布局
 
@@ -1522,13 +1667,13 @@ $$
 | type | len | 类型 | 单位/含义 | 合法范围 |
 |---:|---:|---|---|---|
 | 1 | 1 | `uint8` | AMOLED 亮度百分比 | 5～100 |
-| 2 | 1 | `uint8` | 旧马达保留位 | 发送端固定为 0；设备忽略输入 |
+| 2 | 1 | `uint8` | 执行器保留位 | 发送端固定为 0；设备忽略输入 |
 | 3 | 1 | `bool` | 声音开关 | 0 或 1 |
 | 4 | 2 | `uint16` | 自动熄屏秒数 | 10～600 |
 | 5 | 4 | `uint32` | 偏好 revision | 大于 0 |
 | 6 | 1 | `bool` | 开发者模式 | 0 或 1 |
 
-默认值：亮度 35%、旧马达保留位 0、声音关、30 秒熄屏、revision 1、开发者模式关。
+默认值：亮度 35%、执行器保留位 0、声音关、30 秒熄屏、revision 1、开发者模式关。
 
 ### 7. Cmd11：原始流开关
 
@@ -1547,7 +1692,7 @@ $$
 - UTC 是否有效、UTC Unix 秒、时区分钟；
 - 体重克和资料 revision；
 - 目标种类和值；
-- 亮度、旧马达保留位、声音、熄屏秒、偏好 revision、开发者模式；保留位解码后固定为 false；
+- 亮度、执行器保留位、声音、熄屏秒、偏好 revision、开发者模式；保留位解码后固定为 false；
 - 原始流开关。
 
 `device_config_apply_command()` 先复制原配置：
@@ -1582,7 +1727,7 @@ $$
 
 | blob 偏移 | 长度 | 字段 |
 |---:|---:|---|
-| 8 | 1 | flags：bit0 UTC有效、bit1旧马达保留（必须为0）、bit2声音、bit3开发者、bit4原始流 |
+| 8 | 1 | flags：bit0 UTC有效、bit1执行器保留（必须为0）、bit2声音、bit3开发者、bit4原始流 |
 | 9 | 1 | brightness_percent |
 | 10 | 1 | goal_kind |
 | 11 | 1 | 保留，必须为 0 |
@@ -1676,15 +1821,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File `
 - 运行中改体重只影响下一会话；
 - 无目标 255、次数 0～100、时长和 mcal 目标进度。
 
-当前测试是无硬件纯 C 验证。它不能替代真机 RTC 写入、AMOLED 亮度、原始 BLE 流速率和断电恢复实测。真表没有振动马达。
+纯 C 测试验证编解码、范围和事务回滚；发布验收还必须覆盖真机 RTC 写入、AMOLED 亮度、原始 BLE 流速率和断电恢复。真表没有振动马达。
 
 ## 6. 双槽快照、CRC、幂等、轮转和原始块
 
-> 状态：**当前规范**；原始来源：`会话存储与恢复.md`。
-
 本文说明 `esp32/firmware/components/session_store` 的版本化持久化格式、CRC32、双槽掉电恢复、最近 200 会话轮转及可选原始 IMU 日志。实现为纯 C；LittleFS、TF 卡、主机内存只需注入统一后端。
 
-> 当前没有实物板。主机内存后端已验证软件恢复逻辑；LittleFS/TF 的挂载、写入原子性、掉电时序和介质寿命仍需烧录后验证。
+主机内存后端验证恢复算法；发布验收必须在目标手表上覆盖 LittleFS/TF 挂载、写入原子性、掉电时序和介质寿命。
 
 ### 1. 目标与非目标
 
@@ -1741,7 +1884,7 @@ flowchart LR
 | `read` | 随机读取完整区间 |
 | `write` | 随机覆盖完整区间 |
 | `erase` | 把区间恢复为空白状态 |
-| `sync` | 强制此前写入进入介质持久层 |
+| `sync` | 强制已写入数据进入介质持久层 |
 
 每个回调返回：
 
@@ -1785,7 +1928,7 @@ $$
 
 每个线性格式保存版本和固定长度。兼容修改必须遵循：
 
-- 新增可选字段：递增版本，保留旧解码器或提供迁移；
+- 新增可选字段：递增记录版本，解码器按 `record_version` 和 `record_size` 选择确定性解析路径；
 - 改变字段单位/语义：视为不兼容版本；
 - 只改内存结构顺序：线性偏移不变时可保持版本。
 
@@ -2089,7 +2232,7 @@ $$
 5. 有效则按 `block_size` 前进；
 6. 第一条损坏/截断尾块处停止。
 
-写入中断只损失当前尾块，不影响此前已验证块。当前组件提供单块验证；文件扫描、截尾和新文件轮转由 TF 后端/存储任务实现。
+写入中断只损失当前尾块，不影响已验证块。组件提供单块验证；文件扫描、截尾和新文件轮转由 TF 后端/存储任务实现。
 
 ### 13. 内存后端与故障注入
 
@@ -2204,14 +2347,14 @@ C11 + -Wall -Wextra -Wpedantic -Werror -fanalyzer
 & esp32\host_tests\session_store\run_file_backend_tests.ps1
 ```
 
-当前主机结果为 18 项断言通过。该结果证明文件读写与恢复逻辑，不等于真实 LittleFS 掉电测试通过。
+主机测试证明文件读写与恢复逻辑；真实 LittleFS 掉电仍必须通过下列实物验收。
 
 ### 17. 实物验收清单
 
 烧录后必须补做：
 
 1. LittleFS 文件首次创建、已有旧文件长度异常和挂载失败；
-2. 在头、payload、第一次 sync、提交标记、第二次 sync 各阶段随机断电；
+2. 分别在写头、写 payload、第一次 sync、写提交标记和第二次 sync 时随机断电；
 3. 每个断电点重启 100 次，确认始终选择有效更新槽或旧槽；
 4. 连续保存超过 200 会话，核对 UI/PC 历史顺序；
 5. 重复 BLE/任务事件不增加 generation；

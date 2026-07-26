@@ -372,7 +372,7 @@ def verify_dual_m0_c(
         and bout_error <= LOGIT_TOLERANCE
         and class_matches
     )
-    # 返回机器可读报告；硬件状态明确为未运行。
+    # 返回机器可读报告；该字段声明本工具只验证 C/Python 数值，不编码真板结论。
     return {
         "passed": passed,
         "feature_max_abs_error": feature_error,
@@ -385,7 +385,7 @@ def verify_dual_m0_c(
         "logit_tolerance": LOGIT_TOLERANCE,
         "sample_count": int(feature_samples.shape[0]),
         "compiler": compiler_path,
-        "hardware_validation_status": "not_run_no_hardware",
+        "hardware_validation_status": "not_encoded_c_parity_only",
     }
 
 

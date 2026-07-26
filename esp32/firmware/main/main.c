@@ -244,7 +244,7 @@ typedef enum app_ble_output_kind {
     APP_BLE_OUTPUT_EVENT,
     /* 发布开发者 25 Hz 六轴原始码诊断流；不重传、不落盘。 */
     APP_BLE_OUTPUT_RAW_STREAM,
-    /* 发布阶段一双 M0 与融合分类诊断；复用 Raw Stream 安全通道。 */
+    /* 发布双 M0 与融合分类诊断；复用仅由开发者显式开启的 Raw Stream 安全通道。 */
     APP_BLE_OUTPUT_INFERENCE_DIAGNOSTIC
 } app_ble_output_kind_t;
 
@@ -975,13 +975,13 @@ static void app_queue_power_internal(
         /* 写入 BLE 链路保护位；诊断覆盖不得打断正在等待 ACK 的 GATT 会话。 */
         .preserve_ble_link = preserve_ble_link,
     };
-    /* 阶段一常亮联调要求每个后续电池、连接和页面事件都保持连续六轴采样。 */
+    /* 常亮台架模式要求电池、连接和页面事件期间仍保持连续六轴采样。 */
     if (APP_BENCH_ALWAYS_ON) {
         /* 强制 QMI 使用 ACTIVE，防止启动电池事件把初始 25 Hz 策略覆盖回 WOM。 */
         request.policy.imu_mode = POWER_IMU_ACTIVE_25HZ;
-        /* 联调期间关闭自动 Light-sleep，保证传感器时间戳连续。 */
+        /* 常亮台架模式关闭自动 Light-sleep，保证传感器时间戳连续。 */
         request.policy.automatic_light_sleep = false;
-        /* 联调期间拒绝任何领域事件携带 Deep-sleep 请求。 */
+        /* 常亮台架模式拒绝任何领域事件携带 Deep-sleep 请求。 */
         request.policy.request_deep_sleep = false;
         /* ACTIVE 采样不安装 QMI Deep-sleep 运动唤醒路径。 */
         request.policy.enable_imu_deep_wake = false;
@@ -1007,7 +1007,7 @@ static void app_queue_power(const power_policy_t *policy, const bool persist_aut
 /* RawStream 诊断临时覆盖 QMI 模式；不修改 power_manager 领域状态，关闭后恢复当前页面策略。 */
 static void app_queue_raw_stream_power_policy(const bool enabled)
 {
-    /* 常亮阶段一固件从开机起已固定 QMI ACTIVE；Cmd11 不再切寄存器或投递电源请求。 */
+    /* 当前产品固件由页面电源策略管理 QMI；Cmd11 只叠加可撤销的开发者采样请求。 */
     if (APP_BENCH_ALWAYS_ON) {
         /* 保持正在运行的 QMI 和 BLE 会话，RawStream 命令只修改发布门控与流水线状态。 */
         return;
@@ -1126,17 +1126,17 @@ static void app_pipeline_on_sample(void *context, const imu_resampled_sample_t *
     motion_sample.monotonic_ms = app_coordinator_time_ms(sample->timestamp_us / UINT64_C(1000));
     /* 复制 gx、gy、gz、ax、ay、az。 */
     (void)memcpy(motion_sample.axis, sample->axes, sizeof(motion_sample.axis));
-    /* 连续性破坏位表示当前动作段分类证据存在时间缺口，必须清空历史 logits。 */
-    const uint32_t bout_reset_mask =
+    /* 连续性破坏位标记采样边界；引擎按 PREPARING/RUNNING 状态执行不同恢复策略。 */
+    const uint32_t continuity_break_mask =
         (uint32_t)IMU_QUALITY_ACCEL_GAP |
         (uint32_t)IMU_QUALITY_GYRO_GAP |
         (uint32_t)IMU_QUALITY_OUT_OF_ORDER |
         (uint32_t)IMU_QUALITY_QUEUE_OVERFLOW |
         (uint32_t)IMU_QUALITY_DRIVER_DROP |
         (uint32_t)IMU_QUALITY_RESAMPLER_RESET;
-    /* 只在真实连续性破坏时重置动作段分类证据；历史保留质量位不能丢弃整段历史。 */
-    if ((sample->quality_flags & bout_reset_mask) != 0U) {
-        /* 清空累计 logits，但保留当前会话的动作、次数、时间和热量。 */
+    /* 只通知真实采样边界；普通历史质量位不能触发连续性恢复。 */
+    if ((sample->quality_flags & continuity_break_mask) != 0U) {
+        /* 准备态保留缓存与候选；运行态只重建活动窗并切断跨缺口的未完成周期。 */
         workout_engine_reset_bout_evidence(&s_coordinator.workout);
     }
     /* 历史保留污染位、间断或队列溢出时仍累计热量，但冻结相位和步峰。 */
@@ -2126,7 +2126,14 @@ static void app_drain_pairing_mailbox(void)
     }
 }
 
-/* 应用任务：唯一修改 pipeline 和 coordinator。 */
+/*
+ * 应用任务是 pipeline 和 coordinator 的唯一写者。
+ *
+ * QMI、BLE、电池、存储和触摸生产者只向两个 FreeRTOS 队列复制值类型事实；本任务按
+ * Queue Set 到达顺序串行消费，并把捕获时间夹到已提交单调时间。每个事件最多执行一次
+ * “候选状态计算 -> 协调器提交 -> effect 扇出”，UI、BLE、存储和电源任务只消费 effect，
+ * 不反向修改业务状态。该单写者合同避免跨任务锁顺序、重复计数和半提交 UI 快照。
+ */
 static void app_event_task(void *argument)
 {
     /* 当前不使用参数。 */
@@ -3796,7 +3803,7 @@ static bool app_create_tasks(void)
     /* 读取任务创建后的片内总余量，验证科技 UI、BLE 与八条业务链可同时常驻。 */
     const size_t internal_free = heap_caps_get_free_size(
         MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    /* 读取最大连续片内块，后续协议和驱动临时对象不能只依赖离散总量。 */
+    /* 读取最大连续片内块；后续协议和驱动对象不能只依据离散空闲总量判断能否分配。 */
     const size_t internal_largest = heap_caps_get_largest_free_block(
         MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     /* 输出每个任务结果和剩余片内堆，真板启动日志可直接定位具体失败项。 */
@@ -4286,7 +4293,7 @@ void app_main(void)
     if (!APP_BENCH_SKIP_INITIAL_POWER_POLICY) {
         /* 复制初始 Home 功耗策略；联调常亮版需要在 BLE 命令到来前预先保持 QMI 活动。 */
         power_policy_t initial_policy = power_manager_policy(&s_coordinator.power);
-        /* 阶段一禁用低功耗并持续采集，避免 Cmd11 控制事务中途切换 QMI 寄存器。 */
+        /* 开发者诊断会话暂缓低功耗并持续采集，避免 Cmd11 控制事务中途切换 QMI 寄存器。 */
         if (APP_BENCH_ALWAYS_ON) {
             /* 六轴采样从开机即使用 ACTIVE 量程和 ODR，RawStream 与分类共享同一连续时间轴。 */
             initial_policy.imu_mode = POWER_IMU_ACTIVE_25HZ;

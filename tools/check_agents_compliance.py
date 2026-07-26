@@ -1,5 +1,7 @@
 """审计本次新增或修改源码是否满足 Agents.md 的中文注释合同。"""
 
+# 导入命令行参数模块，用于提供默认差异审计和显式全仓库审计两种入口。
+import argparse
 # 导入哈希模块，用于确认自动生成模型头没有在生成后被手工修改。
 import hashlib
 # 导入 JSON 模块，用于读取双 M0 导出清单中的权威文件摘要。
@@ -435,6 +437,26 @@ def run_git_lines(repository_root: Path, arguments: list[str]) -> list[str]:
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
+def _filter_auditable_sources(repository_root: Path, raw_paths: list[str]) -> list[Path]:
+    """过滤 Git 路径，只保留现存源码与必须触发专用合同的字体生成包成员。"""
+
+    # unique_paths 统一 Windows 与 POSIX 分隔符并去重，避免同一路径被重复审计。
+    unique_paths = {Path(path.replace("\\", "/")) for path in raw_paths}
+    # source_paths 保存实际存在且属于源码、构建入口或字体生成合同的仓库相对路径。
+    source_paths = [
+        path
+        for path in unique_paths
+        if (repository_root / path).is_file()
+        and (
+            path.suffix.lower() in SOURCE_SUFFIXES
+            or path.name in SPECIAL_SOURCE_NAMES
+            or path in GENERATED_UI_FONT_AUDIT_PATHS
+        )
+    ]
+    # 按 POSIX 路径排序，保证 Windows、本地 CI 与 GitHub Actions 输出稳定。
+    return sorted(source_paths, key=lambda path: path.as_posix().lower())
+
+
 def collect_changed_sources(repository_root: Path) -> list[Path]:
     """收集相对 HEAD 已修改、已暂存或未跟踪的源码及生成字体审计工件。"""
 
@@ -448,21 +470,56 @@ def collect_changed_sources(repository_root: Path) -> list[Path]:
         repository_root,
         ["ls-files", "--others", "--exclude-standard"],
     )
-    # 使用集合去重，避免同一路径因 Git 状态边界重复出现。
-    unique_paths = {Path(path.replace("\\", "/")) for path in tracked_paths + untracked_paths}
-    # 只保留仍存在的代码文件和字体清单/许可证；删除状态已被 diff-filter 排除。
-    source_paths = [
-        path
-        for path in unique_paths
-        if (repository_root / path).is_file()
-        and (
-            path.suffix.lower() in SOURCE_SUFFIXES
-            or path.name in SPECIAL_SOURCE_NAMES
-            or path in GENERATED_UI_FONT_AUDIT_PATHS
-        )
-    ]
-    # 按 POSIX 路径排序，确保 Windows 与 CI 输出顺序稳定、差异易读。
-    return sorted(source_paths, key=lambda path: path.as_posix().lower())
+    # 复用统一过滤器；默认差异模式继续覆盖未跟踪源码，不改变既有提交前行为。
+    return _filter_auditable_sources(repository_root, tracked_paths + untracked_paths)
+
+
+def collect_all_tracked_sources(repository_root: Path) -> list[Path]:
+    """使用 git ls-files 收集全部已跟踪源码，不把本地未跟踪实验文件混入全仓库审计。"""
+
+    # 不带路径参数的 `git ls-files` 返回索引中的全部跟踪文件，适合开源发布前完整审计。
+    tracked_paths = run_git_lines(repository_root, ["ls-files"])
+    # 统一过滤源码扩展名和生成包成员；模型头、特征头及字体合同仍由主流程专门验证。
+    return _filter_auditable_sources(repository_root, tracked_paths)
+
+
+def build_argument_parser() -> argparse.ArgumentParser:
+    """构造中文命令行帮助；默认审计当前差异，--all 审计全部 Git 跟踪源码。"""
+
+    # parser 说明两种模式的边界，避免教程维护者误以为默认命令已覆盖历史源码。
+    parser = argparse.ArgumentParser(
+        description=(
+            "检查源码是否满足 Agents.md 中文注释合同。"
+            "默认只审计相对 HEAD 的已修改、已暂存和未跟踪源码；"
+            "开源发布前可使用 --all 审计全部 Git 跟踪源码。"
+        ),
+        epilog=(
+            "示例：python tools/check_agents_compliance.py "
+            "或 python tools/check_agents_compliance.py --all"
+        ),
+        add_help=False,
+    )
+    # 显式提供中文帮助选项，避免 argparse 默认英文说明混入面向中文教程维护者的 CLI。
+    parser.add_argument(
+        "-h",
+        "--help",
+        action="help",
+        help="显示此帮助信息并退出。",
+    )
+    # --all 显式切换为全仓库模式；未提供时保持历史差异模式，兼容现有提交与 CI 流程。
+    parser.add_argument(
+        "--all",
+        dest="audit_all",
+        action="store_true",
+        help=(
+            "使用 git ls-files 审计全部已跟踪源码；"
+            "不包含未跟踪文件，且继续执行模型、特征和中文字体生成物专用合同。"
+        ),
+    )
+    # argparse 未提供公开的分组标题本地化参数；此处只改稳定的选项组标题，不改变解析语义。
+    parser._optionals.title = "选项"
+    # 返回可由 main 和单元测试共同使用的解析器，确保帮助文案与实际参数一致。
+    return parser
 
 
 def sha256_file(path: Path) -> str:
@@ -860,13 +917,19 @@ def audit_source_file(repository_root: Path, relative_path: Path) -> list[str]:
     return errors
 
 
-def main() -> int:
-    """执行变更范围审计；成功返回 0，失败返回 1。"""
+def main(argv: list[str] | None = None) -> int:
+    """执行默认差异审计或显式全仓库审计；成功返回 0，失败返回 1。"""
 
     # 脚本位于仓库根 tools/，父目录即权威项目根。
     repository_root = Path(__file__).resolve().parent.parent
-    # 获取本次变更源码；Git 查询异常会由 Python 堆栈显式暴露。
-    source_paths = collect_changed_sources(repository_root)
+    # 解析命令行；argv 为 None 时读取真实进程参数，测试可传入独立列表避免污染。
+    arguments = build_argument_parser().parse_args(argv)
+    # --all 使用全部 Git 跟踪源码；默认分支保持历史差异范围和未跟踪源码覆盖。
+    source_paths = (
+        collect_all_tracked_sources(repository_root)
+        if arguments.audit_all
+        else collect_changed_sources(repository_root)
+    )
     # 没有源码变更时输出确定性通过标记，文档单独变更不应误报。
     if not source_paths:
         print("AGENTS_COMMENT_AUDIT_OK files=0 generated_exceptions=0")

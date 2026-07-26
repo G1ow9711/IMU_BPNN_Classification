@@ -17,7 +17,10 @@ except ModuleNotFoundError:
     import train_export as training
 
 
-# 16 项直接手腕候选的顺序与待审核方案保持一致；单位写入名称便于 C 端对照。
+# 本工具只在训练/验证文件角色内衡量文件级分离度、跨折方向一致性、覆盖率和相关性。
+# 输出属于研究证据，不改变训练特征顺序、模型输入维度、ESP32 公式或已发布工件。
+# 候选只有经过独立训练、验证、导出及 Python/C 一致性门，才能成为部署特征。
+# 16 项直接手腕候选尚未进入部署特征；固定顺序与单位便于重复分析和 C 端可行性对照。
 WRIST_SCALAR_FEATURE_NAMES = [
     "wrist_gyro_path_deg",
     "wrist_dynamic_acc_path_gs",
@@ -36,14 +39,14 @@ WRIST_SCALAR_FEATURE_NAMES = [
     "wrist_cycle_interval_cv",
     "wrist_harmonic_ratio",
 ]
-# 4 项模板候选只能由折内训练文件建立模板，禁止提前写入生产特征顺序。
+# 4 项模板候选只能由折内训练文件建立模板，禁止提前写入部署特征顺序。
 WRIST_TEMPLATE_FEATURE_NAMES = [
     "wrist_template_jumping_jack_distance",
     "wrist_template_jumping_squat_distance",
     "wrist_template_jumping_lunge_distance",
     "wrist_template_nearest_margin",
 ]
-# 全部 20 项候选的固定顺序用于 JSON、CSV 和后续晋级清单。
+# 全部 20 项非部署候选使用固定顺序写入 JSON、CSV 和筛选清单。
 WRIST_CANDIDATE_FEATURE_NAMES = WRIST_SCALAR_FEATURE_NAMES + WRIST_TEMPLATE_FEATURE_NAMES
 # 模板类只包含存在官方动作视频且手腕轨迹差异明确的三类。
 TEMPLATE_CLASS_NAMES = ["jumping_jack", "jumping_squat", "jumping_lunge"]
@@ -662,7 +665,7 @@ def _oriented_auc(first: np.ndarray, second: np.ndarray) -> float:
 
 
 def promote_candidates(records: Sequence[Dict[str, object]], maximum_count: int = 12) -> List[Dict[str, object]]:
-    """按审批门槛筛选候选并最多返回 maximum_count 项。"""
+    """按固定统计门槛筛选非部署候选，并最多返回 maximum_count 项。"""
     # eligible 保存满足全部硬门槛的候选。
     eligible: List[Dict[str, object]] = []
     # 逐候选执行纯统计规则，不读取模型训练结果。
@@ -677,7 +680,7 @@ def promote_candidates(records: Sequence[Dict[str, object]], maximum_count: int 
         coverage_ok = float(record.get("coverage", 0.0)) >= 0.70
         # 至少两个独立文件具有有效值。
         files_ok = int(record.get("supported_file_count", 0)) >= 2
-        # 仅全部通过时加入晋级集合。
+        # 仅全部通过时加入统计筛选集合；该结果不等于进入训练或部署。
         if direction_ok and separation_ok and novelty_ok and coverage_ok and files_ok:
             eligible.append(dict(record))
     # 优先按稳健文件效应量，再按 AUC 和较低相关性排序。
@@ -689,7 +692,7 @@ def promote_candidates(records: Sequence[Dict[str, object]], maximum_count: int 
             str(record.get("name", "")),
         )
     )
-    # 截断到审批上限，禁止无约束堆叠特征。
+    # 截断到预设数量上限，禁止在未验证收益和资源成本前堆叠特征。
     return eligible[: max(0, int(maximum_count))]
 
 
@@ -830,7 +833,7 @@ def select_complementary_candidates(
 
 
 def parse_args() -> argparse.Namespace:
-    """解析三折手腕候选分析命令行参数。"""
+    """解析非部署手腕候选的三折文件级分析参数。"""
     # 创建中文说明的参数解析器。
     parser = argparse.ArgumentParser(description="手腕 IMU 候选特征三折文件级区分分析")
     # 基础 11 类数据集只允许指向训练开发数据根目录。
@@ -839,11 +842,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--extra-train-dir", type=Path)
     # 使用既有验证报告读取窗口和过滤参数，不读取其测试预测。
     parser.add_argument("--validation-report", type=Path, required=True)
-    # JSON 保存完整折级统计、晋级和拒绝原因。
+    # JSON 保存完整折级统计、筛选状态和未通过原因。
     parser.add_argument("--output-json", type=Path, required=True)
-    # 默认三折符合审批方案。
+    # 默认三折用于检查文件级证据在不同训练/验证子集上的稳定性。
     parser.add_argument("--fold-count", type=int, default=3)
-    # 晋级数硬上限默认为 12。
+    # 筛选结果的硬上限默认为 12；通过者仍不自动进入部署特征。
     parser.add_argument("--maximum-promoted", type=int, default=12)
     # 返回解析后的命名空间。
     return parser.parse_args()
@@ -904,7 +907,7 @@ def main() -> None:
         base_records + extra_records,
         validation_report,
     )
-    # 从报告读取最佳窗口秒数，当前 Round21/25 均为 2.5 秒。
+    # 从基础模型验证报告读取固定窗口秒数，避免候选分析另行搜索窗口长度。
     window_seconds = float(validation_report["best_window_seconds"])
     # 秒数乘 25 Hz 并四舍五入得到窗口采样点数。
     window_length = int(round(window_seconds * training.SAMPLE_RATE))
@@ -955,7 +958,7 @@ def main() -> None:
         raise ValueError("No valid training-role windows for wrist analysis")
     # 输出特征提取完成进度。
     print(f"wrist_features file={len(records)}/{len(records)} samples={len(samples)} complete=true", flush=True)
-    # 构造审批规定的三折文件级划分。
+    # 构造固定三折文件级划分，确保候选证据不跨文件泄漏。
     folds = group_records_into_folds(records, fold_count=args.fold_count)
     # candidate_matrix 保存每个样本的 20 项交叉拟合候选，模板列初始为 NaN。
     candidate_matrix = np.full((len(samples), len(WRIST_CANDIDATE_FEATURE_NAMES)), np.nan, dtype=np.float32)
@@ -1138,7 +1141,7 @@ def main() -> None:
         coverage = float(np.mean(np.isfinite(candidate_matrix[:, candidate_index])))
         # 支持文件数按文件中位数有限值计数。
         supported_file_count = int(np.sum(np.isfinite(file_candidates[:, candidate_index])))
-        # 汇总晋级规则需要的全部字段。
+        # 汇总固定统计筛选规则需要的全部字段。
         candidate_summaries.append(
             {
                 "name": feature_name,
@@ -1168,7 +1171,7 @@ def main() -> None:
     )
     # promoted_names 用于标记所有候选的最终状态。
     promoted_names = {str(record["name"]) for record in promoted}
-    # 给每项候选附加布尔晋级状态，便于审阅拒绝项。
+    # 给每项候选附加布尔筛选状态；字段名为报告格式兼容而保留，不表示已部署。
     for record in candidate_summaries:
         record["promoted"] = str(record["name"]) in promoted_names
     # 每个弱类至少两个不同物理组是进入训练的最终门槛。

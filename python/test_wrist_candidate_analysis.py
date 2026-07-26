@@ -17,7 +17,7 @@ class WristCandidateAnalysisTests(unittest.TestCase):
         features = analysis.wrist_scalar_features(window)
         # 输出维度必须与固定名称完全一致，后续 JSON 和 C 顺序才能稳定。
         self.assertEqual(features.shape, (len(analysis.WRIST_SCALAR_FEATURE_NAMES),))
-        # 当前审批方案明确直接候选为 16 项。
+        # 固定标量特征合同包含 16 项，维度漂移必须由测试立即发现。
         self.assertEqual(len(features), 16)
         # 静止和低方差输入必须全部返回有限数值。
         self.assertTrue(np.isfinite(features).all())
@@ -80,7 +80,7 @@ class WristCandidateAnalysisTests(unittest.TestCase):
                 records.append(training.ImuRecord(Path(f"{label}_{file_idx}.txt"), label, label_idx))
         # 按类别轮转构造三折文件级划分。
         folds = analysis.group_records_into_folds(records, fold_count=3)
-        # 必须生成审批方案规定的三折。
+        # 固定文件级评估合同必须生成三折。
         self.assertEqual(len(folds), 3)
         # 逐折验证训练/验证文件互斥且验证集合含两个类别。
         for train_records, validation_records in folds:
@@ -130,15 +130,15 @@ class WristCandidateAnalysisTests(unittest.TestCase):
             "coverage": 1.0,
             "supported_file_count": 5,
         }
-        # 复制记录并只破坏新颖性门槛，验证不会误晋级高度冗余特征。
+        # 复制记录并只破坏新颖性门槛，验证不会误选高度冗余特征。
         failing = dict(passing)
         # 使用不同名称区分两个候选输出。
         failing["name"] = "redundant_feature"
-        # 0.91 超过审批方案允许的 0.85 最大相关性。
+        # 0.91 超过固定规则允许的 0.85 最大相关性。
         failing["max_abs_correlation_with_production"] = 0.91
-        # 执行纯规则晋级，避免训练参与候选选择。
+        # 执行纯统计规则筛选，避免训练结果参与候选选择。
         promoted = analysis.promote_candidates([passing, failing], maximum_count=12)
-        # 仅满足全部门槛的手腕特征可以晋级。
+        # 仅满足全部门槛的手腕特征可以进入返回列表。
         self.assertEqual([record["name"] for record in promoted], ["wrist_gyro_path_deg"])
 
     def test_complementary_selection_counts_all_qualified_pairs_and_distinct_groups(self) -> None:

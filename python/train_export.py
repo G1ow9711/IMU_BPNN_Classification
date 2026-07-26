@@ -1,3 +1,22 @@
+"""训练、验证并导出可在 ESP32-S3 上复现的六轴 IMU 双 M0 分类模型。
+
+数据主链固定为 ``TXT -> [N,6] 物理量 -> 文件级划分 -> [62,6] 窗口 ->
+297 维特征 -> 标准化 -> BP 网络 -> C 头文件``。六轴顺序始终为
+``gx、gy、gz、ax、ay、az``；角速度单位为 ``deg/s``，加速度单位为 ``g``。
+训练、验证、测试按源文件划分，禁止同一记录的重叠窗口跨集合，以免窗口泄漏虚高指标。
+
+部署模型包含三个固定角色：
+
+* ``基础 M0``：保留全部 297 维输入的基础多分支模型；
+* ``相位掩码 M0``：把索引 184:232 的归一化阶段组固定为训练均值零分；
+* ``固定融合``：按 0.85/0.15 融合上述两个冻结模型。
+
+教程阅读顺序建议从 ``preprocess_imu_window``、``extract_features``、
+``train_model`` 和 ``export_model_headers`` 四个入口开始。长公式与 ESP32 数值一致性
+要求见 ``docs/算法原理、训练与实时计数.md``；本模块注释重点说明数组形状、物理单位、
+边界条件和生成 ABI，便于从源码直接核对部署合同。
+"""
+
 import argparse
 import copy
 import json
@@ -43,9 +62,9 @@ MOTION_TRIGGER_RATIO = 0.20
 MOTION_CONTEXT_SECONDS = 0.50
 # 部署端因果 logit 平滑保存当前及过去 14 个重叠窗口，最大历史范围约 6.72 秒。
 TEMPORAL_LOGIT_HISTORY = 15
-# Round39 固定验证选择的 Round29 基础 M0 logit 权重。
+# 固定融合中基础 M0 的 logit 权重，由验证集选择后冻结。
 ENSEMBLE_BASE_LOGIT_WEIGHT = 0.85
-# Round39 固定验证选择的 Round37 掩码 M0 logit 权重；两者之和必须为 1。
+# 固定融合中相位掩码 M0 的 logit 权重；与基础 M0 权重之和必须为 1。
 ENSEMBLE_MASKED_LOGIT_WEIGHT = 0.15
 TRAIN_RATIO = 0.70
 VAL_RATIO = 0.15
@@ -88,7 +107,7 @@ PATIENCE = 45
 DROPOUT = 0.10
 AUGMENT_TIMES = 2
 MAX_ROTATION_DEGREES = 35.0
-# 两个增强档固定为历史复现与跨人鲁棒训练；命令行只允许从该元组选择。
+# 两个增强档分别表示基础工件复现与跨人鲁棒训练；命令行只允许从该元组选择。
 AUGMENTATION_PROFILES = ("baseline", "robust")
 # 鲁棒档把右腕佩戴姿态范围扩展到每轴 ±60°，但不做左右手镜像。
 ROBUST_MAX_ROTATION_DEGREES = 60.0
@@ -220,8 +239,18 @@ HIDDEN3 = 32
 
 @dataclass(frozen=True)
 class ImuRecord:
+    """描述一个不可变源记录；划分键是文件而不是窗口，防止重叠窗泄漏。
+
+    ``path`` 指向一个原始 TXT，读取后形状为 ``[N,6]``；``label`` 是目录动作名，
+    ``label_idx`` 是 ``class_names`` 中的稳定零基索引。对象不缓存数组，因此不会把
+    训练增强结果或标准化状态写回原始数据。
+    """
+
+    # 原始记录路径；生命周期覆盖本次训练命令，文件内容仍由 load_imu_file 只读加载。
     path: Path
+    # 英文动作目录名，例如 jumping_jack；必须存在于本次扫描得到的类别表。
     label: str
+    # 类别表中的零基整数位置；模型输出、混淆矩阵和 ESP32 枚举均使用同一顺序。
     label_idx: int
 
 
@@ -372,7 +401,16 @@ class CausalBoutLogitAccumulator:
 
 
 class BPNet(nn.Module):
+    """提供单路径平铺 BP 的参考实现。
+
+    输入 ``x`` 形状为 ``[B,D]``，其中 ``D`` 是特征数且各列已经按训练均值/标准差
+    标准化；三层 ReLU 把它编码成 ``[B,32]``，最终线性层输出 ``[B,C]`` 无量纲
+    logits。Dropout 只在训练态作用于前两层，导出和 ESP32 前向不包含随机失活。
+    """
+
     def __init__(self, input_dim: int, class_count: int, dropout: float = DROPOUT):
+        """建立 ``D->96->64->32->C`` 网络；维度必须为正，dropout 取值属于 ``[0,1)``。"""
+
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(input_dim, HIDDEN1),
@@ -387,15 +425,21 @@ class BPNet(nn.Module):
         )
 
     def forward_features(self, x: torch.Tensor) -> torch.Tensor:
+        """把 ``[B,D]`` 标准化特征编码为 ``[B,32]`` 训练嵌入。"""
+
         for layer in list(self.net.children())[:8]:
             x = layer(x)
         return x
 
     def classify_features(self, embeddings: torch.Tensor) -> torch.Tensor:
+        """把 ``[B,32]`` 嵌入映射为 ``[B,C]`` logits，不在此执行 softmax。"""
+
         # 将形状为 [批大小,32] 的嵌入送入原 BP 输出层，得到 [批大小,类别数] logits。
         return self.net[8](embeddings)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """执行完整 BP 前向；返回 ``[B,C]`` logits，交叉熵内部完成 log-softmax。"""
+
         return self.classify_features(self.forward_features(x))
 
 
@@ -535,7 +579,7 @@ class MultiBranchBPNet(nn.Module):
 
 
 class DeepNarrowMultiBranchBPNet(nn.Module):
-    """按审核方案增加融合深度、保持逐层收缩的轻量 M1 BP。"""
+    """按固定层宽合同增加融合深度、保持逐层收缩的轻量 M1 BP。"""
 
     # 六组输入严格复用 297 维生产顺序，不改变任何特征边界。
     group_input_dims = (112, 48, 24, 48, 32, 33)
@@ -547,7 +591,7 @@ class DeepNarrowMultiBranchBPNet(nn.Module):
         super().__init__()
         # 输入必须等于六组总和 297，防止切片错位。
         if input_dim != sum(self.group_input_dims):
-            # 错误消息同时报告期望和实际维度，便于发现旧 296/302 维缓存。
+            # 错误消息同时报告期望和实际维度，便于发现不兼容的 296/302 维缓存。
             raise ValueError(
                 f"Deep-narrow model requires {sum(self.group_input_dims)} features, got {input_dim}"
             )
@@ -1043,6 +1087,14 @@ def estimate_active_point_threshold(
 
 
 def series_features(values: np.ndarray) -> List[float]:
+    """提取一维序列的八项总体统计，返回顺序与 ESP32 生成头完全一致。
+
+    输入 ``values`` 形状为 ``[N]``，单位继承来源序列。输出依次为均值、总体标准差、
+    最小值、最大值、RMS、平均绝对一阶差、围绕均值的过零率和一阶差总体标准差。
+    RMS、均值、极值及差分统计继承输入单位，过零率无量纲；调用方保证 ``N>=1``。
+    时间复杂度 ``O(N)``，临时数组空间 ``O(N)``。
+    """
+
     x = np.asarray(values, dtype=np.float32)
     mean = float(np.mean(x))
     std = float(np.std(x))
@@ -1074,6 +1126,14 @@ def series_features(values: np.ndarray) -> List[float]:
 
 
 def gravity_aligned_series(window: np.ndarray) -> Tuple[np.ndarray, ...]:
+    """把六轴窗口投影到估计重力方向，减轻腕表小角度佩戴差异。
+
+    输入形状 ``[N,6]``，顺序 ``gx、gy、gz、ax、ay、az``，单位分别为 ``deg/s`` 和
+    ``g``。窗口平均加速度估计单位重力轴；模长小于 ``1e-6`` 时回退 ``+Z`` 防止除零。
+    返回四个 ``[N]`` 序列：垂直/水平加速度和垂直/水平角速度，单位分别为 ``g``、
+    ``g``、``deg/s``、``deg/s``。该变换保持向量模长，不宣称解决左右手镜像域差异。
+    """
+
     data = np.asarray(window, dtype=np.float32)
     gravity = np.mean(data[:, 3:6], axis=0)
     gravity_norm = float(np.linalg.norm(gravity))
@@ -1097,6 +1157,13 @@ def gravity_aligned_series(window: np.ndarray) -> Tuple[np.ndarray, ...]:
 
 
 def phase_features(values: np.ndarray) -> List[float]:
+    """把 ``[N]`` 时序等长切为四段并输出每段均值、总体标准差和最大绝对值。
+
+    输出固定 ``4*3=12`` 项，单位继承输入。整数边界使用
+    ``start=floor(pN/4), end=floor((p+1)N/4)``；极短序列的空段回退最后一个点。
+    该特征保留动作先后顺序，但窗口起相位变化会增加类内差异。
+    """
+
     x = np.asarray(values, dtype=np.float32)
     result: List[float] = []
     for phase in range(PHASE_SEGMENTS):
@@ -1116,6 +1183,11 @@ def phase_features(values: np.ndarray) -> List[float]:
 
 
 def normalized_phase_features(values: np.ndarray) -> List[float]:
+    """先做单窗零均值/单位标准差，再提取四阶段形状；输出 12 项无量纲值。
+
+    标准差不大于 ``1e-6`` 时整段置零，避免静止常量信号除零并产生 NaN。
+    """
+
     x = np.asarray(values, dtype=np.float32)
     mean = float(np.mean(x))
     std = float(np.std(x))
@@ -1124,6 +1196,13 @@ def normalized_phase_features(values: np.ndarray) -> List[float]:
 
 
 def impact_distribution_features(values: np.ndarray) -> List[float]:
+    """描述冲击分布和非高斯形状，输出八项固定顺序特征。
+
+    输入形状 ``[N]``。前五项是 10/25/50/75/90 百分位，随后为偏度、超额峰度和
+    最大相邻跳变；分位数与跳变继承输入单位，偏度和峰度无量纲。总体标准差不大于
+    ``1e-6`` 时偏度、峰度返回零；``N=1`` 时相邻跳变返回零。
+    """
+
     x = np.asarray(values, dtype=np.float32)
     ordered = np.sort(x)
     quantiles = []
@@ -1144,6 +1223,13 @@ def impact_distribution_features(values: np.ndarray) -> List[float]:
 
 
 def temporal_features(values: np.ndarray) -> List[float]:
+    """提取活动比例、峰密度、主频、谱熵和自相关周期等 12 项时序特征。
+
+    输入 ``[N]`` 等间隔序列，采样率固定 25 Hz。FFT 去除直流项；主频单位 Hz，
+    峰密度、谱熵、自相关强度和活动比例无量纲，自相关峰延迟单位秒。总功率或方差
+    过小时频域/相关输出归零；候选延迟仅使用当前窗，部署端无未来信息。
+    """
+
     x = np.asarray(values, dtype=np.float32)
     centered = x - float(np.mean(x))
     activity = np.abs(centered)
@@ -1531,7 +1617,7 @@ def _horizontal_plane_anisotropy(vectors: np.ndarray) -> float:
 
 
 def _event_aligned_selected_features(window: np.ndarray) -> List[float]:
-    """提取 6 项通过 Round23 无训练筛选的事件对齐特征，输入形状为 [N,6]。"""
+    """提取 6 项通过多文件无训练筛选并进入部署的事件对齐特征，输入形状为 [N,6]。"""
     # 转为 float64；六轴列顺序固定为 gx、gy、gz、ax、ay、az。
     data = np.asarray(window, dtype=np.float64)
     # 非法或空窗口返回六个零，保证 BP 输入维度和有限性。
@@ -1722,7 +1808,7 @@ def _wrist_acf_second_first_ratio(gyro_magnitude: np.ndarray) -> float:
     """计算手腕角速度模长自相关第二时间峰与第一时间峰之比。"""
     # 输入转换为 float64 一维序列，单位为 deg/s。
     values = np.asarray(gyro_magnitude, dtype=np.float64).reshape(-1)
-    # 少于 10 点时不存在审批方案要求的 0.3 秒延迟范围。
+    # 少于 10 点时不存在自相关合同要求的 0.3 秒延迟范围。
     if len(values) < 10:
         return 0.0
     # 去除窗口均值，使自相关描述动态周期而非直流幅值。
@@ -2035,15 +2121,15 @@ def weak_class_features(series: Dict[str, np.ndarray]) -> List[float]:
         horizontal_peak_ratio,
         _,
     ) = _selected_spectral_features(series["acc_horizontal_mag"])
-    # 计算陀螺正峰幅值 CV；峰间隔 CV 属于已拒绝的 Round22 候选，不进入生产顺序。
+    # 计算陀螺正峰幅值 CV；峰间隔 CV 属于未进入部署的特征，不进入生产顺序。
     gyro_peak_amplitude_cv, _ = _positive_peak_shape_features(
         series["gyro_mag"]
     )
-    # 计算垂直加速度正峰间隔 CV；第一个返回值是峰幅 CV，本轮不采用。
+    # 计算垂直加速度正峰间隔 CV；第一个返回值是未进入部署的峰幅 CV。
     _, vertical_peak_interval_cv = _positive_peak_shape_features(
         series["acc_vertical"]
     )
-    # 计算水平加速度正峰间隔 CV；第一个返回值为本轮未采用的峰幅 CV。
+    # 计算水平加速度正峰间隔 CV；第一个返回值为未进入部署的峰幅 CV。
     _, horizontal_peak_interval_cv = _positive_peak_shape_features(
         series["acc_horizontal_mag"]
     )
@@ -2051,15 +2137,15 @@ def weak_class_features(series: Dict[str, np.ndarray]) -> List[float]:
     reconstructed_window = np.column_stack(
         [series[channel_name] for channel_name in CHANNEL_NAMES]
     )
-    # 提取 6 项事件对齐候选；其多文件效应证据记录在 Round23 无训练报告中。
+    # 提取 6 项已进入部署的事件对齐特征；其多文件效应证据记录在无训练筛选报告中。
     aligned_features = _event_aligned_selected_features(reconstructed_window)
-    # 计算三折晋级的手腕主轴换向率，单位为 Hz。
+    # 计算进入部署的手腕主轴换向率，单位为 Hz。
     wrist_reversal_rate = _wrist_reversal_rate_hz(reconstructed_window)
-    # 计算三折晋级的手腕角速度自相关第二/第一时间峰比。
+    # 计算进入部署的手腕角速度自相关第二/第一时间峰比。
     wrist_acf_ratio = _wrist_acf_second_first_ratio(series["gyro_mag"])
-    # 计算清洗后三折晋级的第一正自相关峰，描述重复动作周期一致性。
+    # 计算进入部署的清洗后第一正自相关峰，描述重复动作周期一致性。
     wrist_acf_first_peak = _wrist_acf_first_peak(series["gyro_mag"])
-    # 先组装 24 项 Round21 特征，固定顺序与前一版标准化合同一致。
+    # 先组装 24 项腕部稳健特征，固定顺序与标准化及 ESP32 部署合同一致。
     features = [
         acc_delta_mid,
         acc_vertical_high,
@@ -2097,6 +2183,13 @@ def weak_class_features(series: Dict[str, np.ndarray]) -> List[float]:
 
 
 def build_feature_series(window: np.ndarray) -> Dict[str, np.ndarray]:
+    """从 ``[N,6]`` 清洗窗口构造 14 条基础/派生时序。
+
+    六轴顺序固定为 ``gx、gy、gz、ax、ay、az``；同时加入角速度/加速度模长、一阶差
+    模长及重力对齐的垂直/水平分量。返回映射中的每条序列除两个差分模长为 ``[N-1]``
+    外均为 ``[N]``；单位由原始物理量继承。
+    """
+
     data = np.asarray(window, dtype=np.float32)
     series: Dict[str, np.ndarray] = {
         name: data[:, axis] for axis, name in enumerate(CHANNEL_NAMES)
@@ -2111,6 +2204,13 @@ def build_feature_series(window: np.ndarray) -> Dict[str, np.ndarray]:
 
 
 def extract_features(window: np.ndarray) -> np.ndarray:
+    """把一个六轴窗口转换为部署固定的 297 维 ``float32`` 特征。
+
+    输入形状通常为 ``[62,6]``，通道与单位遵循模块合同。输出分组依次为 112 项总体
+    统计、48 项阶段统计、24 项时序统计、48 项归一化阶段、32 项冲击分布和 33 项
+    弱类特征。顺序由 ``build_feature_names`` 唯一命名，并由 C/Python 一致性测试约束。
+    """
+
     # 所有特征统一从清洗后的 [N,6] 手腕 IMU 窗口提取，确保统计量和冲击特征不受孤立毛刺支配。
     data = preprocess_imu_window(window)
 
@@ -2131,6 +2231,12 @@ def extract_features(window: np.ndarray) -> np.ndarray:
 
 
 def build_feature_names() -> List[str]:
+    """返回与 ``extract_features`` 完全同序的 297 个稳定名称。
+
+    名称既是报告列，也是掩码索引和 ESP32 生成 ABI；只能在 Python、导出模板和固件
+    同步升级时改变，不能为绘图方便重新排序。
+    """
+
     names: List[str] = []
     for source in GLOBAL_SERIES_NAMES:
         for feature in ONE_SERIES_FEATURES:
@@ -2334,12 +2440,12 @@ def augment_window(
     rng: np.random.Generator,
     augmentation_profile: str = "baseline",
 ) -> np.ndarray:
-    """按历史或跨人鲁棒档增强一个 `[N,6]` 六轴窗口。"""
+    """按基础或跨人鲁棒增强档处理一个 `[N,6]` 六轴窗口。"""
     # 增强档必须来自固定枚举，避免拼写错误静默落到另一套训练分布。
     if augmentation_profile not in AUGMENTATION_PROFILES:
         # 报告未知档位及合法选择。
         raise ValueError(f"Unknown augmentation profile: {augmentation_profile}")
-    # baseline 完全保留历史 ±35°；robust 扩展到 ±60°右腕旋转。
+    # baseline 使用固定 ±35°；robust 扩展到 ±60°右腕旋转。
     max_rotation_degrees = (
         MAX_ROTATION_DEGREES
         if augmentation_profile == "baseline"
@@ -2367,11 +2473,11 @@ def augment_window(
         )
         # 保持平均重力，只缩放动态角速度和动态加速度。
         augmented = scale_imu_dynamic_amplitude(augmented, amplitude_scale)
-    # baseline 使用历史 0.03 局部扭曲；robust 扩到 0.05 但仍保持端点和单调时间。
+    # baseline 使用固定 0.03 局部扭曲；robust 扩到 0.05 但仍保持端点和单调时间。
     warp_displacement = 0.03 if augmentation_profile == "baseline" else 0.05
     # 施加平滑局部速度变化，模拟同一动作内部非匀速。
     augmented = time_warp_window(augmented, rng, max_displacement=warp_displacement)
-    # 陀螺噪声标准差 0.25 deg/s，远低于动作幅值且与历史训练一致。
+    # 陀螺噪声标准差 0.25 deg/s，远低于动作幅值且与基础增强合同一致。
     gyro_noise = rng.normal(0.0, 0.25, size=augmented[:, 0:3].shape).astype(np.float32)
     # 加速度噪声标准差 0.003 g，模拟 QMI8658 小扰动且不改变动作结构。
     acc_noise = rng.normal(0.0, 0.003, size=augmented[:, 3:6].shape).astype(np.float32)
@@ -2512,19 +2618,19 @@ def apply_model_feature_mask(
     suppress_normalized_phase: bool,
     suppress_absolute_axis_stats: bool = False,
 ) -> np.ndarray:
-    """按候选配置把指定输入组替换为训练均值对应的零标准分。"""
+    """按模型角色配置把指定输入组替换为训练均值对应的零标准分。"""
     # values 必须是形状 [样本数,297] 的无量纲标准化特征。
     values = np.asarray(standardized_features, dtype=np.float32)
     # 二维和固定特征维度是多分支切片及 ESP32 模型合同的前提。
     if values.ndim != 2 or values.shape[1] != len(build_feature_names()):
-        # 错误消息包含实际形状，便于发现旧 296/302 维工件或专家特征误用。
+        # 错误消息包含实际形状，便于发现不兼容的 296/302 维工件或专家特征误用。
         raise ValueError(
             f"Expected standardized model features (n, {len(build_feature_names())}), "
             f"got {values.shape}"
         )
     # masked 是独立副本，避免训练、验证和后续消融共享数组时产生隐式修改。
     masked = values.copy()
-    # 两个开关均关闭时保持 Round29 基线输入完全不变。
+    # 两个开关均关闭时保持基础 M0 的 297 维输入完全不变。
     if not suppress_normalized_phase and not suppress_absolute_axis_stats:
         # 返回副本，调用方可安全原地处理而不影响上游标准化数组。
         return masked
@@ -2559,7 +2665,7 @@ def prune_absolute_axis_input_weights(model: nn.Module) -> None:
         raise TypeError("Model input layer is not linear")
     # 首层至少必须覆盖 48 个待删除输入列。
     if input_layer.weight.shape[1] < ABSOLUTE_AXIS_MODEL_END:
-        # 报告实际列数便于定位旧特征或错误分支。
+        # 报告实际列数便于定位不兼容特征合同或错误分支。
         raise ValueError(
             "Model input layer is too narrow for absolute-axis pruning: "
             f"{input_layer.weight.shape[1]}"
@@ -2873,6 +2979,18 @@ def train_model(
     supcon_weight: float = SUPCON_WEIGHT,
     dropout: float = DROPOUT,
 ) -> Tuple[nn.Module, Dict[str, object]]:
+    """训练一个候选 BP，并按验证集最弱类别优先规则恢复最佳 checkpoint。
+
+    ``train_x``/``val_x`` 形状分别为 ``[N_train,D]``、``[N_val,D]``，均为标准化后的
+    无量纲特征；标签形状为 ``[N]``，``train_file_ids`` 标识源文件，供文件均衡采样和
+    跨文件监督对比约束使用。验证集不参与梯度、标准化参数估计或增强，避免信息泄漏。
+
+    总损失可由类别交叉熵、辅助运动属性、跨文件 SupCon 和困难类别间隔组成；开关为
+    false 或权重为零时对应项不贡献梯度。checkpoint 键按最小逐类召回、弱类平均召回、
+    宏 F1、准确率排序，而不是只追求总体准确率。返回训练态相同结构的最佳模型以及
+    可序列化训练历史/指标映射；调用方负责测试集一次性复核和导出门。
+    """
+
     if not 0.0 <= ema_decay < 1.0:
         raise ValueError("EMA decay must be in [0, 1)")
     if not 0.0 <= label_smoothing < 1.0:
@@ -2893,7 +3011,7 @@ def train_model(
     if deep_narrow and not multi_branch:
         raise ValueError("Deep-narrow M1 requires the multi-branch model")
     class_count = len(class_names)
-    # M1 优先于 M0 多分支；两者都关闭时使用兼容旧导出器的平铺 BP。
+    # M1 优先于 M0 多分支；两者都关闭时使用仅供工件格式兼容的平铺 BP。
     if deep_narrow:
         # 构造审核通过的 88→64→48→32→24 深窄融合模型。
         model: nn.Module = DeepNarrowMultiBranchBPNet(
@@ -2927,7 +3045,7 @@ def train_model(
         BATCH_SIZE,
         shuffle=False,
         file_ids=train_file_ids,
-        # P×K 关闭时沿用按文件反频率加权采样，保持旧训练路径不变。
+        # P×K 关闭时使用按文件反频率加权采样，保持基础训练合同不变。
         file_balanced=not pk_batches,
         # P×K 开启时每批包含全部 P 类、每类 K=6 个窗口。
         pk_file_balanced=pk_batches,
@@ -3155,7 +3273,7 @@ def train_family_specialist(
         family_names,
         device,
         progress_label=f"{progress_label} specialist=family",
-        # 三类专家只验证层级重判效果，不叠加此前已证明不稳定的监督对比损失。
+        # 三类专家只验证层级重判效果，不叠加对该结构不稳定的监督对比损失。
         supcon_weight=0.0,
         # 可选 P×K 批次使三类等量且同类样本优先跨文件，针对会话泛化失败。
         pk_batches=pk_batches,
@@ -3228,17 +3346,17 @@ def load_primary_sampling_contract(
         active_point_threshold = float(
             np.asarray(config["active_point_threshold"]).reshape(-1)[0]
         )
-        # 旧工件没有归一化阶段掩码字段时按历史默认 false 解释。
+        # 工件格式缺少归一化阶段掩码字段时按兼容默认值 false 解释。
         suppress_normalized_phase = bool(
             np.asarray(config["suppress_normalized_phase"]).reshape(-1)[0]
         ) if "suppress_normalized_phase" in config.files else False
-        # 旧工件没有绝对轴掩码字段时按历史默认 false 解释。
+        # 工件格式缺少绝对轴掩码字段时按兼容默认值 false 解释。
         suppress_absolute_axis_stats = bool(
             np.asarray(config["suppress_absolute_axis_stats"]).reshape(-1)[0]
         ) if "suppress_absolute_axis_stats" in config.files else False
     # validation_report_path 保存主模型选模时的数据划分随机种子和验证文件集合。
     validation_report_path = artifact_dir / "validation_report.json"
-    # 旧工件缺少报告时保留调用方随机种子兼容路径，但不能伪造验证文件合同。
+    # 工件格式缺少报告时保留调用方随机种子的兼容路径，但不能伪造验证文件合同。
     split_seed: Optional[int] = None
     # validation_file_keys 使用“类别目录/文件名”表示验证身份，允许数据根目录迁移。
     validation_file_keys: Tuple[str, ...] = ()
@@ -3259,7 +3377,7 @@ def load_primary_sampling_contract(
         ]
         # 找不到唯一实验时无法确认主模型验证身份，拒绝继续训练专家。
         if len(matching_experiments) != 1:
-            # 错误包含匹配数量，便于发现旧报告缺字段或重复窗口工件。
+            # 错误包含匹配数量，便于发现格式兼容报告缺字段或重复窗口工件。
             raise ValueError(
                 "Primary artifact validation report must contain exactly one "
                 f"matching experiment, got {len(matching_experiments)}"
@@ -3315,7 +3433,7 @@ def load_primary_sampling_contract(
         "suppress_normalized_phase": suppress_normalized_phase,
         # 绝对轴输入掩码必须沿用冻结模型合同。
         "suppress_absolute_axis_stats": suppress_absolute_axis_stats,
-        # 划分随机种子为空仅表示兼容无报告旧工件；新工件必须恢复该值。
+        # 划分随机种子为空仅表示无报告工件的格式兼容；含报告工件必须恢复该值。
         "split_seed": split_seed,
         # 验证文件身份用于训练前逐项核对，不参与特征或标签计算。
         "validation_file_keys": validation_file_keys,
@@ -3370,13 +3488,13 @@ def train_one_experiment(
         extra_train_records,
         split_seed,
     )
-    # 新工件存在验证清单时逐项确认文件身份，禁止候选偷换验证集。
+        # 含验证清单的工件逐项确认文件身份，禁止训练候选偷换验证集。
     if primary_sampling_contract is not None:
         # expected_validation_keys 从主模型报告恢复，路径根目录变化不影响比较。
         expected_validation_keys = tuple(
             primary_sampling_contract["validation_file_keys"]
         )
-        # 空元组仅兼容没有 validation_report.json 的旧工件。
+        # 空元组仅用于没有 validation_report.json 的工件格式兼容。
         if expected_validation_keys:
             # actual_validation_keys 使用当前扫描记录生成相同“类别/文件名”键。
             actual_validation_keys = tuple(
@@ -3392,9 +3510,9 @@ def train_one_experiment(
                     "Current validation files do not match primary artifact contract"
                 )
     # 新训练默认使用当前训练文件估计活动门；复用模型时会被工件合同覆盖。
-    # 新训练候选沿用命令行显式输入掩码。
+    # 训练候选沿用命令行显式输入掩码。
     effective_suppress_normalized_phase = suppress_normalized_phase
-    # 绝对轴候选同样只在新训练时读取命令行开关。
+    # 绝对轴候选只在从头训练时读取命令行开关。
     effective_suppress_absolute_axis_stats = suppress_absolute_axis_stats
     # 没有冻结主模型时，按当前训练角色文件估计两个活动门。
     if primary_artifact_dir is None:
@@ -3540,9 +3658,9 @@ def train_one_experiment(
             suppress_normalized_phase,
             suppress_absolute_axis_stats,
         )
-        # 加载路径只用于旧专家实验；绝对轴剪枝不能事后施加到已冻结主模型。
+        # 该加载路径只用于专家工件格式兼容；绝对轴剪枝不能事后施加到已冻结主模型。
         if suppress_absolute_axis_stats:
-            # 明确拒绝会改变历史模型函数的命令行组合。
+    # 明确拒绝会改变已加载模型函数的命令行组合。
             raise ValueError(
                 "--suppress-absolute-axis-stats cannot be combined with "
                 "--primary-artifact-dir"
@@ -3685,7 +3803,7 @@ def train_one_experiment(
         "suppress_normalized_phase": effective_suppress_normalized_phase,
         # 记录首层 0:48 已永久清零；推理端不需要额外输入掩码。
         "suppress_absolute_axis_stats": effective_suppress_absolute_axis_stats,
-        # 保存训练增强档，验证报告和部署工件必须能区分历史与鲁棒候选。
+    # 保存训练增强档，验证报告和部署工件必须能区分基础与鲁棒增强配置。
         "augmentation_profile": augmentation_profile,
         "model": model,
         "specialist_model": specialist_model,
@@ -3777,7 +3895,7 @@ def evaluate_external_holdout(
     mean = np.asarray(best_result["mean"], dtype=np.float32)
     std = np.asarray(best_result["std"], dtype=np.float32)
     x = ((raw_x - mean) / std).astype(np.float32)
-    # 外部推理严格复用候选保存的主模型输入掩码，默认 False 兼容旧工件。
+    # 外部推理严格复用工件保存的主模型输入掩码；缺少字段时按格式兼容值 False 解释。
     x = apply_model_feature_mask(
         x,
         bool(best_result.get("suppress_normalized_phase", False)),
@@ -3868,6 +3986,15 @@ def export_esp32_header(
     feature_names: Sequence[str],
     save_path: Path,
 ) -> None:
+    """把平铺 BP 候选导出为可审计 C99 头文件。
+
+    输入 ``result`` 必须含冻结模型、标准化均值/标准差及可选专家工件；类别和特征名称
+    顺序必须与训练报告一致。PyTorch ``Linear`` 权重形状为 ``[out,in]``，生成二维 C
+    数组保持相同行主序，固件按 ``W[o][i]*x[i]+b[o]`` 前向。所有 float 使用有限 C99
+    字面量；数组声明包含形状/字节说明。写入只发生在 ``save_path``，发布流程随后计算
+    SHA-256 并写清单，禁止手改生成头。
+    """
+
     model = result["model"]
     assert isinstance(model, BPNet)
     state = model.state_dict()
@@ -3957,25 +4084,25 @@ def export_esp32_header(
         f"#define NORMALIZED_PHASE_MODEL_START {NORMALIZED_PHASE_MODEL_START}",
         "/* NORMALIZED_PHASE_MODEL_END 是归一化四阶段组的半开结束索引。 */",
         f"#define NORMALIZED_PHASE_MODEL_END {NORMALIZED_PHASE_MODEL_END}",
-        "/* HAS_FAMILY_SPECIALIST 标记旧平铺模型是否附带动作族专家；最终双 M0 特征头为零。 */",
+        "/* HAS_FAMILY_SPECIALIST 标记平铺 BP 工件格式是否附带动作族专家；固定融合特征头为零。 */",
         f"#define HAS_FAMILY_SPECIALIST {1 if has_specialist else 0}",
         "/* SPECIALIST_CLASS_NUM 是可选专家输出类别数；未启用时为零。 */",
         f"#define SPECIALIST_CLASS_NUM {len(specialist_names) if has_specialist else 0}",
         "/* SPECIALIST_FEATURE_DIM 是可选专家选取的原始特征数量；未启用时为零。 */",
         f"#define SPECIALIST_FEATURE_DIM {specialist_feature_dim}",
-        "/* HIDDEN1 是旧平铺 BP 第一隐藏层宽度，仅兼容历史单模型导出。 */",
+        "/* HIDDEN1 是平铺 BP 工件格式的第一隐藏层宽度，仅供单模型格式兼容。 */",
         f"#define HIDDEN1 {HIDDEN1}",
-        "/* HIDDEN2 是旧平铺 BP 第二隐藏层宽度，仅兼容历史单模型导出。 */",
+        "/* HIDDEN2 是平铺 BP 工件格式的第二隐藏层宽度，仅供单模型格式兼容。 */",
         f"#define HIDDEN2 {HIDDEN2}",
-        "/* HIDDEN3 是旧平铺 BP 第三隐藏层宽度，仅兼容历史单模型导出。 */",
+        "/* HIDDEN3 是平铺 BP 工件格式的第三隐藏层宽度，仅供单模型格式兼容。 */",
         f"#define HIDDEN3 {HIDDEN3}",
         "/* PHASE_SEGMENTS 把关键序列等分为四段，用于动作相位统计。 */",
         f"#define PHASE_SEGMENTS {PHASE_SEGMENTS}",
-        "/* TEMPORAL_LOGIT_HISTORY 是兼容的固定历史平滑槽数；最终主路径使用动作段累计。 */",
+        "/* TEMPORAL_LOGIT_HISTORY 是工件格式保留的固定历史平滑槽数；部署主路径使用动作段累计。 */",
         f"#define TEMPORAL_LOGIT_HISTORY {TEMPORAL_LOGIT_HISTORY}",
         "/* 基础 M0 融合权重由开发验证集锁定，部署端不得再次调参。 */",
         f"#define ENSEMBLE_BASE_LOGIT_WEIGHT {c_float(ENSEMBLE_BASE_LOGIT_WEIGHT)}",
-        "/* 掩码 M0 融合权重与基础权重之和为一。 */",
+        "/* 相位掩码 M0 融合权重与基础权重之和为一。 */",
         f"#define ENSEMBLE_MASKED_LOGIT_WEIGHT {c_float(ENSEMBLE_MASKED_LOGIT_WEIGHT)}",
         "",
         "/* REST_MOTION_THRESHOLD 是训练角色静坐窗口估计的无量纲静止门槛。 */",
@@ -4061,7 +4188,7 @@ static inline int bp_temporal_smoother_update(
     if (state->count == TEMPORAL_LOGIT_HISTORY) {
         /* 逐类从累计和中减去被覆盖值。 */
         for (int class_index = 0; class_index < CLASS_NUM; class_index++) {
-            /* running_sum 保持恰好包含最近 14 个旧窗口。 */
+            /* running_sum 保持恰好包含最近 14 个既往窗口。 */
             state->running_sum[class_index] -= state->history[state->next_index][class_index];
         }
     } else {
@@ -5145,7 +5272,7 @@ static inline void positive_peak_shape_features(
 
     /* 使用插入排序得到升序副本；n 最大为 62，O(n^2) 开销可控且无需动态内存。 */
     for (int i = 1; i < n; i++) {
-        /* key 是本轮待插入的采样值。 */
+        /* key 是当前插入步骤待放置的采样值。 */
         float key = sorted[i];
         /* j 从已排序区间末端向前移动。 */
         int j = i - 1;
@@ -6017,7 +6144,7 @@ static inline float wrist_window_median(const float* values, int count) {
     for (int i = 0; i < count; i++) sorted[i] = values[i];
     /* 对固定小数组执行稳定插入排序。 */
     for (int i = 1; i < count; i++) {
-        /* key 是本轮待插入值。 */
+        /* key 是当前插入步骤待放置的数值。 */
         float key = sorted[i];
         /* j 从有序前缀末尾向前移动。 */
         int j = i - 1;
@@ -6652,12 +6779,12 @@ static inline void extract_features_from_window(const float raw_window[WINDOW_LE
     float peak_amplitude_cv = 0.0f;
     /* 初始化峰间隔 CV，调用函数后覆盖为对应通道的无量纲结果。 */
     float peak_interval_cv = 0.0f;
-    /* 计算陀螺模长峰形，只写入本轮选用的峰幅变异系数。 */
+    /* 计算陀螺模长峰形，只写入部署合同选用的峰幅变异系数。 */
     positive_peak_shape_features(
         phase_sources[2], phase_lengths[2], &peak_amplitude_cv, &peak_interval_cv
     );
     feature[idx++] = peak_amplitude_cv;
-    /* 计算垂直加速度峰形，只写入本轮选用的峰间隔变异系数。 */
+    /* 计算垂直加速度峰形，只写入部署合同选用的峰间隔变异系数。 */
     positive_peak_shape_features(
         phase_sources[0], phase_lengths[0], &peak_amplitude_cv, &peak_interval_cv
     );
@@ -6715,7 +6842,7 @@ static inline void extract_features_from_window(const float raw_window[WINDOW_LE
     feature[idx++] = wrist_acf_second_first_ratio(
         phase_sources[2], phase_lengths[2]
     );
-    /* 追加清洗后晋级的角速度模长第一正自相关峰，形成 297 维最终候选。 */
+/* 追加清洗后的角速度模长第一正自相关峰，形成 297 维部署输入。 */
     feature[idx++] = wrist_acf_first_peak(
         phase_sources[2], phase_lengths[2]
     );
@@ -6985,7 +7112,7 @@ def save_outputs(
             [bool(best_result.get("suppress_absolute_axis_stats", False))],
             dtype=np.bool_,
         ),
-        # 记录训练增强档；baseline 兼容历史工件，robust 表示包含跨人旋转/幅度/速度扰动。
+        # 记录训练增强档；baseline 表示基础增强，robust 表示包含跨人旋转、幅度和速度扰动。
         "augmentation_profile": np.asarray(
             [str(best_result.get("augmentation_profile", "baseline"))]
         ),
@@ -7024,7 +7151,7 @@ def save_outputs(
         "suppress_absolute_axis_stats": bool(
             best_result.get("suppress_absolute_axis_stats", False)
         ),
-        # 记录训练增强来源；旧工件缺失时按 baseline 解释。
+        # 记录训练增强来源；工件格式缺少该字段时按兼容值 baseline 解释。
         "augmentation_profile": str(
             best_result.get("augmentation_profile", "baseline")
         ),
@@ -7109,7 +7236,7 @@ def save_validation_outputs(
             output_dir / "best_model.pt",
         )
     else:
-        # 无专家候选保持历史单 state_dict 格式，兼容现有双 M0 导出器。
+        # 无专家模型保存为单 state_dict 工件格式，供双 M0 导出器读取。
         torch.save(model.state_dict(), output_dir / "best_model.pt")
     # scaler_config 保存主模型的标准化、窗口、活动门和结构合同。
     scaler_config: Dict[str, np.ndarray] = {
@@ -7222,7 +7349,7 @@ def save_validation_outputs(
         "suppress_absolute_axis_stats": bool(
             best_result.get("suppress_absolute_axis_stats", False)
         ),
-        # 验证报告顶层记录本轮增强档，避免仅从目录名猜测。
+        # 验证报告顶层记录该训练运行的增强档，避免仅从目录名猜测。
         "augmentation_profile": str(
             best_result.get("augmentation_profile", "baseline")
         ),
@@ -7294,7 +7421,7 @@ def parse_dropout(value: str) -> float:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train IMU BP model and export ESP32 header.")
     parser.add_argument("--dataset-dir", type=Path, default=None)
-    # baseline 完整复现历史增强；robust 增加右腕旋转、动态幅度和全局速度个体差异。
+    # baseline 表示基础增强；robust 增加右腕旋转、动态幅度和全局速度个体差异。
     parser.add_argument(
         "--augmentation-profile",
         choices=AUGMENTATION_PROFILES,
@@ -7320,7 +7447,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pk-prior-corrected-ce", action="store_true")
     # 启用五个仅训练期使用的运动属性辅助分类头。
     parser.add_argument("--auxiliary-heads", action="store_true")
-    # 将 48 个归一化四阶段特征在标准化后设为训练均值零分，用于 Round36 证据候选。
+    # 将 48 个归一化四阶段特征设为训练均值零分，构成相位掩码 M0 的固定输入合同。
     parser.add_argument("--suppress-normalized-phase", action="store_true")
     # 屏蔽六个绝对传感器轴的 48 项统计量，强制候选只使用腕角不变或重力相对特征。
     parser.add_argument("--suppress-absolute-axis-stats", action="store_true")
@@ -7350,7 +7477,7 @@ def parse_args() -> argparse.Namespace:
         type=parse_nonnegative_float,
         default=SUPCON_WEIGHT,
     )
-    # 暴露主模型 dropout；Round25 使用 0.20 抑制多分支过拟合。
+    # 暴露主模型 dropout，便于在保持网络拓扑不变时控制多分支过拟合。
     parser.add_argument("--dropout", type=parse_dropout, default=DROPOUT)
     parser.add_argument(
         "--window-seconds",
@@ -7363,6 +7490,13 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """执行一次可复现训练命令并写出报告、图表、模型和可选部署头。
+
+    流程顺序为参数合同检查、文件扫描、文件级划分、阈值估计、窗口/增强、特征提取、
+    训练与验证选择、测试/外部留出复核、部署门判定和工件保存。任一部署门失败仍保留
+    诊断报告，但不得发布 ESP32 模型头；命令异常以非零退出，不吞掉坏数据或路径错误。
+    """
+
     args = parse_args()
     # 辅助头依赖多分支模型的 32 维融合嵌入，命令行组合错误时立即终止。
     if args.auxiliary_heads and not args.multi_branch:
@@ -7406,7 +7540,7 @@ def main() -> None:
         f"external_holdout_loaded=false"
     )
     print(f"class_names={class_names}")
-    # 日志必须显示当前增强档真实使用的旋转上限，避免 robust 运行仍打印历史 ±35°造成审计误解。
+    # 日志必须显示当前增强档真实使用的旋转上限，避免 robust 运行误报基础档 ±35°。
     effective_max_rotation_degrees = (
         MAX_ROTATION_DEGREES
         if args.augmentation_profile == "baseline"

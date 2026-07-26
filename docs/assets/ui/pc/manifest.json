@@ -1,0 +1,59 @@
+{
+  "SchemaVersion": 1,
+  "Generator": "pc/FitnessCoach.UiCapture",
+  "GeneratorVersion": "1.0",
+  "SourceFilesSha256": "ef448f1204fd238e9301e8dcc2928db13ff4f88460522ab9042ad10acddbcc7a",
+  "CaptureMode": "deterministic-mock-render-target-bitmap",
+  "ReadsLocalApplicationData": false,
+  "UsesBluetooth": false,
+  "Images": [
+    {
+      "File": "pc-device.png",
+      "Page": "设备",
+      "Description": "确定性 Mock 设备与链路摘要",
+      "Width": 1440,
+      "Height": 900,
+      "Sha256": "9f255ef6f2065884debcd257e922236b6ee4d1d1a588676d164afd7f8ea66f8d"
+    },
+    {
+      "File": "pc-live-training.png",
+      "Page": "实时训练",
+      "Description": "深蹲八次与本地矢量动作示范",
+      "Width": 1440,
+      "Height": 900,
+      "Sha256": "1858dc84dbc436686bb3b3a21e48e2497fc9b1fec26fb40ad8a60bad03efdd06"
+    },
+    {
+      "File": "pc-training-monitor.png",
+      "Page": "训练监测",
+      "Description": "25 Hz 六轴曲线与分类诊断",
+      "Width": 1440,
+      "Height": 900,
+      "Sha256": "6f01aefd67a55cf2d0cda84dd6feaede4068f39d062c6295e7d72bb1402a6b14"
+    },
+    {
+      "File": "pc-history.png",
+      "Page": "历史记录",
+      "Description": "三条固定教程会话及详情",
+      "Width": 1440,
+      "Height": 900,
+      "Sha256": "845792ccb2cdd2d024a063a824c4150fc738226fb1317c5aff215182630490d7"
+    },
+    {
+      "File": "pc-settings.png",
+      "Page": "设置",
+      "Description": "公制、亮度、熄屏与减少动画",
+      "Width": 1440,
+      "Height": 900,
+      "Sha256": "bbbe03d564eabb47d94aa9eb77abf38a8530c9d2bab46b88f0d34224b51e6ff9"
+    },
+    {
+      "File": "pc-summary.png",
+      "Page": "训练总结",
+      "Description": "深蹲会话的双端保存结果",
+      "Width": 1440,
+      "Height": 900,
+      "Sha256": "dad2a35c21cd9d14ef39e6557af8a907f722ca2fff9a515cd215494be60b1e60"
+    }
+  ]
+}

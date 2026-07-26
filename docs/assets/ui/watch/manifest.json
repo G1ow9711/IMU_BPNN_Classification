@@ -1,0 +1,98 @@
+{
+  "Generator": "tools/watch_ui_preview/watch_ui_preview.py",
+  "GeneratorSha256": "4e704c3184eb58f9d82ed9a67bde413cc0bda843fed347336b7a9d7a4e8e948c",
+  "CaptureMode": "deterministic-pillow-production-semantics-preview",
+  "UsesBluetooth": false,
+  "ReadsDevice": false,
+  "PixelEquivalentToLvgl": false,
+  "Images": [
+    {
+      "File": "home.png",
+      "Page": "主页",
+      "InternalPage": "HOME",
+      "RestPreview": false,
+      "PairingPreview": false,
+      "Description": "主页、连接状态、电池图标和训练入口",
+      "Width": 410,
+      "Height": 502,
+      "Sha256": "2f393e1040d2491a73e876e0659959c51fdeda97251c4fe2efc9d9fe84554b3e"
+    },
+    {
+      "File": "prepare.png",
+      "Page": "正在识别",
+      "InternalPage": "PREPARE",
+      "RestPreview": false,
+      "PairingPreview": false,
+      "Description": "点击开始后的即时采样与动作识别",
+      "Width": 410,
+      "Height": 502,
+      "Sha256": "18991b658040cbed46d238addb4cab45432571b6573905a3e41d386480208c41"
+    },
+    {
+      "File": "running.png",
+      "Page": "训练中",
+      "InternalPage": "RUNNING",
+      "RestPreview": false,
+      "PairingPreview": false,
+      "Description": "稳定动作、实时次数、时长和热量",
+      "Width": 410,
+      "Height": 502,
+      "Sha256": "c35c3c05659bf3eb1400828af619549c2d9bbd163250cc5c872b722a0983913e"
+    },
+    {
+      "File": "running_rest.png",
+      "Page": "训练中",
+      "InternalPage": "RUNNING",
+      "RestPreview": true,
+      "PairingPreview": false,
+      "Description": "休息门生效，动作名称和累计保持不变",
+      "Width": 410,
+      "Height": 502,
+      "Sha256": "b49957c599b5fb6780919224ba26c1f76530468bc70c1b145d1748754a75ee7e"
+    },
+    {
+      "File": "settings.png",
+      "Page": "设备设置",
+      "InternalPage": "SETTINGS",
+      "RestPreview": false,
+      "PairingPreview": false,
+      "Description": "亮度、诊断、忘记电脑和返回入口",
+      "Width": 410,
+      "Height": 502,
+      "Sha256": "c69629526a7ca41d38cbf268cff4c648f56f0877fcf8d1b6a399ed4d19596b09"
+    },
+    {
+      "File": "pairing.png",
+      "Page": "主页",
+      "InternalPage": "HOME",
+      "RestPreview": false,
+      "PairingPreview": true,
+      "Description": "中文蓝牙配对码与超时提示",
+      "Width": 410,
+      "Height": 502,
+      "Sha256": "1473fbdc93800a277b7985c01200bc42752b5575cf44ef4768322df06754aad1"
+    },
+    {
+      "File": "summary.png",
+      "Page": "训练总结",
+      "InternalPage": "SUMMARY",
+      "RestPreview": false,
+      "PairingPreview": false,
+      "Description": "会话动作、最终次数、时长和热量",
+      "Width": 410,
+      "Height": 502,
+      "Sha256": "a543cfb1a09e22892e836928fbf0ece75aa43fe5a743659668ce39e86f9ea136"
+    },
+    {
+      "File": "error.png",
+      "Page": "设备故障",
+      "InternalPage": "ERROR",
+      "RestPreview": false,
+      "PairingPreview": false,
+      "Description": "稳定故障码、训练阻断和安全关机",
+      "Width": 410,
+      "Height": 502,
+      "Sha256": "18ef6fa5d2d5f1ce4a47be68397efcd8a326310cd2c1a3041e08d9ac4d9ba773"
+    }
+  ]
+}

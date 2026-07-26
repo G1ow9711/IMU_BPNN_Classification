@@ -1,1 +1,14 @@
-"""IMU BP training package."""
+"""六轴 IMU 健身动作训练、评估、模型导出与数据审计工具包。
+
+教学入口主要包括：
+
+* :mod:`python.train_export`：按 ``[样本数, 时间点数, 6]`` 读取窗口，六轴顺序固定为
+  ``gx、gy、gz、ax、ay、az``；角速度单位为 ``deg/s``，加速度单位为 ``g``。
+* :mod:`python.analyze_feature_separability`：只在训练集与验证集上审计候选特征，
+  并先按原始文件聚合再复核，避免同源重叠窗口造成虚高结论。
+* :mod:`python.prepare_finals_dataset`：依据清单校验摘要、行数、角色和重复内容，
+  全部文件验证通过后才复制，防止污染训练集或外部留出集。
+
+包内模型类别、特征顺序和标准化参数必须与 ESP32 生成头保持一致；修改训练端算法后，
+需要同时运行 Python 测试、C/Python 数值一致性测试及生成清单完整性检查。
+"""

@@ -100,9 +100,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset-dir", type=Path, required=True)
     # extra-train-dir 仅用于恢复原冻结文件角色，不进入验证指标。
     parser.add_argument("--extra-train-dir", type=Path, required=True)
-    # base-artifact-dir 指向 Round29 未掩码 M0。
+    # base-artifact-dir 指向保留全部 297 维输入的基础 M0 验证工件。
     parser.add_argument("--base-artifact-dir", type=Path, required=True)
-    # masked-artifact-dir 指向 Round37 掩码 M0。
+    # masked-artifact-dir 指向屏蔽归一化相位特征的相位掩码 M0 验证工件。
     parser.add_argument("--masked-artifact-dir", type=Path, required=True)
     # true-board-csv 可选地读取本次两轮挥手日志。
     parser.add_argument("--true-board-csv", type=Path)
@@ -593,9 +593,9 @@ def main() -> None:
         # 不自动搜索同名文件替代。
         raise ValueError("Frozen validation role no longer matches dataset split")
 
-    # 加载 Round29 基础 M0。
+    # 加载保留全部输入特征的基础 M0。
     base_artifact = fixed.load_artifact(args.base_artifact_dir, len(class_names))
-    # 加载 Round37 掩码 M0。
+    # 加载屏蔽归一化相位特征的相位掩码 M0。
     masked_artifact = fixed.load_artifact(args.masked_artifact_dir, len(class_names))
     # transforms 保存六种物理条件的两策略指标。
     transforms: Dict[str, Dict[str, object]] = {}

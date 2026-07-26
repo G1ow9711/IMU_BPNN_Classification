@@ -32,13 +32,13 @@ from python import evaluate_validation_generalization as generalization
 # 复用数据扫描、文件切分和固定双 M0 权重合同。
 from python import train_export as training
 
-# 当前已通过外部读取前冻结验证的 robust 双 M0 是本轮基线。
+# 已部署的稳健基础 M0 与相位掩码 M0 组合是固定验证基线。
 ROBUST_DUAL = "robust_base__historical_masked"
-# 不变轴基础单独与历史掩码融合，用于量化结构候选本身。
+# 不变轴基础 M0 与相位掩码 M0 融合，用于单独量化结构差异。
 INVARIANT_DUAL = "invariant_base__historical_masked"
-# 三模型候选把 85% 基础份额在 robust 与不变轴之间等分。
+# 三模型评估把 85% 基础份额在稳健基础与不变轴基础之间等分。
 TRI_M0 = "robust_invariant_base__historical_masked"
-# 历史掩码 M0 权重保持部署合同 15%。
+# 相位掩码 M0 权重保持部署合同 15%。
 MASKED_WEIGHT = 0.15
 # robust 基础占剩余 85% 的一半。
 ROBUST_WEIGHT = 0.425

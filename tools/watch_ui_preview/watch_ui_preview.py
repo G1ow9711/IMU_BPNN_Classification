@@ -1,8 +1,9 @@
-"""使用 Python 标准库模拟 410×502 AMOLED 产品界面。
+"""交互模式用 Tkinter 模拟 410×502 AMOLED 产品界面。
 
 本工具只验证页面层级、文字布局、按钮流程和轻量动画观感，不验证 LVGL
 字体度量、触摸坐标、驱动刷新时序或 ESP32 性能。页面文字与当前
 ``esp32/firmware/components/ui/ui_presenter.c`` 保持同一产品语义。
+正式 PNG 导出使用 Pillow 离屏绘制，不读取桌面像素、不连接设备或 BLE。
 """
 
 # 延迟解析类型注解，避免 Python 3.12 的 tkinter.Event 在运行时被当作可下标泛型。
@@ -10,10 +11,16 @@ from __future__ import annotations
 
 # 引入命令行解析器，使无显示环境可以执行纯逻辑冒烟测试。
 import argparse
-# 引入枚举类型，避免页面和命令依赖易拼错的裸字符串。
-from enum import Enum
+# 引入 SHA-256，实现截图与生成器源码的可审计内容指纹。
+import hashlib
+# 引入 JSON 编码器，写出机器可读且稳定排序的截图清单。
+import json
 # 引入数据类，为页面模型和运行状态提供明确字段合同。
 from dataclasses import dataclass, field
+# 引入枚举类型，避免页面和命令依赖易拼错的裸字符串。
+from enum import Enum
+# 引入路径对象，统一处理正式 PNG 输出目录和跨平台字体候选。
+from pathlib import Path
 # 引入 Tkinter；它属于 Python 标准库，不产生第三方安装依赖。
 import tkinter as tk
 # 引入 Tkinter 字体模块，统一模拟屏内中文标签的字号和字重。
@@ -21,29 +28,59 @@ from tkinter import font as tkfont
 # 引入类型提示，说明按钮列表、点击区域和回调的形状。
 from typing import Callable
 
+# 引入 Pillow 图像对象，用于不创建窗口的 410×502 正式 PNG 导出。
+from PIL import Image, ImageDraw, ImageFont
+
 
 # AMOLED 模拟内容宽度固定为厂家屏幕横向像素数，单位 px。
 DISPLAY_WIDTH = 410
 # AMOLED 模拟内容高度固定为厂家屏幕纵向像素数，单位 px。
 DISPLAY_HEIGHT = 502
-# 页面背景采用 LVGL renderer 的近黑色，降低真实 AMOLED 发光面积。
-COLOR_BACKGROUND = "#05070A"
-# 中央信息卡片采用 LVGL renderer 的深灰色。
-COLOR_CARD = "#10151C"
-# 主强调色采用设备端固定青绿色。
-COLOR_ACCENT = "#32E6A1"
-# 次强调色采用设备端固定蓝色。
-COLOR_SECONDARY = "#45A3FF"
+# 页面背景采用 LVGL renderer 的石墨黑，降低真实 AMOLED 发光面积。
+COLOR_BACKGROUND = "#05070B"
+# 主信息卡片采用低反射深蓝黑，和背景形成一级层级。
+COLOR_CARD = "#0D1420"
+# 抬升按钮和状态胶囊采用稍亮的蓝灰色。
+COLOR_RAISED = "#151F2E"
+# 主强调色采用系统级科技蓝，集中表示可操作和训练中状态。
+COLOR_ACCENT = "#0A84FF"
+# 次强调色采用青蓝色，只用于连接、充电和智能识别提示。
+COLOR_CYAN = "#32D5FF"
+# 成功状态使用高辨识度绿色。
+COLOR_SUCCESS = "#30D158"
+# 警告状态使用琥珀色。
+COLOR_WARNING = "#FF9F0A"
+# 次级文字采用冷灰蓝，降低与主指标的竞争。
+COLOR_SECONDARY = "#A9B4C4"
 # 主文字采用接近白色的浅灰，避免真实屏幕长期全白高亮。
-COLOR_TEXT = "#F2F5F7"
+COLOR_TEXT = "#F4F7FB"
 # 次要文字采用设备端弱化灰色。
-COLOR_MUTED = "#8C98A4"
-# 停止等危险操作使用柔和红色，和普通导航按钮区分。
-COLOR_DANGER = "#FF6B6B"
+COLOR_MUTED = "#8996A9"
+# 停止等危险操作使用系统红，和普通导航按钮区分。
+COLOR_DANGER = "#FF453A"
+# 分隔线和卡片描边使用低对比蓝灰色。
+COLOR_BORDER = "#223047"
 # 桌面窗口背景不属于 AMOLED 内容，仅用于区分模拟器控制区。
 COLOR_DESKTOP = "#20252C"
-# 视觉振动反馈采用暖黄色边框，避免误认为普通页面强调色。
-COLOR_HAPTIC_FLASH = "#FFD166"
+
+# 正式 PNG 导出优先使用微软雅黑常规字重，保证中文教程截图清晰可读。
+EXPORT_FONT_REGULAR_CANDIDATES: tuple[Path, ...] = (
+    # Windows 10/11 默认微软雅黑字体集合。
+    Path("C:/Windows/Fonts/msyh.ttc"),
+    # 常见 Linux Noto CJK 简体字体路径。
+    Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+    # macOS 苹方字体集合路径。
+    Path("/System/Library/Fonts/PingFang.ttc"),
+)
+# 正式 PNG 导出优先使用匹配的粗体字体，避免标题由程序伪粗体导致锯齿。
+EXPORT_FONT_BOLD_CANDIDATES: tuple[Path, ...] = (
+    # Windows 10/11 默认微软雅黑粗体字体集合。
+    Path("C:/Windows/Fonts/msyhbd.ttc"),
+    # 常见 Linux Noto CJK 粗体字体路径。
+    Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"),
+    # macOS 苹方字体集合；Pillow 使用同一集合中的系统默认字重。
+    Path("/System/Library/Fonts/PingFang.ttc"),
+)
 
 
 # 定义产品页面；列表严格覆盖生产 ui_state_t 的十三个可渲染界面状态。
@@ -56,7 +93,7 @@ class Page(Enum):
     SELF_TEST = "SELF_TEST"
     # 无活动会话的主页。
     HOME = "HOME"
-    # 三秒准备倒计时和动作锁定页。
+    # 点击开始后立即采集并等待首个可信动作的识别页。
     PREPARE = "PREPARE"
     # 实时动作、次数和热量页。
     RUNNING = "RUNNING"
@@ -66,7 +103,7 @@ class Page(Enum):
     STOP_CONFIRM = "STOP_CONFIRM"
     # 会话本地保存后的总结页。
     SUMMARY = "SUMMARY"
-    # 亮度、振动和诊断入口页。
+    # 亮度、熄屏和诊断入口页。
     SETTINGS = "SETTINGS"
     # 质量位、BLE 和偏好修订号诊断页。
     DIAGNOSTICS = "DIAGNOSTICS"
@@ -78,8 +115,8 @@ class Page(Enum):
     SHUTDOWN = "SHUTDOWN"
 
 
-# 桌面窗口标题使用纯中文；具体板型属于内部开发信息，不占用用户可见标题。
-PREVIEW_WINDOW_TITLE = "健身手柄界面预览器"
+# 桌面窗口标题使用“智能手表”产品术语；具体板型属于内部开发信息。
+PREVIEW_WINDOW_TITLE = "智慧运动手表界面预览器"
 
 # 把稳定内部页面枚举映射为用户可理解的中文页面名称；键集合必须覆盖全部十三页。
 PAGE_DISPLAY_NAMES: dict[Page, str] = {
@@ -89,8 +126,8 @@ PAGE_DISPLAY_NAMES: dict[Page, str] = {
     Page.SELF_TEST: "设备自检",
     # 主页提供开始、设置和关机入口。
     Page.HOME: "主页",
-    # 准备页显示三秒倒计时。
-    Page.PREPARE: "训练准备",
+    # 识别页明确显示设备已开始采样，不再展示人为倒计时。
+    Page.PREPARE: "正在识别",
     # 运行页显示实时动作与指标。
     Page.RUNNING: "训练中",
     # 暂停页冻结计数。
@@ -99,7 +136,7 @@ PAGE_DISPLAY_NAMES: dict[Page, str] = {
     Page.STOP_CONFIRM: "停止确认",
     # 总结页显示本次训练结果。
     Page.SUMMARY: "训练总结",
-    # 设置页管理屏幕、振动和绑定。
+    # 设置页管理屏幕、诊断和绑定。
     Page.SETTINGS: "设备设置",
     # 诊断页显示质量码与运行状态。
     Page.DIAGNOSTICS: "设备诊断",
@@ -152,12 +189,59 @@ def development_page_label(page: Page) -> str:
 # 固定开发导航顺序为 Page 枚举声明顺序，确保十三页列表与设备状态合同同步。
 DEVELOPMENT_PAGE_ORDER: tuple[Page, ...] = tuple(Page)
 
+# 定义一张教程截图的稳定文件名与页面状态，供批量导出和测试共享。
+@dataclass(frozen=True)
+class DocumentationPreviewVariant:
+    """描述正式文档截图需要复现的单一手表状态。"""
+
+    # 保存仓库内稳定 PNG 文件名；名称只使用小写 ASCII 和下划线。
+    filename: str
+    # 保存要渲染的设备业务页面。
+    page: Page
+    # true 表示 RUNNING 页面进入休息门，动作与累计保持不变。
+    rest_preview: bool = False
+    # true 表示在底层页面上覆盖六位蓝牙配对码。
+    pairing_preview: bool = False
+    # 保存教程中的中文用途说明，清单无需从内部枚举反推含义。
+    description: str = ""
+
+
+# 固定教程截图清单；增删页面时必须同步文档引用和单元测试。
+DOCUMENTATION_PREVIEW_VARIANTS: tuple[DocumentationPreviewVariant, ...] = (
+    # 主页展示品牌、电池、连接状态和三项主入口。
+    DocumentationPreviewVariant("home.png", Page.HOME, description="主页、连接状态、电池图标和训练入口"),
+    # 识别页展示点击开始后已立即采样的状态。
+    DocumentationPreviewVariant("prepare.png", Page.PREPARE, description="点击开始后的即时采样与动作识别"),
+    # 运行页展示稳定动作、实时次数和会话指标。
+    DocumentationPreviewVariant("running.png", Page.RUNNING, description="稳定动作、实时次数、时长和热量"),
+    # 休息页证明动作名称和累计不变，只暂停计数。
+    DocumentationPreviewVariant(
+        "running_rest.png",
+        Page.RUNNING,
+        rest_preview=True,
+        description="休息门生效，动作名称和累计保持不变",
+    ),
+    # 设置页展示亮度、诊断、忘记电脑和返回入口。
+    DocumentationPreviewVariant("settings.png", Page.SETTINGS, description="亮度、诊断、忘记电脑和返回入口"),
+    # 配对覆盖层展示零填充六位码和超时提示。
+    DocumentationPreviewVariant(
+        "pairing.png",
+        Page.HOME,
+        pairing_preview=True,
+        description="中文蓝牙配对码与超时提示",
+    ),
+    # 总结页展示动作、最终次数、时长和热量。
+    DocumentationPreviewVariant("summary.png", Page.SUMMARY, description="会话动作、最终次数、时长和热量"),
+    # 故障页展示稳定故障码、训练阻断和安全关机。
+    DocumentationPreviewVariant("error.png", Page.ERROR, description="稳定故障码、训练阻断和安全关机"),
+)
+
 
 # 定义页面按钮命令；命名与设备端 ui_command_t 的产品意图一致。
 class Command(Enum):
     """描述用户点击后触发的纯预览命令。"""
 
-    # 从主页进入准备倒计时。
+    # 从主页进入即时采样和动作识别。
     START = "START"
     # 取消 PREPARE，返回主页。
     CANCEL = "CANCEL"
@@ -179,12 +263,8 @@ class Command(Enum):
     BACK = "BACK"
     # 循环 AMOLED 用户亮度。
     CYCLE_BRIGHTNESS = "CYCLE_BRIGHTNESS"
-    # 切换有效计数振动开关。
-    TOGGLE_HAPTIC = "TOGGLE_HAPTIC"
     # 循环自动熄屏秒数。
     CYCLE_TIMEOUT = "CYCLE_TIMEOUT"
-    # 触发一次诊断振动脉冲。
-    TEST_HAPTIC = "TEST_HAPTIC"
     # 在设置页删除设备端保存的电脑绑定，并清除当前连接演示状态。
     FORGET_COMPUTER = "FORGET_COMPUTER"
     # 从逻辑熄屏恢复此前页面。
@@ -213,7 +293,7 @@ class PageSpec:
 
     # 保存页面标题。
     title: str = ""
-    # 保存页面最醒目的动作、倒计时或主指标。
+    # 保存页面最醒目的动作、识别状态或主指标。
     primary: str = ""
     # 保存次数、卡路里或诊断摘要。
     secondary: str = ""
@@ -236,8 +316,6 @@ class PreviewState:
     screen_resume_page: Page = Page.HOME
     # 停止确认前页面默认指向 RUNNING。
     stop_resume_page: Page = Page.RUNNING
-    # PREPARE 倒计时剩余秒数，范围 0～3。
-    prepare_seconds: int = 3
     # 当前稳定动作显示名；预览默认使用最难弱类“跳跃深蹲”。
     action_name: str = "跳跃深蹲"
     # 保存动作列表索引，供桌面控制面板切换动作。
@@ -264,8 +342,6 @@ class PreviewState:
     brightness_percent: int = 35
     # 保存自动熄屏门槛，单位秒。
     screen_timeout_seconds: int = 30
-    # 保存有效计数是否产生振动反馈。
-    haptic_enabled: bool = True
     # 保存偏好修订号；每次设置变化递增。
     preferences_revision: int = 1
     # 保存运行期数据质量位图。
@@ -274,8 +350,8 @@ class PreviewState:
     fault_code: int = -42
     # 保存动画点数量，范围 0～3。
     animation_phase: int = 0
-    # 保存当前是否显示视觉振动反馈边框。
-    haptic_flash_active: bool = False
+    # 保存实时动作门是否允许计数；false 表示用户休息或窗口不确定。
+    counting_enabled: bool = True
     # 保存点击区域；每项由坐标和命令组成，渲染时重建。
     click_regions: list[tuple[int, int, int, int, Command]] = field(default_factory=list)
 
@@ -332,14 +408,6 @@ class PreviewState:
         # 模拟配置持久化成功。
         self.preferences_revision += 1
 
-    def toggle_haptic(self) -> None:
-        """翻转振动偏好并递增偏好修订号。"""
-
-        # 取反当前布尔值。
-        self.haptic_enabled = not self.haptic_enabled
-        # 模拟配置持久化成功。
-        self.preferences_revision += 1
-
     def cycle_action(self) -> None:
         """切换到下一个动作，仅用于桌面布局检查。"""
 
@@ -369,12 +437,10 @@ class PreviewState:
             self.calories_kcal = 0.0
             # 清零旧训练时长。
             self.elapsed_seconds = 0
-            # 重置三秒准备倒计时。
-            self.prepare_seconds = 3
-            # 进入 PREPARE。
+            # 进入即时采样和首动作识别页。
             self.page = Page.PREPARE
-            # 请求调用方启动定时倒计时。
-            return "start_prepare"
+            # 请求调用方演示首个可信窗口完成后的页面切换；采样已经立即开始。
+            return "start_identification"
         # PREPARE 的 CANCEL 直接返回主页，不生成摘要。
         if command is Command.CANCEL and self.page is Page.PREPARE:
             # 结束未开始的会话。
@@ -449,13 +515,7 @@ class PreviewState:
             self.cycle_brightness()
             # 返回无额外副作用。
             return "none"
-        # 设置页振动按钮切换偏好。
-        if command is Command.TOGGLE_HAPTIC and self.page is Page.SETTINGS:
-            # 更新振动开关。
-            self.toggle_haptic()
-            # 开启后的本次点击用视觉闪烁确认反馈。
-            return "haptic" if self.haptic_enabled else "none"
-        # 设置页“忘记电脑”清除绑定演示事实，不改变亮度、振动或训练指标。
+        # 设置页“忘记电脑”清除绑定演示事实，不改变亮度、熄屏或训练指标。
         if command is Command.FORGET_COMPUTER and self.page is Page.SETTINGS:
             # 清除安全连接状态，模拟设备删除 NimBLE 绑定并断开当前电脑。
             self.ble_connected = False
@@ -469,10 +529,6 @@ class PreviewState:
             self.cycle_timeout()
             # 返回无额外副作用。
             return "none"
-        # 诊断页 TEST VIBE 仅产生反馈，不改变业务指标。
-        if command is Command.TEST_HAPTIC and self.page is Page.DIAGNOSTICS:
-            # 只有振动偏好开启时模拟马达脉冲。
-            return "haptic" if self.haptic_enabled else "none"
         # 熄屏页任意有效触摸恢复此前页面。
         if command is Command.WAKE and self.page is Page.SCREEN_OFF:
             # 恢复准确页面。
@@ -488,13 +544,13 @@ class PreviewState:
         # 当前页面不接受该命令时安全忽略。
         return "none"
 
-    def increment_count(self) -> bool:
-        """在 RUNNING 中增加一次指标，并返回是否应产生振动反馈。"""
+    def increment_count(self) -> None:
+        """在 RUNNING 且计数门开启时增加一次权威指标。"""
 
-        # 非训练页不得增长权威指标。
-        if self.page is not Page.RUNNING:
-            # 返回不振动。
-            return False
+        # 非训练页或休息门关闭时不得增长权威指标。
+        if (self.page is not Page.RUNNING) or (not self.counting_enabled):
+            # 直接返回；次数、热量和活动时长均保持不变。
+            return
         # 增加一次动作次数。
         self.count += 1
         # 每次演示增加约 0.118 kcal；该数值仅用于布局变化，不是热量算法。
@@ -503,22 +559,18 @@ class PreviewState:
         self.elapsed_seconds += 1
         # 使用小范围周期变化模拟模型置信度刷新。
         self.confidence_percent = 90.0 + float((self.count * 7) % 91) / 10.0
-        # 返回当前振动偏好，保证一次计数最多一次反馈。
-        return self.haptic_enabled
+        # 函数只更新预览指标，不产生不存在的硬件反馈。
+        return
 
 
 # 定义不依赖 Tk 的开发直达函数，使无窗口冒烟测试也能覆盖十三页导航合同。
 def select_page_for_development(state: PreviewState, page: Page) -> None:
-    """把纯状态切到指定页面，不启动倒计时、动画或自动计数。"""
+    """把纯状态切到指定页面，不启动识别、动画或自动计数。"""
 
     # 写入开发者明确选择的页面；该操作只用于桌面布局检查。
     state.page = page
-    # 清除可能仍亮起的视觉振动，避免开发切页后误认为页面自带黄色边框。
-    state.haptic_flash_active = False
-    # PREPARE 直达时恢复初始 3 秒，便于检查最大字号数字布局。
-    if page is Page.PREPARE:
-        # 重置准备倒计时演示值，范围固定为 0～3 秒。
-        state.prepare_seconds = 3
+    # 开发直达运行页默认开启计数门，避免旧休息状态污染布局检查。
+    state.counting_enabled = True
     # STOP_CONFIRM 直达时默认从 RUNNING 返回，保证 CANCEL 的演示结果可预测。
     if page is Page.STOP_CONFIRM:
         # 保存取消停止时应恢复的训练页。
@@ -527,6 +579,39 @@ def select_page_for_development(state: PreviewState, page: Page) -> None:
     if page is Page.SCREEN_OFF:
         # 保存黑屏点击后的安全恢复页。
         state.screen_resume_page = Page.HOME
+
+
+# 为静态截图写入统一演示数据，避免 Tk 预览和 PNG 导出出现两套示例值。
+def configure_state_for_capture(
+    state: PreviewState,
+    page: Page,
+    rest_preview: bool = False,
+    pairing_preview: bool = False,
+) -> None:
+    """把状态配置成可重复导出的教程截图场景。"""
+
+    # 通过统一开发直达逻辑切换页面并重置页面相关恢复点。
+    select_page_for_development(state, page)
+    # 每次配置先明确覆盖层开关，避免同一状态对象复用时残留旧配对码。
+    state.pairing_active = pairing_preview
+    # 教程配对码固定为 012345，用于验证前导零和六位排版。
+    state.pairing_code = 12345
+    # 教程截图固定使用 82% 电量，便于比较所有页面的状态栏一致性。
+    state.battery_percent = 82
+    # 教程截图默认展示已连接状态，错误页也能说明业务故障与 BLE 状态相互独立。
+    state.ble_connected = True
+    # 训练类页面使用同一组权威指标，确保页面切换前后数字可直接比较。
+    if page in (Page.RUNNING, Page.PAUSED, Page.STOP_CONFIRM, Page.SUMMARY):
+        # 权威累计固定为 7 次，避免把演示值误解为目标次数。
+        state.count = 7
+        # 活动时长固定为 18 秒，单位 s。
+        state.elapsed_seconds = 18
+        # 热量固定为 0.826 kcal，只服务界面排版演示。
+        state.calories_kcal = 0.826
+        # 分类置信度固定为 94%，用于检查运行页脚信息密度。
+        state.confidence_percent = 94.0
+    # 只有 RUNNING 页面接受休息变体；其它页面传入该开关也不得改变业务语义。
+    state.counting_enabled = not (rest_preview and page is Page.RUNNING)
 
 
 # 根据动态状态生成与设备 presenter 对齐的页面模型。
@@ -550,7 +635,7 @@ def build_page_spec(state: PreviewState) -> PageSpec:
         # 生成 1～3 个循环点，避免全屏动画。
         dots = "." * ((state.animation_phase % 3) + 1)
         # 返回开机页面。
-        return PageSpec("健身助手", f"正在启动{dots}", "", status, "本地智能识别")
+        return PageSpec("系统启动", f"智慧运动助手{dots}", "正在准备设备", status, "请稍候")
     # SELF_TEST 页面列出设备端同样的四项检查。
     if state.page is Page.SELF_TEST:
         # 返回自检页面。
@@ -559,41 +644,46 @@ def build_page_spec(state: PreviewState) -> PageSpec:
     if state.page is Page.HOME:
         # 返回主页。
         return PageSpec(
-            "健身手柄",
-            "设备就绪",
-            "11种动作 / 离线识别",
+            "训练中心",
+            "准备开始训练",
+            "右手佩戴 / 自动识别",
             status,
-            "点击开始训练",
+            "点击开始  自动识别动作",
             (
                 ButtonSpec("开始", Command.START),
                 ButtonSpec("设置", Command.OPEN_SETTINGS),
                 ButtonSpec("关机", Command.SHUTDOWN, True),
             ),
         )
-    # PREPARE 页面显示单个 3、2、1 或倒计时后的 MOVE。
+    # PREPARE 页面明确表示采样已经开始，并等待首个可信分类窗口。
     if state.page is Page.PREPARE:
-        # 剩余秒数大于零时显示数字，否则显示“开始动作”。
-        primary = str(state.prepare_seconds) if state.prepare_seconds > 0 else "开始动作"
-        # 倒计时中显示预热，结束后显示动作锁定提示。
-        footer = "惯导预热中" if state.prepare_seconds > 0 else "正在锁定动作..."
         # 返回准备页。
         return PageSpec(
-            "准备开始",
-            primary,
-            "保持手腕放松",
+            "动作识别",
+            "开始做动作",
+            "正在建立动作模型",
             status,
-            footer,
+            "右手佩戴  识别后自动记录",
             (ButtonSpec("取消", Command.CANCEL),),
         )
     # RUNNING 页面显示动作、次数、热量、时间和置信度。
     if state.page is Page.RUNNING:
+        # 根据实时动作门生成计数或休息状态标题。
+        title = "计数中" if state.counting_enabled else "休息  计数暂停"
+        # 正常计数显示时间、热量和置信度；休息时显示恢复条件。
+        footer = (
+            f"{state.elapsed_seconds // 60:02d}:{state.elapsed_seconds % 60:02d}  "
+            f"{state.calories_kcal:.3f}千卡  置信度{int(state.confidence_percent)}%"
+            if state.counting_enabled
+            else "累计保持  恢复完整动作后继续"
+        )
         # 返回训练页。
         return PageSpec(
-            "训练中",
+            title,
             state.action_name,
-            f"{state.count} 次   {state.calories_kcal:.3f} 千卡",
+            f"{state.count} 次",
             status,
-            f"时间 {state.elapsed_seconds // 60:02d}:{state.elapsed_seconds % 60:02d}  置信度 {state.confidence_percent:.2f}%",
+            footer,
             (
                 ButtonSpec("暂停", Command.PAUSE),
                 ButtonSpec("停止", Command.STOP, True),
@@ -603,11 +693,12 @@ def build_page_spec(state: PreviewState) -> PageSpec:
     if state.page is Page.PAUSED:
         # 返回暂停页。
         return PageSpec(
-            "已暂停",
+            "训练暂停",
             state.action_name,
-            f"{state.count} 次   {state.calories_kcal:.3f} 千卡",
+            f"{state.count} 次",
             status,
-            "计数已暂停",
+            f"{state.elapsed_seconds // 60:02d}:{state.elapsed_seconds % 60:02d}  "
+            f"{state.calories_kcal:.3f}千卡  累计保持",
             (
                 ButtonSpec("继续", Command.RESUME),
                 ButtonSpec("停止", Command.STOP, True),
@@ -619,9 +710,9 @@ def build_page_spec(state: PreviewState) -> PageSpec:
         return PageSpec(
             "停止训练？",
             state.action_name,
-            f"{state.count} 次合计   {state.calories_kcal:.3f} 千卡",
+            f"{state.count} 次",
             status,
-            "确认后保存训练记录",
+            f"{state.calories_kcal:.3f}千卡  确认后保存记录",
             (
                 ButtonSpec("停止", Command.CONFIRM_STOP, True),
                 ButtonSpec("取消", Command.BACK),
@@ -631,27 +722,25 @@ def build_page_spec(state: PreviewState) -> PageSpec:
     if state.page is Page.SUMMARY:
         # 返回总结页。
         return PageSpec(
-            "训练总结",
-            f"{state.count} 次合计",
-            f"{state.calories_kcal:.3f} 千卡   {state.elapsed_seconds // 60:02d}:{state.elapsed_seconds % 60:02d}",
+            "训练完成",
+            state.action_name,
+            f"{state.count} 次",
             status,
-            "训练记录已本地保存",
+            f"{state.elapsed_seconds // 60:02d}:{state.elapsed_seconds % 60:02d}  "
+            f"{state.calories_kcal:.3f}千卡  已保存",
             (ButtonSpec("完成", Command.DONE),),
         )
-    # SETTINGS 页面显示动态亮度、振动和熄屏门槛。
+    # SETTINGS 页面显示动态亮度和熄屏门槛，不提供不存在的振动功能。
     if state.page is Page.SETTINGS:
-        # 把振动布尔值转换为设备端中文开关文本。
-        haptic_text = "开" if state.haptic_enabled else "关"
         # 返回设置页。
         return PageSpec(
-            "设置",
-            f"屏幕亮度 {state.brightness_percent}%",
-            f"振动 {haptic_text}   熄屏 {state.screen_timeout_seconds}秒",
+            "设备设置",
+            f"{state.brightness_percent}% 亮度",
+            f"{state.screen_timeout_seconds}秒 自动熄屏",
             status,
-            "已本地保存 / 原配400毫安时",
+            "配置已本地保存  原配400毫安时",
             (
                 ButtonSpec("亮度", Command.CYCLE_BRIGHTNESS),
-                ButtonSpec("振动", Command.TOGGLE_HAPTIC),
                 ButtonSpec("诊断", Command.OPEN_DIAGNOSTICS),
                 ButtonSpec("忘记电脑", Command.FORGET_COMPUTER, True),
                 ButtonSpec("返回", Command.BACK),
@@ -669,7 +758,6 @@ def build_page_spec(state: PreviewState) -> PageSpec:
             status,
             f"设置版本 {state.preferences_revision}",
             (
-                ButtonSpec("测试振动", Command.TEST_HAPTIC),
                 ButtonSpec("熄屏", Command.CYCLE_TIMEOUT),
                 ButtonSpec("返回", Command.BACK),
             ),
@@ -694,9 +782,496 @@ def build_page_spec(state: PreviewState) -> PageSpec:
         # 生成 1～3 个循环点。
         dots = "." * ((state.animation_phase % 3) + 1)
         # 返回关机页。
-        return PageSpec("健身助手", "训练记录已保存", f"正在关机{dots}", status, "下次训练见")
+        return PageSpec("安全关机", "训练记录已保存", f"正在关机{dots}", status, "下次训练见")
     # 理论上枚举已完整覆盖；异常状态直接抛错暴露编程错误。
     raise ValueError(f"unsupported page: {state.page}")
+
+
+# 选择当前平台可用的中文字体文件，缺失时明确阻止生成乱码截图。
+def _select_export_font_path(bold: bool) -> Path:
+    """返回常规或粗体中文字体的绝对路径。"""
+
+    # 根据字重选择固定候选表，保持常规正文和粗体标题的视觉层级。
+    candidates = EXPORT_FONT_BOLD_CANDIDATES if bold else EXPORT_FONT_REGULAR_CANDIDATES
+    # 依次检查 Windows、Linux 和 macOS 的常见系统字体位置。
+    for candidate in candidates:
+        # 只接受真实普通文件，目录或失效链接不能交给 Pillow。
+        if candidate.is_file():
+            # 返回第一个可复现中文字符的字体文件。
+            return candidate
+    # 没有中文字体时拒绝回退到不含中文字形的 Pillow 默认字体。
+    raise RuntimeError(
+        "无法导出手表 PNG：未找到微软雅黑、Noto Sans CJK 或苹方中文字体。"
+    )
+
+
+# 按像素字号加载中文字体；Pillow 使用 px，不复用依赖 Tk 显示缩放的字体对象。
+def _load_export_font(size_px: int, bold: bool = False) -> ImageFont.FreeTypeFont:
+    """加载适用于正式 PNG 的确定性中文 TrueType 字体。"""
+
+    # 字号必须为正整数，防止错误参数在 Pillow 内部产生难懂异常。
+    if size_px <= 0:
+        # 主动抛出包含业务含义的参数错误。
+        raise ValueError("PNG 字体像素高度必须大于零")
+    # 选择当前平台存在的明确中文字体路径。
+    font_path = _select_export_font_path(bold)
+    # 使用 Pillow FreeType 加载器创建固定像素字号字体。
+    return ImageFont.truetype(str(font_path), size=size_px)
+
+
+# 根据可用宽度缩小单行文字，保证长动作名和设置说明不会越出卡片安全区。
+def _fit_export_font(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    maximum_width_px: int,
+    preferred_size_px: int,
+    minimum_size_px: int,
+    bold: bool = False,
+) -> ImageFont.FreeTypeFont:
+    """返回能在指定宽度内完整显示文字的最大中文字体。"""
+
+    # 从首选字号向下枚举，优先保留成熟产品界面的强层级。
+    for size_px in range(preferred_size_px, minimum_size_px - 1, -1):
+        # 加载当前候选字号。
+        font = _load_export_font(size_px, bold)
+        # 读取单行文字边界；返回值单位为像素。
+        left, _top, right, _bottom = draw.textbbox((0, 0), text, font=font)
+        # 实际文字宽度不得超过调用方提供的安全区。
+        if (right - left) <= maximum_width_px:
+            # 返回当前最大可用字号。
+            return font
+    # 极端长文字使用最小字号；调用方仍可通过文档截图发现内容设计问题。
+    return _load_export_font(minimum_size_px, bold)
+
+
+# 在指定中心点绘制一行自动缩放的中文文字，统一所有页面的对齐规则。
+def _draw_export_centered_text(
+    draw: ImageDraw.ImageDraw,
+    center_x_px: int,
+    center_y_px: int,
+    text: str,
+    color: str,
+    maximum_width_px: int,
+    preferred_size_px: int,
+    minimum_size_px: int,
+    bold: bool = False,
+) -> None:
+    """绘制水平和垂直居中的单行文字。"""
+
+    # 根据文字长度选择当前安全区内的最大字体。
+    font = _fit_export_font(
+        draw,
+        text,
+        maximum_width_px,
+        preferred_size_px,
+        minimum_size_px,
+        bold,
+    )
+    # 使用 mm 锚点把文本几何中心固定在给定像素位置。
+    draw.text(
+        (center_x_px, center_y_px),
+        text,
+        fill=color,
+        font=font,
+        anchor="mm",
+    )
+
+
+# 使用与 Tk 预览相同的触摸区域绘制正式 PNG 按钮。
+def _draw_export_buttons(
+    draw: ImageDraw.ImageDraw,
+    buttons: tuple[ButtonSpec, ...],
+) -> None:
+    """把零到四个页面按钮绘制到固定底部区域。"""
+
+    # 无按钮页面保持底部留白，不生成假操作入口。
+    if not buttons:
+        # 提前结束，避免创建空行布局。
+        return
+    # 四项设置入口使用固定二乘二网格。
+    if len(buttons) == 4:
+        # 每行保存两个按钮，与生产设置页触摸布局一致。
+        rows = (buttons[:2], buttons[2:])
+        # 两行按钮分别占用 354～414 和 424～484 像素。
+        vertical_bounds = ((354, 414), (424, 484))
+    else:
+        # 其它页面把全部操作放在单行。
+        rows = (buttons,)
+        # 单行按钮占用 396～466 像素，保持 70 px 触摸高度。
+        vertical_bounds = ((396, 466),)
+    # 按钮组左边界固定为 32 px。
+    left_px = 32
+    # 按钮组右边界固定为 378 px。
+    right_px = DISPLAY_WIDTH - 32
+    # 同行按钮间保留 10 px 可视间隔。
+    gap_px = 10
+    # 逐行绘制，行数最多为二。
+    for row_index, row_buttons in enumerate(rows):
+        # 根据行内按钮数量计算等宽按钮，单位 px。
+        button_width_px = (
+            right_px - left_px - gap_px * (len(row_buttons) - 1)
+        ) / len(row_buttons)
+        # 读取当前行纵向边界。
+        top_px, bottom_px = vertical_bounds[row_index]
+        # 逐个绘制当前行的按钮底板和文字。
+        for button_index, button in enumerate(row_buttons):
+            # 计算当前按钮左边界。
+            x1_px = int(left_px + button_index * (button_width_px + gap_px))
+            # 计算当前按钮右边界。
+            x2_px = int(x1_px + button_width_px)
+            # 危险操作用暗红，普通首按钮用科技蓝，其它入口用抬升蓝灰。
+            fill_color = (
+                "#451B22"
+                if button.dangerous
+                else COLOR_ACCENT
+                if button_index == 0
+                else COLOR_RAISED
+            )
+            # 危险操作保留红色描边，普通按钮与填充同色。
+            outline_color = COLOR_DANGER if button.dangerous else fill_color
+            # 绘制 18 px 圆角按钮底板。
+            draw.rounded_rectangle(
+                (x1_px, top_px, x2_px, bottom_px),
+                radius=18,
+                fill=fill_color,
+                outline=outline_color,
+                width=1,
+            )
+            # 在按钮几何中心绘制自动缩放的中文标签。
+            _draw_export_centered_text(
+                draw,
+                (x1_px + x2_px) // 2,
+                (top_px + bottom_px) // 2,
+                button.label,
+                COLOR_TEXT,
+                max(40, x2_px - x1_px - 8),
+                18,
+                13,
+                bold=True,
+            )
+
+
+# 把纯预览状态离屏渲染为精确 410×502 RGB 图像，不创建 Tk 窗口。
+def render_preview_state_to_image(state: PreviewState) -> Image.Image:
+    """返回与桌面画布同语义的正式手表页面图像。"""
+
+    # 创建固定尺寸 RGB 画布；背景色与 AMOLED 产品页面一致。
+    image = Image.new("RGB", (DISPLAY_WIDTH, DISPLAY_HEIGHT), COLOR_BACKGROUND)
+    # 创建 Pillow 绘图上下文，所有操作只写入内存图像。
+    draw = ImageDraw.Draw(image)
+    # 熄屏页必须为完整纯黑图像，不残留状态栏或按钮。
+    if state.page is Page.SCREEN_OFF:
+        # 用纯黑覆盖整个 410×502 区域。
+        draw.rectangle((0, 0, DISPLAY_WIDTH - 1, DISPLAY_HEIGHT - 1), fill="#000000")
+        # 返回无任何可见元素的熄屏图像。
+        return image
+    # 使用同一 presenter 生成页面文字和按钮，避免离屏渲染复制业务状态判断。
+    spec = build_page_spec(state)
+    # 绘制左上角科技蓝品牌方标。
+    draw.rounded_rectangle((32, 28, 70, 66), radius=12, fill=COLOR_ACCENT)
+    # 在品牌标中绘制白色“毕”字。
+    _draw_export_centered_text(draw, 51, 47, "毕", "#FFFFFF", 30, 22, 18, bold=True)
+    # 加载品牌标题字体。
+    brand_font = _load_export_font(19, bold=True)
+    # 绘制“毕昇杯”主品牌。
+    draw.text((80, 28), "毕昇杯", fill=COLOR_TEXT, font=brand_font, anchor="la")
+    # 加载品牌副标题字体。
+    brand_subtitle_font = _load_export_font(13)
+    # 绘制“智慧运动助手”产品主题。
+    draw.text(
+        (80, 51),
+        "智慧运动助手",
+        fill=COLOR_SECONDARY,
+        font=brand_subtitle_font,
+        anchor="la",
+    )
+    # 根据充电和电量区间选择电池语义色。
+    battery_color = (
+        COLOR_CYAN
+        if state.charging
+        else COLOR_SUCCESS
+        if state.battery_percent >= 40
+        else COLOR_WARNING
+        if state.battery_percent >= 20
+        else COLOR_DANGER
+    )
+    # 电量文字使用小号粗体，和电池图标形成一个整体状态组件。
+    battery_text_font = _load_export_font(13, bold=True)
+    # 绘制电量数字；充电状态附加中文“充”。
+    draw.text(
+        (307, 31),
+        f"{'充 ' if state.charging else ''}{state.battery_percent}%",
+        fill=battery_color,
+        font=battery_text_font,
+        anchor="ra",
+    )
+    # 绘制电池外框。
+    draw.rounded_rectangle(
+        (312, 31, 356, 51),
+        radius=5,
+        fill=COLOR_BACKGROUND,
+        outline=COLOR_SECONDARY,
+        width=2,
+    )
+    # 绘制电池正极极柱。
+    draw.rounded_rectangle((358, 37, 362, 45), radius=2, fill=COLOR_SECONDARY)
+    # 把 0～100% 电量线性映射到 36 px 内部宽度，并保留至少 2 px 可见值。
+    battery_fill_width_px = max(
+        2,
+        int(36 * max(0, min(100, state.battery_percent)) / 100),
+    )
+    # 绘制动态电池填充。
+    draw.rounded_rectangle(
+        (316, 35, 316 + battery_fill_width_px, 47),
+        radius=3,
+        fill=battery_color,
+    )
+    # 已连接使用青色状态点，未连接使用弱化灰色。
+    ble_color = COLOR_CYAN if state.ble_connected else COLOR_MUTED
+    # 绘制 BLE 状态点。
+    draw.ellipse((281, 63, 289, 71), fill=ble_color)
+    # 绘制连接状态短文字。
+    draw.text(
+        (295, 67),
+        "已连接" if state.ble_connected else "未连接",
+        fill=COLOR_SECONDARY,
+        font=battery_text_font,
+        anchor="lm",
+    )
+    # 绘制主信息卡片。
+    draw.rounded_rectangle(
+        (32, 94, 378, 344),
+        radius=28,
+        fill=COLOR_CARD,
+        outline=COLOR_BORDER,
+        width=1,
+    )
+    # 根据故障、休息、运行和普通页面选择唯一语义强调色。
+    semantic_color = (
+        COLOR_DANGER
+        if state.page is Page.ERROR
+        else COLOR_WARNING
+        if (state.page is Page.PAUSED)
+        or (state.page is Page.RUNNING and not state.counting_enabled)
+        else COLOR_SUCCESS
+        if state.page is Page.RUNNING
+        else COLOR_ACCENT
+    )
+    # 绘制状态胶囊底板。
+    draw.rounded_rectangle((50, 112, 204, 144), radius=16, fill=COLOR_RAISED)
+    # 绘制胶囊左侧语义状态点。
+    draw.ellipse((62, 123, 72, 133), fill=semantic_color)
+    # 绘制页面状态标题。
+    _draw_export_centered_text(
+        draw,
+        138,
+        128,
+        spec.title,
+        COLOR_TEXT,
+        116,
+        17,
+        13,
+        bold=True,
+    )
+    # 绘制动作名或当前页面主结果。
+    _draw_export_centered_text(
+        draw,
+        DISPLAY_WIDTH // 2,
+        190,
+        spec.primary,
+        semantic_color,
+        306,
+        34,
+        20,
+        bold=True,
+    )
+    # 绘制权威次数或页面次级信息。
+    _draw_export_centered_text(
+        draw,
+        DISPLAY_WIDTH // 2,
+        248,
+        spec.secondary,
+        COLOR_TEXT,
+        306,
+        29,
+        16,
+        bold=True,
+    )
+    # 绘制计时、热量、置信度或恢复条件。
+    _draw_export_centered_text(
+        draw,
+        DISPLAY_WIDTH // 2,
+        298,
+        spec.footer,
+        COLOR_SECONDARY,
+        306,
+        15,
+        11,
+    )
+    # 绘制会话节奏进度底轨。
+    draw.rounded_rectangle((52, 322, 358, 327), radius=3, fill=COLOR_BORDER)
+    # 训练相关页面按十二次视觉尺度显示进度，动画页按相位，其它页显示稳定小比例。
+    progress_ratio = (
+        min(1.0, state.count / 12.0)
+        if state.page in (Page.RUNNING, Page.PAUSED, Page.STOP_CONFIRM, Page.SUMMARY)
+        else ((state.animation_phase % 4) + 1) / 4.0
+        if state.page in (Page.BOOT, Page.SHUTDOWN)
+        else 0.22
+    )
+    # 把比例换算为 10～306 px 的可见进度宽度。
+    progress_width_px = max(10, int(306 * progress_ratio))
+    # 绘制当前语义色进度条。
+    draw.rounded_rectangle(
+        (52, 322, 52 + progress_width_px, 327),
+        radius=3,
+        fill=semantic_color,
+    )
+    # 绘制当前页面按钮。
+    _draw_export_buttons(draw, spec.buttons)
+    # 返回完整内存图像；调用方决定是否保存到正式仓库路径。
+    return image
+
+
+# 创建全新状态并渲染单个页面变体，避免调用方复用状态导致截图污染。
+def render_watch_preview_image(
+    page: Page,
+    rest_preview: bool = False,
+    pairing_preview: bool = False,
+) -> Image.Image:
+    """返回指定页面及休息/配对变体的 410×502 图像。"""
+
+    # 每张图使用独立纯状态，保证导出结果与调用顺序无关。
+    state = PreviewState()
+    # 写入稳定教程指标和页面变体。
+    configure_state_for_capture(state, page, rest_preview, pairing_preview)
+    # 调用无窗口 Pillow 渲染器生成图像。
+    return render_preview_state_to_image(state)
+
+
+# 把单个页面变体写入明确 PNG 文件，供 CLI、测试和文档流水线共用。
+def export_watch_preview_png(
+    output_path: Path,
+    page: Page,
+    rest_preview: bool = False,
+    pairing_preview: bool = False,
+) -> Path:
+    """导出一张无窗口、无设备依赖的正式 PNG。"""
+
+    # 把调用方路径规范化为 Path 对象。
+    resolved_output_path = Path(output_path)
+    # 创建正式目标的父目录；已存在时保持原目录内容。
+    resolved_output_path.parent.mkdir(parents=True, exist_ok=True)
+    # 生成指定页面的独立 RGB 图像。
+    image = render_watch_preview_image(page, rest_preview, pairing_preview)
+    # 以固定 PNG 压缩级别保存；PNG 不写入时间戳，便于同环境重复生成。
+    image.save(
+        resolved_output_path,
+        format="PNG",
+        optimize=False,
+        compress_level=9,
+    )
+    # 主动关闭 Pillow 图像对象，及时释放批量导出占用的内存。
+    image.close()
+    # 返回实际写入路径，便于调用方输出清单。
+    return resolved_output_path
+
+
+# 计算单个文件的 SHA-256，给教程图片和生成器源码提供内容级溯源。
+def calculate_file_sha256(file_path: Path) -> str:
+    """返回指定文件的小写 SHA-256 十六进制摘要。"""
+
+    # 一次读取单张小尺寸 PNG 或脚本源码；最大文件远低于可用内存。
+    file_bytes = Path(file_path).read_bytes()
+    # 计算 256 位摘要并转成跨平台稳定的小写十六进制字符串。
+    return hashlib.sha256(file_bytes).hexdigest()
+
+
+# 写出手表教程截图清单，明确这些图片是离屏预览而非真板屏幕照片。
+def write_documentation_watch_manifest(
+    output_directory: Path,
+    written_paths: tuple[Path, ...],
+) -> Path:
+    """为八张固定截图生成带尺寸、状态和 SHA-256 的 JSON 清单。"""
+
+    # 截图数量必须与固定状态清单一致，防止漏图后仍生成貌似完整的 manifest。
+    if len(written_paths) != len(DOCUMENTATION_PREVIEW_VARIANTS):
+        # 抛出明确错误，让 CLI 返回失败而不是发布不完整教程资产。
+        raise ValueError("截图数量与固定教程状态清单不一致")
+    # 获取当前生成器源码路径，用源码内容指纹标记资产来源。
+    generator_source_path = Path(__file__)
+    # 按固定清单顺序构造每张图片的机器可读元数据。
+    image_entries: list[dict[str, object]] = []
+    # 同时遍历状态定义与实际输出，保证描述不会按文件名猜测。
+    for variant, written_path in zip(
+        DOCUMENTATION_PREVIEW_VARIANTS,
+        written_paths,
+        strict=True,
+    ):
+        # 写入稳定文件名、页面、状态变体、尺寸、用途和内容摘要。
+        image_entries.append(
+            {
+                "File": written_path.name,
+                "Page": PAGE_DISPLAY_NAMES[variant.page],
+                "InternalPage": variant.page.value,
+                "RestPreview": variant.rest_preview,
+                "PairingPreview": variant.pairing_preview,
+                "Description": variant.description,
+                "Width": DISPLAY_WIDTH,
+                "Height": DISPLAY_HEIGHT,
+                "Sha256": calculate_file_sha256(written_path),
+            }
+        )
+    # 清单明确安全边界，防止文档把语义预览误称为真板逐像素截图。
+    manifest: dict[str, object] = {
+        "Generator": "tools/watch_ui_preview/watch_ui_preview.py",
+        "GeneratorSha256": calculate_file_sha256(generator_source_path),
+        "CaptureMode": "deterministic-pillow-production-semantics-preview",
+        "UsesBluetooth": False,
+        "ReadsDevice": False,
+        "PixelEquivalentToLvgl": False,
+        "Images": image_entries,
+    }
+    # 固定清单文件名，文档和 CI 无需查找带日期的临时文件。
+    manifest_path = Path(output_directory) / "manifest.json"
+    # 使用 UTF-8、中文直出和固定缩进；末尾换行符合仓库文本规范。
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    # 返回实际清单路径，供测试核对。
+    return manifest_path
+
+
+# 批量生成开源教程固定使用的八张页面图。
+def export_documentation_watch_previews(output_directory: Path) -> tuple[Path, ...]:
+    """按稳定文件名导出全部正式手表界面截图。"""
+
+    # 把调用方目录规范化为 Path 对象。
+    resolved_output_directory = Path(output_directory)
+    # 创建正式输出目录；已存在的同名 PNG 将由确定性新版本覆盖。
+    resolved_output_directory.mkdir(parents=True, exist_ok=True)
+    # 保存本轮实际写入的文件路径。
+    written_paths: list[Path] = []
+    # 按固定清单顺序导出，保证 CLI 日志和文档审计顺序稳定。
+    for variant in DOCUMENTATION_PREVIEW_VARIANTS:
+        # 组合正式输出目录和稳定文件名。
+        output_path = resolved_output_directory / variant.filename
+        # 导出当前页面和状态变体。
+        written_path = export_watch_preview_png(
+            output_path,
+            variant.page,
+            variant.rest_preview,
+            variant.pairing_preview,
+        )
+        # 记录成功写入的路径。
+        written_paths.append(written_path)
+    # 图片全部成功后才写清单，避免清单引用半成品。
+    write_documentation_watch_manifest(
+        resolved_output_directory,
+        tuple(written_paths),
+    )
+    # 返回不可变路径元组，防止调用方无意修改结果清单。
+    return tuple(written_paths)
 
 
 # 定义 Tkinter 桌面应用；业务状态仍由 PreviewState 纯对象持有。
@@ -772,7 +1347,7 @@ class WatchUiPreviewApp:
         self._create_control_button(control_panel, CONTROL_BUTTON_LABELS[0], self.start_boot_sequence)
         # 创建熄屏入口，便于直接检查 SCREEN_OFF。
         self._create_control_button(control_panel, CONTROL_BUTTON_LABELS[1], self.enter_screen_off)
-        # 创建手动计数按钮，便于检查一次计数一次视觉振动。
+        # 创建手动计数按钮，便于检查权威次数逐次增长。
         self._create_control_button(control_panel, CONTROL_BUTTON_LABELS[2], self.manual_count)
         # 创建动作切换按钮，便于检查长短动作名布局。
         self._create_control_button(control_panel, CONTROL_BUTTON_LABELS[3], self.cycle_action)
@@ -784,18 +1359,24 @@ class WatchUiPreviewApp:
         self._create_control_button(control_panel, CONTROL_BUTTON_LABELS[6], self.reduce_battery)
         # 创建退出按钮。
         self._create_control_button(control_panel, CONTROL_BUTTON_LABELS[7], self.root.destroy)
-        # 创建所需字体；Tk 会在缺少指定字体时安全回退系统字体。
-        self.font_title = tkfont.Font(family="Microsoft YaHei UI", size=22, weight="bold")
-        # 创建主值大字体。
-        self.font_primary = tkfont.Font(family="Microsoft YaHei UI", size=38, weight="bold")
-        # 创建普通内容字体。
-        self.font_secondary = tkfont.Font(family="Microsoft YaHei UI", size=18, weight="bold")
-        # 创建状态栏字体。
-        self.font_status = tkfont.Font(family="Microsoft YaHei UI", size=14, weight="bold")
+        # 创建品牌字标字体；Tk 缺少指定字体时会安全回退系统中文字体。
+        self.font_brand_mark = tkfont.Font(family="Microsoft YaHei UI", size=17, weight="bold")
+        # 创建“毕昇杯”品牌字体。
+        self.font_brand = tkfont.Font(family="Microsoft YaHei UI", size=14, weight="bold")
+        # 创建“智慧运动助手”副品牌字体。
+        self.font_brand_subtitle = tkfont.Font(family="Microsoft YaHei UI", size=10)
+        # 创建电量和 BLE 状态字体。
+        self.font_top_status = tkfont.Font(family="Microsoft YaHei UI", size=10, weight="bold")
+        # 创建状态胶囊字体。
+        self.font_title = tkfont.Font(family="Microsoft YaHei UI", size=12, weight="bold")
+        # 创建主动作或主结果大字体。
+        self.font_primary = tkfont.Font(family="Microsoft YaHei UI", size=27, weight="bold")
+        # 创建权威次数中号字体。
+        self.font_secondary = tkfont.Font(family="Microsoft YaHei UI", size=23, weight="bold")
         # 创建页脚字体。
-        self.font_footer = tkfont.Font(family="Microsoft YaHei UI", size=14)
+        self.font_footer = tkfont.Font(family="Microsoft YaHei UI", size=11)
         # 创建按钮字体。
-        self.font_button = tkfont.Font(family="Microsoft YaHei UI", size=14, weight="bold")
+        self.font_button = tkfont.Font(family="Microsoft YaHei UI", size=13, weight="bold")
         # 绑定模拟屏点击事件。
         self.canvas.bind("<Button-1>", self.on_canvas_click)
         # 绑定 O 键快速熄屏。
@@ -874,11 +1455,21 @@ class WatchUiPreviewApp:
         if selected_index >= len(DEVELOPMENT_PAGE_ORDER):
             # 非法列表索引不进入页面模型。
             return
-        # 标记当前为静态开发预览，旧倒计时和动画回调会安全退出。
+        # 标记当前为静态开发预览，旧识别和动画回调会安全退出。
         self.direct_page_preview = True
         # 通过纯函数切换页面并重置对应演示字段。
         select_page_for_development(self.state, DEVELOPMENT_PAGE_ORDER[selected_index])
         # 立即重绘左侧 410×502 设备画布。
+        self.render()
+
+    def show_page_for_capture(self, page: Page, rest_preview: bool = False) -> None:
+        """直达指定页面并填入稳定演示指标，供截图和人工视觉验收。"""
+
+        # 标记为静态开发预览，阻止旧开机、识别和自动计数回调覆盖截图页面。
+        self.direct_page_preview = True
+        # 使用与无窗口 PNG 相同的稳定数据配置，避免两种预览产物语义漂移。
+        configure_state_for_capture(self.state, page, rest_preview)
+        # 重绘指定页面。
         self.render()
 
     def _create_control_button(
@@ -974,118 +1565,185 @@ class WatchUiPreviewApp:
             return
         # 取得纯 presenter 页面模型。
         spec = build_page_spec(self.state)
-        # 振动反馈期间使用黄色外框，否则使用深灰边框。
-        border_color = COLOR_HAPTIC_FLASH if self.state.haptic_flash_active else "#17202A"
         # 绘制 AMOLED 背景。
         self.canvas.create_rectangle(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT, fill=COLOR_BACKGROUND, outline="")
-        # 绘制内部边框；仅模拟马达视觉反馈，不改变页面布局。
-        self.canvas.create_rectangle(3, 3, DISPLAY_WIDTH - 4, DISPLAY_HEIGHT - 4, outline=border_color, width=5)
-        # 绘制顶部状态栏。
+        # 绘制蓝色品牌方标，左上形成稳定的产品识别锚点。
+        self._rounded_rectangle(32, 28, 70, 66, 12, fill=COLOR_ACCENT, outline="")
+        # 品牌方标只使用一个“毕”字，避免小屏塞入复杂图形。
         self.canvas.create_text(
-            DISPLAY_WIDTH - 20,
-            22,
-            text=spec.status,
-            fill=COLOR_MUTED,
-            font=self.font_status,
+            51,
+            47,
+            text="毕",
+            fill="#FFFFFF",
+            font=self.font_brand_mark,
+            anchor="center",
+        )
+        # 绘制主品牌“毕昇杯”。
+        self.canvas.create_text(
+            80,
+            28,
+            text="毕昇杯",
+            fill=COLOR_TEXT,
+            font=self.font_brand,
+            anchor="nw",
+        )
+        # 绘制产品主题“智慧运动助手”，满足设备开机后持续可见的品牌合同。
+        self.canvas.create_text(
+            80,
+            51,
+            text="智慧运动助手",
+            fill=COLOR_SECONDARY,
+            font=self.font_brand_subtitle,
+            anchor="nw",
+        )
+        # 根据电量和充电状态选择电池填充色。
+        battery_color = (
+            COLOR_CYAN
+            if self.state.charging
+            else COLOR_SUCCESS
+            if self.state.battery_percent >= 40
+            else COLOR_WARNING
+            if self.state.battery_percent >= 20
+            else COLOR_DANGER
+        )
+        # 绘制电量百分比；充电时增加“充”字而不依赖不可用图标字体。
+        self.canvas.create_text(
+            307,
+            31,
+            text=f"{'充 ' if self.state.charging else ''}{self.state.battery_percent}%",
+            fill=battery_color,
+            font=self.font_top_status,
             anchor="ne",
         )
-        # 绘制页面标题。
+        # 绘制电池外壳；44×20 px 轮廓和右侧极柱接近熟悉的智能手表系统图标。
+        self._rounded_rectangle(312, 31, 356, 51, 5, fill=COLOR_BACKGROUND, outline=COLOR_SECONDARY, width=2)
+        # 绘制电池正极极柱。
+        self._rounded_rectangle(358, 37, 362, 45, 2, fill=COLOR_SECONDARY, outline="")
+        # 电池内部可用宽度为 36 px，百分比经过 0～100 边界夹紧后换算。
+        battery_fill_width = max(2, int(36 * max(0, min(100, self.state.battery_percent)) / 100))
+        # 绘制动态电池填充，不用文字替代电池形状。
+        self._rounded_rectangle(
+            316,
+            35,
+            316 + battery_fill_width,
+            47,
+            3,
+            fill=battery_color,
+            outline="",
+        )
+        # BLE 已连接显示青色状态点，未连接显示低对比灰色点。
+        ble_color = COLOR_CYAN if self.state.ble_connected else COLOR_MUTED
+        # 绘制 BLE 状态点；纵向独立放在电池外框底部 51 像素以下。
+        self.canvas.create_oval(281, 63, 289, 71, fill=ble_color, outline="")
+        # 绘制简短连接事实，避免向用户暴露协议枚举。
         self.canvas.create_text(
-            DISPLAY_WIDTH // 2,
-            62,
+            295,
+            67,
+            text="已连接" if self.state.ble_connected else "未连接",
+            fill=COLOR_SECONDARY,
+            font=self.font_top_status,
+            anchor="w",
+        )
+        # 绘制训练主卡；统一 32 px 安全边距和 28 px 圆角。
+        self._rounded_rectangle(32, 94, 378, 344, 28, fill=COLOR_CARD, outline=COLOR_BORDER, width=1)
+        # 错误、休息、计数中和普通页面分别使用红、琥珀、绿和科技蓝语义色。
+        semantic_color = (
+            COLOR_DANGER
+            if self.state.page is Page.ERROR
+            else COLOR_WARNING
+            if (self.state.page is Page.PAUSED)
+            or (self.state.page is Page.RUNNING and not self.state.counting_enabled)
+            else COLOR_SUCCESS
+            if self.state.page is Page.RUNNING
+            else COLOR_ACCENT
+        )
+        # 状态胶囊的深色底板承载当前页面唯一状态。
+        self._rounded_rectangle(50, 112, 204, 144, 16, fill=COLOR_RAISED, outline="")
+        # 胶囊左侧状态点让训练、休息和故障可在一眼内区分。
+        self.canvas.create_oval(62, 123, 72, 133, fill=semantic_color, outline="")
+        # 绘制当前状态标题。
+        self.canvas.create_text(
+            80,
+            128,
             text=spec.title,
             fill=COLOR_TEXT,
             font=self.font_title,
-            anchor="center",
+            anchor="w",
         )
-        # BOOT 和 SHUTDOWN 使用圆环图形体现轻量开关机动画。
-        if self.state.page in (Page.BOOT, Page.SHUTDOWN):
-            # 动画相位决定圆环半径的 0～6 px 呼吸变化。
-            pulse = (self.state.animation_phase % 4) * 2
-            # 计算圆环中心和半径。
-            radius = 45 + pulse
-            # 绘制青绿色圆环。
-            self.canvas.create_oval(
-                DISPLAY_WIDTH // 2 - radius,
-                115 - radius,
-                DISPLAY_WIDTH // 2 + radius,
-                115 + radius,
-                outline=COLOR_ACCENT,
-                width=3,
-            )
-        # 绘制中央信息卡片。
-        self._rounded_rectangle(20, 112, 390, 322, 20, fill=COLOR_CARD, outline="#1C2733", width=2)
-        # 绘制主要文字。
+        # 绘制动作名或页面主结果；科技蓝仅服务正常页面，休息和错误沿用语义色。
         self.canvas.create_text(
             DISPLAY_WIDTH // 2,
-            173,
+            190,
             text=spec.primary,
-            fill=COLOR_ACCENT,
+            fill=semantic_color,
             font=self.font_primary,
-            width=340,
+            width=306,
             justify=tk.CENTER,
             anchor="center",
         )
-        # 绘制次要文字。
+        # 绘制权威次数或页面次级信息。
         self.canvas.create_text(
             DISPLAY_WIDTH // 2,
-            238,
+            248,
             text=spec.secondary,
             fill=COLOR_TEXT,
             font=self.font_secondary,
-            width=340,
+            width=306,
             justify=tk.CENTER,
             anchor="center",
         )
-        # 绘制页脚提示。
+        # 绘制计时、热量、置信度或恢复条件。
         self.canvas.create_text(
             DISPLAY_WIDTH // 2,
-            294,
+            298,
             text=spec.footer,
-            fill=COLOR_MUTED,
+            fill=COLOR_SECONDARY,
             font=self.font_footer,
-            width=340,
+            width=306,
             justify=tk.CENTER,
             anchor="center",
         )
-        # 振动反馈时绘制短暂 VIBRATION 标记。
-        if self.state.haptic_flash_active:
-            # 文字仅用于桌面理解，真实设备由马达反馈。
-            self.canvas.create_text(
-                DISPLAY_WIDTH // 2,
-                347,
-                text="振动反馈",
-                fill=COLOR_HAPTIC_FLASH,
-                font=self.font_status,
-                anchor="center",
-            )
+        # 绘制活动进度底轨；它只表达当前会话节奏，不承诺目标次数。
+        self._rounded_rectangle(52, 322, 358, 327, 3, fill=COLOR_BORDER, outline="")
+        # 训练中按 12 次视觉尺度推进；其它页面按动画相位或稳定小比例显示。
+        progress_ratio = (
+            min(1.0, self.state.count / 12.0)
+            if self.state.page in (Page.RUNNING, Page.PAUSED, Page.STOP_CONFIRM, Page.SUMMARY)
+            else ((self.state.animation_phase % 4) + 1) / 4.0
+            if self.state.page in (Page.BOOT, Page.SHUTDOWN)
+            else 0.22
+        )
+        # 计算最小 10 px 的可见进度宽度。
+        progress_width = max(10, int(306 * progress_ratio))
+        # 绘制活动进度，颜色继承当前页面语义。
+        self._rounded_rectangle(52, 322, 52 + progress_width, 327, 3, fill=semantic_color, outline="")
         # 绘制页面按钮。
         self._render_buttons(spec.buttons)
 
     def _render_buttons(self, buttons: tuple[ButtonSpec, ...]) -> None:
-        """一到四项绘制单行，五项按三加二绘制双行。"""
+        """设置四项绘制二乘二网格，其它按钮绘制单行。"""
 
         # 无按钮页面直接结束。
         if not buttons:
             # 页面保持只读。
             return
-        # 五项设置按钮需要双行；其它页面继续使用原单行布局。
-        if len(buttons) == 5:
-            # 第一行容纳亮度、振动和诊断三个常用按钮。
-            rows = (buttons[:3], buttons[3:])
-            # 第一行和第二行使用 350～404、414～468 px，均保留 10 px 间距。
-            vertical_bounds = ((350, 404), (414, 468))
+        # 四项设置按钮采用二乘二网格，保证每个触摸目标大于 60 px 高。
+        if len(buttons) == 4:
+            # 每行两个按钮，避免小屏出现五个拥挤入口。
+            rows = (buttons[:2], buttons[2:])
+            # 设置区紧接主卡下方，并保留 10 px 行间距。
+            vertical_bounds = ((354, 414), (424, 484))
         else:
-            # 普通页面只有一行按钮。
+            # 其它页面只有一行主操作。
             rows = (buttons,)
-            # 单行保持原 412～466 px 触摸区域。
-            vertical_bounds = ((412, 466),)
+            # 单行保持 70 px 高触摸区域，适合手指点击。
+            vertical_bounds = ((396, 466),)
         # 固定按钮区左右边距，单位 px。
-        left = 20
+        left = 32
         # 固定按钮区右边界。
-        right = DISPLAY_WIDTH - 20
-        # 同一行相邻按钮间距固定 7 px。
-        gap = 7
+        right = DISPLAY_WIDTH - 32
+        # 同一行相邻按钮间距固定 10 px。
+        gap = 10
         # 逐行绘制按钮；rows 与 vertical_bounds 具有相同固定长度。
         for row_index, row_buttons in enumerate(rows):
             # 当前行按钮按行内数量等宽，第二行两个按钮会自动获得更宽触摸区。
@@ -1098,12 +1756,18 @@ class WatchUiPreviewApp:
                 x1 = int(left + index * (button_width + gap))
                 # 计算当前按钮右边界。
                 x2 = int(x1 + button_width)
-                # 危险操作使用红色，其它操作使用深灰卡片色。
-                fill_color = "#4A2529" if button.dangerous else "#18232D"
-                # 危险操作边框使用红色，其它使用强调色。
-                outline_color = COLOR_DANGER if button.dangerous else COLOR_ACCENT
+                # 危险操作使用暗红；每行首个普通按钮使用实心科技蓝，其它使用抬升卡片色。
+                fill_color = (
+                    "#451B22"
+                    if button.dangerous
+                    else COLOR_ACCENT
+                    if index == 0
+                    else COLOR_RAISED
+                )
+                # 危险操作使用红色细描边，其它按钮不添加多余描边。
+                outline_color = COLOR_DANGER if button.dangerous else fill_color
                 # 绘制圆角按钮底板。
-                self._rounded_rectangle(x1, top, x2, bottom, 14, fill=fill_color, outline=outline_color, width=2)
+                self._rounded_rectangle(x1, top, x2, bottom, 18, fill=fill_color, outline=outline_color, width=1)
                 # 绘制按钮标签。
                 self.canvas.create_text(
                     (x1 + x2) // 2,
@@ -1131,7 +1795,7 @@ class WatchUiPreviewApp:
                 return
 
     def handle_command(self, command: Command) -> None:
-        """执行纯状态命令并安排倒计时、训练或反馈动画。"""
+        """执行纯状态命令并安排识别、训练或反馈动画。"""
 
         # 用户点击设备屏按钮后退出静态开发预览，恢复真实交互流程与定时副作用。
         self.direct_page_preview = False
@@ -1139,18 +1803,14 @@ class WatchUiPreviewApp:
         effect = self.state.dispatch(command)
         # 立即渲染命令结果。
         self.render()
-        # START 需要启动每秒 PREPARE 更新。
-        if effect == "start_prepare":
-            # 一秒后把 3 更新为 2。
-            self.root.after(1000, self._prepare_tick)
+        # START 已立即开始采样；预览器只模拟首个可信窗口稍后完成。
+        if effect == "start_identification":
+            # 1.2 秒后进入训练页；该延时只演示识别状态，不是产品倒计时合同。
+            self.root.after(1200, self._finish_prepare)
         # RESUME 或 WAKE 到 RUNNING 需要恢复自动计数。
         if effect == "start_running":
             # 1.2 秒后生成下一次演示计数。
             self.root.after(1200, self._running_tick)
-        # 设置或诊断振动使用视觉边框替代马达。
-        if effect == "haptic":
-            # 触发一次 180 ms 视觉反馈。
-            self.flash_haptic()
         # SHUTDOWN 播放短动画并最终进入 SCREEN_OFF。
         if effect == "shutdown":
             # 启动关机点动画。
@@ -1158,34 +1818,8 @@ class WatchUiPreviewApp:
             # 1.2 秒后模拟 PMIC 断电为纯黑屏。
             self.root.after(1200, self._complete_shutdown)
 
-    def _prepare_tick(self) -> None:
-        """每秒推进一次真实 3、2、1 倒计时。"""
-
-        # 开发导航直达 PREPARE 时保持静态 3，不执行自动倒计时。
-        if self.direct_page_preview:
-            # 停止旧定时回调链。
-            return
-        # 用户取消后旧定时器安全退出。
-        if self.state.page is not Page.PREPARE:
-            # 不再安排下一轮。
-            return
-        # 剩余秒数大于零时减一。
-        if self.state.prepare_seconds > 0:
-            # 推进到下一秒。
-            self.state.prepare_seconds -= 1
-        # 重绘新的数字或 MOVE。
-        self.render()
-        # 倒计时尚未结束时继续等待一秒。
-        if self.state.prepare_seconds > 0:
-            # 安排下一次递减。
-            self.root.after(1000, self._prepare_tick)
-            # 当前回调结束。
-            return
-        # 倒计时结束后保留 MOVE 650 ms，模拟动作锁定阶段。
-        self.root.after(650, self._finish_prepare)
-
     def _finish_prepare(self) -> None:
-        """在 PREPARE 未被取消时进入 RUNNING。"""
+        """在首个可信动作已锁定且 PREPARE 未被取消时进入 RUNNING。"""
 
         # 开发直达页不得被旧准备定时器覆盖。
         if self.direct_page_preview:
@@ -1213,34 +1847,12 @@ class WatchUiPreviewApp:
         if self.state.page is not Page.RUNNING:
             # 不再安排下一轮。
             return
-        # 增加一次计数并取得振动偏好。
-        should_haptic = self.state.increment_count()
+        # 增加一次权威计数。
+        self.state.increment_count()
         # 先绘制新次数。
         self.render()
-        # 每次有效计数至多触发一次视觉振动。
-        if should_haptic:
-            # 启动短边框闪烁。
-            self.flash_haptic()
         # 安排下一次演示计数。
         self.root.after(1200, self._running_tick)
-
-    def flash_haptic(self) -> None:
-        """用 180 ms 黄色边框代替真实马达振动。"""
-
-        # 开启视觉反馈状态。
-        self.state.haptic_flash_active = True
-        # 立即重绘高亮边框。
-        self.render()
-        # 180 ms 后关闭高亮；与设备端计数反馈动画时长一致。
-        self.root.after(180, self._clear_haptic_flash)
-
-    def _clear_haptic_flash(self) -> None:
-        """结束视觉振动反馈。"""
-
-        # 清除反馈状态。
-        self.state.haptic_flash_active = False
-        # 重绘普通边框。
-        self.render()
 
     def start_boot_sequence(self) -> None:
         """从 BOOT 重播 800 ms 开机和 350 ms 自检流程。"""
@@ -1357,16 +1969,12 @@ class WatchUiPreviewApp:
         self.render()
 
     def manual_count(self) -> None:
-        """手动增加一次计数，便于检查视觉振动反馈。"""
+        """手动增加一次计数，便于检查权威次数布局。"""
 
         # 只在 RUNNING 中增加指标。
-        should_haptic = self.state.increment_count()
+        self.state.increment_count()
         # 重绘可能变化的指标。
         self.render()
-        # 开启偏好时产生一次视觉振动。
-        if should_haptic:
-            # 触发短反馈。
-            self.flash_haptic()
 
     def cycle_action(self) -> None:
         """通过桌面工具栏切换动作名称。"""
@@ -1451,18 +2059,28 @@ def run_smoke_test() -> None:
         Command.OPEN_SETTINGS,
         Command.SHUTDOWN,
     )
-    # START 必须进入 PREPARE 并显示 3。
-    assert state.dispatch(Command.START) == "start_prepare"
+    # START 必须立即进入采样识别流程，不经过人为倒计时。
+    assert state.dispatch(Command.START) == "start_identification"
     # 检查准备页。
-    assert state.page is Page.PREPARE and build_page_spec(state).primary == "3"
-    # 模拟倒计时结束。
-    state.prepare_seconds = 0
-    # 零秒必须显示“开始动作”，而不是静态 3 2 1 文本。
-    assert build_page_spec(state).primary == "开始动作"
+    prepare = build_page_spec(state)
+    # 识别页必须明确点击后已经开始动作，不插入人为倒计时。
+    assert state.page is Page.PREPARE and prepare.primary == "开始做动作"
+    # 固定佩戴合同必须进入设备可见信息，避免左右手域混用。
+    assert "右手佩戴" in prepare.footer
     # 模拟动作锁定进入训练。
     state.page = Page.RUNNING
-    # 增加一次应得到 count=1 且允许振动。
-    assert state.increment_count() and state.count == 1
+    # 增加一次应得到 count=1，不依赖不存在的振动马达。
+    state.increment_count()
+    # 校验权威累计逐次增长。
+    assert state.count == 1
+    # 休息门关闭后不得继续增长。
+    state.counting_enabled = False
+    # 尝试在休息状态增加一次。
+    state.increment_count()
+    # 休息期间次数必须保持。
+    assert state.count == 1
+    # 恢复计数门，继续验证停止流程。
+    state.counting_enabled = True
     # 首次 STOP 只能打开确认页。
     state.dispatch(Command.STOP)
     # 校验停止确认页。
@@ -1510,10 +2128,10 @@ def run_smoke_test() -> None:
     state.pairing_active = False
     # 进入诊断页。
     state.dispatch(Command.OPEN_DIAGNOSTICS)
-    # 校验诊断页三个命令。
+    # 校验诊断页两个命令。
     diagnostics = build_page_spec(state)
-    # 检查按钮数量和振动测试入口。
-    assert diagnostics.buttons[0].command is Command.TEST_HAPTIC
+    # 诊断页首项必须是熄屏设置，不能出现不存在的振动测试入口。
+    assert diagnostics.buttons[0].command is Command.CYCLE_TIMEOUT
     # 返回设置再返回主页。
     state.dispatch(Command.BACK)
     # 设置页返回主页。
@@ -1541,7 +2159,7 @@ def main() -> None:
     """程序入口。"""
 
     # 创建命令行解析器。
-    parser = argparse.ArgumentParser(description="410x502 AMOLED 健身手柄 UI 桌面预览器")
+    parser = argparse.ArgumentParser(description="410x502 AMOLED 智能运动手表 UI 桌面预览器")
     # 添加无窗口冒烟测试开关。
     parser.add_argument(
         "--smoke-test",
@@ -1554,13 +2172,83 @@ def main() -> None:
         action="store_true",
         help="创建窗口后立即显示中文蓝牙配对覆盖层，60 秒后自动清除",
     )
+    # 添加页面直达参数，便于对主页、训练、休息和设置页面制作稳定截图。
+    parser.add_argument(
+        "--page",
+        choices=tuple(page.value for page in Page),
+        help="创建窗口后直达指定内部页面枚举，例如 HOME 或 RUNNING",
+    )
+    # 添加休息状态预览；仅与 RUNNING 页面组合时关闭实时计数门。
+    parser.add_argument(
+        "--rest-preview",
+        action="store_true",
+        help="RUNNING 页面显示休息状态，动作和累计保持不变",
+    )
+    # 添加单文件 PNG 导出参数；该模式不创建 Tk 窗口。
+    parser.add_argument(
+        "--export-png",
+        type=Path,
+        help="把 --page 指定状态离屏导出为精确 410×502 PNG",
+    )
+    # 添加教程八页面批量导出参数；文件名由固定清单决定。
+    parser.add_argument(
+        "--export-all",
+        type=Path,
+        help="离屏导出 HOME、PREPARE、RUNNING、休息、设置、配对、总结和故障页面",
+    )
     # 解析当前进程参数。
     arguments = parser.parse_args()
+    # 冒烟测试与任何 PNG 导出模式互斥，防止命令含义不明确。
+    if arguments.smoke_test and (arguments.export_png or arguments.export_all):
+        # 通过 argparse 返回标准参数错误退出码。
+        parser.error("--smoke-test 不能与 --export-png 或 --export-all 同时使用")
+    # 批量导出使用固定八状态，不接受单页状态参数覆盖。
+    if arguments.export_all and (
+        arguments.page or arguments.rest_preview or arguments.pairing_preview
+    ):
+        # 提示调用方改用单页导出入口。
+        parser.error("--export-all 使用固定状态，不可组合 --page、--rest-preview 或 --pairing-preview")
+    # 休息预览只对 RUNNING 有业务含义。
+    if arguments.rest_preview and arguments.page != Page.RUNNING.value:
+        # 阻止生成文件名正确但业务内容错误的教程截图。
+        parser.error("--rest-preview 必须与 --page RUNNING 同时使用")
     # CI/无显示环境执行纯逻辑测试。
     if arguments.smoke_test:
         # 运行断言。
         run_smoke_test()
         # 测试完成后返回。
+        return
+    # 批量 PNG 模式生成固定教程截图后立即退出，不创建桌面窗口。
+    if arguments.export_all:
+        # 导出固定八个页面及状态变体。
+        written_paths = export_documentation_watch_previews(arguments.export_all)
+        # 输出稳定成功标记和文件数，便于 CI 与人工审计。
+        print(
+            "WATCH_UI_PNG_EXPORT_OK "
+            f"count={len(written_paths)} size={DISPLAY_WIDTH}x{DISPLAY_HEIGHT} "
+            f"directory={arguments.export_all}"
+        )
+        # 导出完成，不进入 Tk 主循环。
+        return
+    # 单页 PNG 模式按页面、休息和配对参数生成指定文件。
+    if arguments.export_png:
+        # 未显式指定页面时使用主页，配对覆盖层也以主页作为稳定底层页面。
+        target_page = Page(arguments.page) if arguments.page else Page.HOME
+        # 导出一张正式 PNG。
+        written_path = export_watch_preview_png(
+            arguments.export_png,
+            target_page,
+            arguments.rest_preview,
+            arguments.pairing_preview,
+        )
+        # 输出稳定成功标记和精确状态。
+        print(
+            "WATCH_UI_PNG_EXPORT_OK "
+            f"count=1 size={DISPLAY_WIDTH}x{DISPLAY_HEIGHT} "
+            f"page={target_page.value} rest={int(arguments.rest_preview)} "
+            f"pairing={int(arguments.pairing_preview)} path={written_path}"
+        )
+        # 导出完成，不创建 Tk 根窗口。
         return
     # 创建 Tk 根窗口。
     root = tk.Tk()
@@ -1570,6 +2258,15 @@ def main() -> None:
     if arguments.pairing_preview:
         # 延迟 100 ms 等待首帧控件完成布局，随后显示零填充六位码覆盖层。
         root.after(100, _application.simulate_pairing_code)
+    # 指定页面时在首帧布局完成后切到稳定静态验收状态。
+    if arguments.page:
+        # 把 argparse 已校验的字符串恢复为强类型页面枚举。
+        target_page = Page(arguments.page)
+        # 延迟 100 ms 后直达页面，覆盖构造函数已安排的开机动画。
+        root.after(
+            100,
+            lambda: _application.show_page_for_capture(target_page, arguments.rest_preview),
+        )
     # 进入 Tk 事件循环；所有回调在同一 UI 线程串行执行。
     root.mainloop()
 

@@ -94,13 +94,13 @@ class RobustAugmentationTests(unittest.TestCase):
         np.testing.assert_allclose(slower[:, 5], 1.0, atol=1.0e-7)
 
     def test_robust_profile_is_explicit_and_baseline_remains_default(self):
-        # 不传增强开关时解析历史复现配置。
+        # 不传增强开关时解析基础工件复现配置。
         with mock.patch.object(sys, "argv", ["train_export.py"]):
             # baseline_args 不读取数据，仅解析默认参数。
             baseline_args = te.parse_args()
-        # 默认必须保持 baseline，防止历史 Round29/Round37 无法复现。
+        # 默认必须保持 baseline，确保基础 M0 与相位掩码 M0 工件可复现。
         self.assertEqual(baseline_args.augmentation_profile, "baseline")
-        # 绝对轴统计默认保留，历史训练和旧工件函数不得隐式改变。
+        # 绝对轴统计默认保留，基础训练和工件格式兼容路径不得隐式改变。
         self.assertFalse(baseline_args.suppress_absolute_axis_stats)
         # 显式 robust 才允许跨人角度、幅度和速度增强。
         with mock.patch.object(
@@ -113,7 +113,7 @@ class RobustAugmentationTests(unittest.TestCase):
                 "--suppress-absolute-axis-stats",
             ],
         ):
-            # robust_args 保存显式新档位。
+            # robust_args 保存显式跨人鲁棒增强档。
             robust_args = te.parse_args()
         # 参数必须原样传入训练实验。
         self.assertEqual(robust_args.augmentation_profile, "robust")
@@ -123,7 +123,7 @@ class RobustAugmentationTests(unittest.TestCase):
     def test_absolute_axis_mask_only_zeros_first_six_axis_statistics(self):
         # values 模拟两条 `[样本数,297]` 标准化输入，并用不同数值检查未屏蔽列。
         values = np.arange(2 * 297, dtype=np.float32).reshape(2, 297) + 1.0
-        # masked 只启用绝对轴统计屏蔽，不启用历史归一化阶段屏蔽。
+        # masked 只启用绝对轴统计屏蔽，不启用相位掩码 M0 的归一化阶段屏蔽。
         masked = te.apply_model_feature_mask(
             values,
             suppress_normalized_phase=False,
@@ -178,7 +178,7 @@ class RobustAugmentationTests(unittest.TestCase):
                 rest_threshold=np.asarray([0.0841871575], dtype=np.float32),
                 # 逐点活动门使用另一测试值。
                 active_point_threshold=np.asarray([0.131654367], dtype=np.float32),
-                # 历史归一化阶段掩码在本工件关闭。
+                # 相位掩码 M0 的归一化阶段掩码在本工件关闭。
                 suppress_normalized_phase=np.asarray([False], dtype=np.bool_),
                 # 绝对轴统计在本工件启用屏蔽。
                 suppress_absolute_axis_stats=np.asarray([True], dtype=np.bool_),
@@ -226,7 +226,7 @@ class RobustAugmentationTests(unittest.TestCase):
         self.assertFalse(bool(contract["suppress_normalized_phase"]))
         # 绝对轴掩码必须保持开启，避免专家重新使用 XYZ 姿态。
         self.assertTrue(bool(contract["suppress_absolute_axis_stats"]))
-        # 文件级划分随机种子必须恢复为主模型报告值，不能继续使用候选 seed。
+        # 文件级划分随机种子必须恢复为主模型报告值，不能继续使用临时 seed。
         self.assertEqual(int(contract["split_seed"]), 20260709)
         # 验证文件键只含类别和文件名，且按确定性顺序排序。
         self.assertEqual(
@@ -241,11 +241,11 @@ class RobustAugmentationTests(unittest.TestCase):
         class_names = ["jumping_lunge", "squat", "walk"]
         # specialist_indices 只取三个可审计列，测试无需依赖真实形态索引长度。
         specialist_indices = np.asarray([48, 112, 232], dtype=np.int64)
-        # primary 使用六分支 M0，覆盖本轮复用主模型的真实结构。
+        # primary 使用六分支基础 M0，覆盖主模型工件复用时的真实结构。
         primary = te.MultiBranchBPNet(len(feature_names), len(class_names), dropout=0.0)
         # specialist 使用平铺 BP，输入维度等于局部索引数量，输出覆盖两个局部类别。
         specialist = te.BPNet(len(specialist_indices), 2, dropout=0.0)
-        # result 模拟验证模式训练完成后的完整原子候选。
+        # result 模拟验证模式训练完成后的完整原子训练结果。
         result = {
             # 窗口长度和步长与端侧 62/12 点合同一致。
             "window_seconds": 2.5,
@@ -279,7 +279,7 @@ class RobustAugmentationTests(unittest.TestCase):
             "y_val": np.asarray([0, 1, 2], dtype=np.int64),
             "val_pred": np.asarray([0, 1, 2], dtype=np.int64),
         }
-        # 临时目录在测试结束后自动清理，不污染真实候选工件。
+        # 临时目录在测试结束后自动清理，不污染真实训练工件。
         with tempfile.TemporaryDirectory() as temp_dir:
             # output_dir 模拟 validation-only 输出目录。
             output_dir = Path(temp_dir)

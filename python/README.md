@@ -1,80 +1,273 @@
-# Python 训练端
+# Python 数据、特征与 BP 训练教程
 
-本目录保存数据读取、窗口过滤、手工特征提取、BP 训练、评估、C 头文件导出和自动测试代码。
+`python/` 是算法的可复现源头：读取六轴 IMU、建立文件级划分、清洗窗口、提取 297 项特征、训练双轻量 BP、评估验证边界、导出 ESP32 C 产物，并生成算法文档图。
 
-主要文件：
+## 从哪里开始
 
-- `train_export.py`：完整训练与导出入口；
-- `dual_m0_export.py`：把 Round29/Round37 两个六分支 M0、两套标准化参数、掩码和固定融合导出为便携包与 C 头文件；
-- `verify_dual_m0_c.py`：编译实际 C99 头并逐值核对 297 项特征、两个 M0、融合、动作段累计和类别索引；
-- `test_dual_m0_export.py`：双模型工件、维度、哈希、生成 C 合同和异常输入测试；
-- `evaluate_fixed_ensemble.py`：固定双 M0 融合、动作段累计和最终测试/外部留出复现入口，不提供测试集调参开关；
-- `evaluate_validation_generalization.py`：只读取冻结验证文件，对双 M0 执行干净、右腕旋转、动态幅度和持续时间压力评估；禁止构建测试窗口；
-- `evaluate_validation_candidate_grid.py`：同一批冻结特征只构建一次，比较历史/robust 基础 M0 与历史/robust 掩码 M0 的四种组合；先要求干净验证的生产锁类准确率和最弱类别召回均不退化，再按六条件最弱类别、最差整体、平均整体、强制锁定数和确认窗数选模；
-- `test_train_export.py`：核心行为和导出合同测试；
-- `prepare_finals_dataset.py`：按清单校验并准备决赛新增会话；
-- `finals_jumping_squat_manifest.json`：新增会话哈希、行数和训练/盲测角色；
-- `analyze_feature_separability.py`：训练/验证特征 Fisher 分数和弱类配对效应量分析；
-- `test_prepare_finals_dataset.py`、`test_feature_separability.py`：数据边界与分析器测试；
-- `requirements.txt`：Python 依赖版本。
+| 想做什么 | 入口 |
+|---|---|
+| 看懂数据到模型的完整流程 | [`train_export.py`](train_export.py) |
+| 复现四张算法图 | [`visualize_action_features.py`](visualize_action_features.py) |
+| 检查特征分离度 | [`analyze_feature_separability.py`](analyze_feature_separability.py) |
+| 导出双模型到 ESP32 | [`dual_m0_export.py`](dual_m0_export.py) |
+| 验证 C/Python 数值一致 | [`verify_dual_m0_c.py`](verify_dual_m0_c.py) |
+| 复现当前双模型评估 | [`evaluate_fixed_ensemble.py`](evaluate_fixed_ensemble.py) |
+| 对齐 44 列真板日志与计数事件 | [`analysis/count_event_alignment.py`](analysis/count_event_alignment.py) |
+| 跑全部自动测试 | `python -m unittest discover -s python -p "test_*.py"` |
 
-当前提取器输出 297 项手工特征，通道顺序固定为 `gx、gy、gz、ax、ay、az`。Round29 在窗口提特征前修复单轴孤立尖峰并裁剪文件首尾静止段；新增 `wrist_acf_first_peak` 后形成当前合同。Round36 的依赖审计只让第二 M0 把标准化索引 `184:232` 的 48 项归一化阶段特征固定为零，原始数据和其余特征不删除。`--enable-family-specialist` 仅保留为历史消融开关，默认不启用。
+算法公式、每项特征的物理意义和资源影响见[算法原理、训练与实时计数](../docs/算法原理、训练与实时计数.md)。
 
-## 当前生产配置
+## 10 分钟数据路径
 
-当前最终固定配置使用 Round29 未掩码 M0 和 Round37 掩码 M0，六组输入维度为 `(112,48,24,48,32,33)`，分支输出维度为 `(24,12,8,12,8,16)`。两个模型 logits 按 `0.85/0.15` 融合，再在同一动作活动段内累计当前及全部历史 logits。基础测试 `jumping_squat/squat/tuck_jump` 召回为 `89.12%/99.80%/100%`，总准确率 `99.29%`；外部 `scy3` 三个跳跃类均为 `100%`。
+从仓库根目录执行：
 
-最终部署包已经生成：
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r python\requirements.txt
+```
 
-- `esp32/include/dual_m0_bundle.npz`；
-- `esp32/include/dual_m0_manifest.json`；
-- `esp32/include/esp32_bp_features.h`；
-- `esp32/include/esp32_dual_m0_model.h`。
+把数据放到：
 
-生成 C 已提供两个六分支 M0 前向、各自标准化、第二模型 `184:232` 掩码、`bp_combine_ensemble_logits`、`BpBoutAccumulator`、`bp_bout_accumulator_reset` 和 `bp_bout_accumulator_update`。静止、动作切换、断连或用户切换时必须重置累计器。C99/Python 验证覆盖 297 项特征、两个 M0、融合、累计和最终类别，不得用旧 `esp32_bp_model.h` 替代正式双模型。
+```text
+IMU_Dataset/
+└─ imu_dataset_for_final/
+   ├─ good_morning/
+   ├─ jumping_jack/
+   ├─ ...
+   └─ wave/
+```
 
-## 训练、隔离与消融接口
+先复现文档图，不训练模型：
 
-`--validation-only` 用于测试隔离的消融训练：保留逐 epoch 日志和验证指标，但不构建测试窗口、不输出测试指标、不触发 ESP32 头文件导出。验证结果保存在 `validation_report.json`。
+```powershell
+.\.venv\Scripts\python.exe -m python.visualize_action_features `
+  --dataset-dir IMU_Dataset\imu_dataset_for_final `
+  --output-dir docs\assets\algorithm
+```
 
-`--augmentation-profile baseline` 是历史复现默认值，保持六轴同步 ±35° 旋转、轻微局部时间扭曲和传感器噪声。`--augmentation-profile robust` 用于跨人右腕泛化候选，增加三类物理一致扰动：
+正式输出固定为：
 
-- 六轴同步刚体旋转扩大到 ±60°，只覆盖右腕合理佩戴角度，不引入左右手镜像；
-- 动态幅度缩放为 `0.70～1.30`，陀螺整体缩放，加速度只缩放相对窗口均值的动态分量，保持平均重力；
-- 固定 62 点和 25 Hz 合同不变，在窗内执行 `0.80～1.25` 持续时间缩放，并加入最大 0.05 的局部非匀速扭曲。
+```text
+docs/assets/algorithm/
+├─ 01_六类派生信号曲线.png
+├─ 02_十一类功率谱对比.png
+├─ 03_关键特征分布.png
+├─ 04_特征中位数热力图.png
+└─ figure_manifest.json
+```
 
-robust 候选必须先用 `evaluate_validation_generalization.py` 审计单一组合，或用 `evaluate_validation_candidate_grid.py` 对预声明四组合执行冻结选择。四组合选择首先要求 clean 生产锁类准确率和 clean 最弱类别文件召回均不低于历史双 M0；合格候选再按六种条件的最弱类别、最差整体和平均整体排序。外部真板 CSV 只在候选冻结后运行一次，不参与增强范围、模型选择或阈值调整。
+图表清单不写本机绝对路径和生成时间；相同数据、代码和参数应产生相同统计事实。清单记录数据指纹、文件级划分、窗口参数、阈值、文件级聚合方法和限制。
 
-`--suppress-absolute-axis-stats` 是跨腕角结构消融开关：训练输入把索引 `0:48` 的 `gx/gy/gz/ax/ay/az` 单轴统计固定为零，并在恢复最佳 checkpoint 后把首层对应权重永久剪为零。推理因此只依赖其余 249 项模长、重力相对、周期、频谱、冲击和换向特征；ESP32 不增加运行时掩码、RAM 或分支。该开关默认关闭，不能与 `--primary-artifact-dir` 组合，必须从头训练并重新通过冻结验证。
+## 数据合同
 
-`evaluate_validation_tri_m0.py` 只比较三个预声明方案：robust 基础 85% + 历史掩码 15%、不变轴基础 85% + 历史掩码 15%、以及 robust/不变轴各 42.5% + 历史掩码 15%。完全同分继续保留双 M0，禁止为外部单次会话搜索融合权重。
+每个动作 TXT 为 `N×8`：
 
-`--extra-train-dir` 中的文件只追加到原文件级训练划分；`--external-holdout-dir` 仅在非验证模式、验证候选已经选定后加载。外部盲测结果单独写入 `external_holdout`，不参与 11 类 ESP32 发布门槛。
+```text
+gx, gy, gz, ax, ay, az, timestamp_low, timestamp_high
+```
 
-候选特征先由 `analyze_feature_separability.py` 在训练/验证数据上检查窗口级、文件级效应方向和与现有特征的相关性。Round20 后选择的 8 项低重复值已同步到 Python 与生成 C，形成 288 维 Round21 验证候选；测试集与外部 `scy3` 仍保持隔离。
+- 通道顺序固定为 `gx、gy、gz、ax、ay、az`。
+- 陀螺仪原始值除以 `16.4`，换算为 `deg/s`。
+- 加速度原始值除以 `4096`，换算为 `g`。
+- 基础数据采样率为 25 Hz，最后两列当前为 0。
+- 类别由第一层目录名确定；新增未知目录会改变类别顺序，必须同步模型和 ESP32 清单。
 
-训练器还提供三个显式实验参数：
+基础数据当前包含 11 类、189 个动作文件。部分高动态文件包含“动作—休息—动作”，因此脚本需要活动段裁剪和窗口筛选，不能把整文件都当作连续标准动作。
 
-- `--ema-decay`：每个 epoch 后对单 BP 参数做 EMA，仅用于验证和检查点选择，默认 `0`；
-- `--label-smoothing`：交叉熵标签平滑，默认 `0`；
-- `--window-seconds 4.0`：显式启用 4 秒完整周期上下文，默认窗口列表仍为 `1.5/2.0/2.5` 秒。
+数据没有完整受试者 ID 和佩戴侧元数据。文件级划分可以阻止同一文件的重叠窗口跨集合，但不能证明严格跨人员或左右手泛化。
 
-Round24 新增三个联合弱类优化开关：
+## 数据流
 
-- `--multi-branch`：按当前 `(112,48,24,48,32,33)` 六组连续特征独立编码，再融合到 32 维主嵌入；
-- `--pk-batches`：每批从全部存在类别各取 6 个窗口，并优先让同类窗口来自不同采集文件；
-- `--auxiliary-heads`：训练是否跳跃、强腾空、左右交替、弓步/深蹲和跳跃深蹲/收腹跳五个二分类属性，部署主路径不使用这些头。
+```text
+scan_dataset
+  -> split_records_by_file
+  -> load_imu_file
+  -> 单位换算
+  -> 训练文件估计静止/活动阈值
+  -> 动态记录首尾活动段裁剪
+  -> 62 点窗口、0.5 秒步长
+  -> 标签相关活动筛选
+  -> 单轴孤立尖峰清洗
+  -> build_feature_series
+  -> extract_features（297 维）
+  -> 训练集标准化
+  -> 六分支 BP
+  -> 验证选择与测试确认
+  -> 双模型包和 C 头文件
+```
 
-历史上最接近当时固定验证门槛的组合是 4 秒窗口加 `0.05` 标签平滑：最佳 epoch 54 的验证准确率、宏平均 F1、最小类别召回分别为 `92.31%/91.81%/79.81%`。由于最小召回仍低于 `79.92%` 基线，该轮未读取测试集或 `scy3`，也未导出诊断头文件；该结论属于最终双 M0 形成前的消融记录。
+关键原则：
 
-最终固定评估复现命令见根目录 README；双 M0 生成和逐值验证命令见 `dual_m0_export.py --help` 与 `verify_dual_m0_c.py --help`。
+1. 先按文件划分，再生成窗口；不能先切窗再随机划分。
+2. 静止阈值只从训练划分估计；验证和测试不得反向改变阈值。
+3. 标准化均值和标准差只从训练特征拟合。
+4. 数据增强只作用于训练窗口。
+5. 验证用于检查配置；测试和外部留出只用于当前配置的独立确认。
 
-Round21 的 288 维可视验证结果为准确率 `91.88%`、宏平均 F1 `91.56%`、最低类别召回 `81.47%`。仍未达标的类别为 `jumping_lunge`、`jumping_squat`、`tuck_jump` 和 `lunge`，因此后续先执行误分类窗口子集特征分析，不直接继续训练。
+## 为什么图表按文件等权
 
-Round22 将误分类子集筛出的 7 项候选加入到 295 维输入，但可视验证仅得到准确率 `91.36%`、宏平均 F1 `91.06%`、最低类别召回 `79.34%`。该轮低于 Round21，已按验证隔离规则拒绝。下一次训练前必须先完成动作相位、窗口标签、分组交叉验证、BP 表征与损失采样的联合诊断。
+基础记录长度差异明显。同一长文件会产生更多重叠窗口；如果直接把所有窗口当独立样本，长记录会支配箱线图、热力图和类中心。
 
-Round23 的 294 维平铺 BP 为 `91.01%/90.84%/78.76%`。Round24 联合启用多分支、P×K、定向 margin 和辅助头后为 `90.95%/90.53%/77.80%`，并在 epoch 80 早停、恢复 epoch 35。Round24 提升了 `jumping_lunge`，但 `jumping_squat`、`squat` 和 `tuck_jump` 仍低于 85%；本轮未读取测试集或 `scy3`，也未导出正式 C 头文件。
+文档图采用两级聚合：
 
-Round25 新增 `--pk-prior-corrected-ce`，并组合 `--supcon-weight 0.01 --dropout 0.20 --label-smoothing 0.03`。该轮在 epoch 60 早停、恢复 epoch 15，验证准确率/宏 F1/最低召回为 `91.04%/90.99%/77.22%`。先验修正没有解决 `jumping_squat/squat/tuck_jump` 局部边界，后续不再继续全局损失权重搜索。
+1. 在每个验证文件内聚合该文件的有效窗口；
+2. 再对同类文件计算中位数和 25%～75% 分位区间。
 
-所有命令均从仓库根目录执行，具体命令见根目录 `README.md`。
+这样每个采集文件权重相同，同时保留文件之间的节奏、幅度和动作差异。时域图使用重力相对垂直加速度与角速度模长，不直接跨佩戴姿态平均 `gx/gy/gz`。功率谱先去均值、加 Hann 窗，再转成相对功率，降低幅值和相位的直接影响。
+
+四张图：
+
+- [六种动作时域特征](../docs/assets/algorithm/01_六类派生信号曲线.png)
+- [十一类相对功率谱](../docs/assets/algorithm/02_十一类功率谱对比.png)
+- [关键特征分布](../docs/assets/algorithm/03_关键特征分布.png)
+- [动作—特征热力图](../docs/assets/algorithm/04_特征中位数热力图.png)
+
+完整方法和数据指纹见[图表可复现清单](../docs/assets/algorithm/figure_manifest.json)。
+
+## 297 项特征
+
+当前输入按固定顺序分成六组：
+
+| 分组 | 维数 | 主要信息 |
+|---|---:|---|
+| 全局序列统计 | 112 | 六轴、模长、差分和重力相对序列的均值、标准差、范围、RMS、跳变和过零 |
+| 原始四阶段 | 48 | 动作窗口四个时间阶段的均值、标准差和最大绝对值 |
+| 时序与周期 | 24 | 活动比例、峰数、主频、谱熵、自相关峰和周期 |
+| 归一化四阶段 | 48 | 去除平移和尺度后的阶段形状 |
+| 冲击分布 | 32 | 分位数、偏度、峰度和最大跳变 |
+| 弱类机制 | 33 | 频带、峰形、互相关、腾空/落地、各向异性和手腕换向 |
+
+六轴派生序列包括：
+
+- `gyro_mag`、`acc_mag`：方向不敏感的模长；
+- `gyro_delta_mag`、`acc_delta_mag`：相邻点变化；
+- `acc_vertical`、`gyro_vertical`：沿窗口重力方向的分量；
+- `acc_horizontal_mag`、`gyro_horizontal_mag`：垂直于重力方向的模长。
+
+`build_feature_names()` 和 `extract_features()` 必须始终同长度、同顺序。ESP32 生成头的顺序也必须完全一致。
+
+## 训练
+
+完整训练：
+
+```powershell
+.\.venv\Scripts\python.exe -u python\train_export.py `
+  --dataset-dir IMU_Dataset\imu_dataset_for_final
+```
+
+逐 epoch 日志包含：
+
+- 总损失和交叉熵；
+- 可选的跨文件监督对比、定向 margin 和辅助任务损失；
+- 验证准确率和宏平均 F1；
+- 11 类逐类召回率；
+- 当前最弱类别和召回率；
+- 最佳 epoch、早停计数和恢复状态。
+
+![逐 epoch 训练日志示例](../docs/assets/training/训练日志示例.png)
+
+日志每个 epoch 都显示当前训练损失、验证准确率、宏平均 F1、11 类召回率和最弱类别；训练结束还会明确最佳 epoch、早停原因及实际恢复的检查点，便于确认模型选择依据，不只查看最终一行准确率。
+
+只运行验证模式、不触碰测试：
+
+```powershell
+.\.venv\Scripts\python.exe -u python\train_export.py `
+  --dataset-dir IMU_Dataset\imu_dataset_for_final `
+  --validation-only `
+  --window-seconds 2.5
+```
+
+`--validation-only` 不构建测试窗口、不输出测试指标，也不导出 ESP32 正式头文件。验证模式通过预声明门后，才执行独立测试确认。
+
+## 面向动作差异的稳健增强
+
+`--augmentation-profile baseline` 提供基础增强。`--augmentation-profile robust` 覆盖更宽的右腕执行差异：
+
+- 六轴同步刚体旋转，覆盖有限佩戴角变化；
+- 动态幅度缩放，保持加速度平均重力；
+- 固定 62 点输出下的持续时间缩放和局部非匀速扭曲；
+- 轻微传感器噪声。
+
+增强用于覆盖“同一个动作做得略快、略慢、幅度略大或略小”，不是把非目标动作变成目标动作。它不包含左右手镜像，也不能替代独立用户数据。
+
+## 当前轻量模型合同
+
+每个 M0 把 297 维输入分成 `(112,48,24,48,32,33)` 六组，独立编码后融合。部署使用两个同构 M0：
+
+- 基础模型读取全部标准化特征；
+- 掩码模型把标准化索引 `184:232` 的相位敏感组固定为零；
+- 两个 logits 使用固定权重融合；
+- ESP32 训练引擎再完成主动作确认和实时计数许可。
+
+训练期辅助头只帮助学习，不进入 ESP32 主推理路径。教程只说明当前双 M0 配置；网络、特征和实时决策的完整定义见[算法文档](../docs/算法原理、训练与实时计数.md)。
+
+## 导出到 ESP32
+
+正式产物位于 `esp32/include/`：
+
+```text
+dual_m0_bundle.npz
+dual_m0_manifest.json
+esp32_bp_features.h
+esp32_dual_m0_model.h
+```
+
+- `dual_m0_bundle.npz`：两套权重、偏置、标准化参数和掩码；
+- `dual_m0_manifest.json`：类别、维度、融合权重、文件哈希和生成合同；
+- `esp32_bp_features.h`：清洗、297 项特征和基础时间逻辑；
+- `esp32_dual_m0_model.h`：两个六分支前向、掩码和融合。
+
+查看导出参数：
+
+```powershell
+.\.venv\Scripts\python.exe python\dual_m0_export.py --help
+```
+
+验证真实 C 头：
+
+```powershell
+.\.venv\Scripts\python.exe python\verify_dual_m0_c.py --help
+```
+
+发布前必须核对 297 项特征、两个模型 logits、融合结果和最终类别；部署必须以双模型清单为准。
+
+## 评估与诊断入口
+
+- [`evaluate_fixed_ensemble.py`](evaluate_fixed_ensemble.py)：当前双模型评估与最终确认，不提供测试集调参开关。
+- [`evaluate_validation_generalization.py`](evaluate_validation_generalization.py)：只读固定验证文件，检查旋转、幅度和持续时间压力。
+- [`evaluate_validation_candidate_grid.py`](evaluate_validation_candidate_grid.py)：比较预声明模型组合，先执行干净验证不退化门。
+- [`evaluate_validation_tri_m0.py`](evaluate_validation_tri_m0.py)：只比较预声明三模型方案，不搜索外部会话权重。
+- [`analyze_feature_separability.py`](analyze_feature_separability.py)：窗口级和文件级 Fisher、稳定效应量与相关性。
+- [`analyze_wrist_candidates.py`](analyze_wrist_candidates.py)：文件分组交叉验证的手腕特征分析。
+- [`prepare_finals_dataset.py`](prepare_finals_dataset.py)：按 [`finals_jumping_squat_manifest.json`](finals_jumping_squat_manifest.json) 校验补充会话哈希、行数和角色。
+- [`analysis/README.md`](analysis/README.md)：44 列真板日志事件对齐和峰谷配对可视验证；外部参考实现不随仓库分发。
+
+外部真板 CSV 只用于独立确认，不参与增强范围、模型、融合权重或阈值选择。
+
+## 测试
+
+全部 Python 测试：
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s python -p "test_*.py"
+```
+
+可视化定向测试：
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest `
+  python.test_visualize_action_features
+```
+
+测试覆盖数据形状、单位、窗口、文件隔离、特征顺序、有限值、增强边界、训练日志、导出清单、C 代码生成、可视化聚合和异常输入。Python 测试通过不等于 ESP32 真板发布通过。
+
+## 当前验证边界
+
+- 文件级划分阻止同一文件泄漏，但没有受试者 ID，不能声称严格跨人泛化。
+- 没有可靠佩戴侧标签；当前产品固定右手腕，不承诺左腕。
+- 文档图只使用固定验证划分，不读取测试集，不用于调参。
+- 数据增强覆盖有限执行差异，不代表所有体型、力量、疲劳和非标准姿态。
+- C/Python 一致性证明实现对齐，不证明传感器、BLE、触摸和功耗已经通过。
+- 最终发布仍需目标人群、独立会话、不同速度和幅度的真板盲测。
+
+完整发布门、真板验收方法和当前验证边界见[测试验收与故障排查](../docs/测试验收与故障排查.md)。

@@ -1,7 +1,8 @@
-"""把最终两套六分支 M0 验证工件导出为 ESP32-S3 可移植 C 运行时。
+"""把基础 M0 与相位掩码 M0 验证工件导出为 ESP32-S3 可移植 C 运行时。
 
 模型分组、标准化、掩码、融合公式和资源预算见 ``docs/算法原理、训练与实时计数.md``
-第 8、9、11、12、15 节；本模块只实现文档中已经锁定的部署合同，不重新选参数。
+第 8、9、11、12、15 节。本模块只执行固定融合部署合同，不搜索模型或融合参数；
+读取兼容逻辑仅用于识别字段缺失的基础 M0 工件，不放宽类别、特征顺序或 C ABI。
 """
 
 from __future__ import annotations
@@ -152,7 +153,7 @@ def _scalar_float(values: np.ndarray, field_name: str) -> float:
 
 
 def _load_suppress_flag(config: Mapping[str, np.ndarray], expected_mask: bool) -> bool:
-    """读取掩码字段；历史基础工件缺字段时只允许按 False 兼容。"""
+    """读取掩码字段；兼容格式缺字段时仅允许把基础 M0 解释为未屏蔽。"""
     # 新工件包含显式字段时读取第一个且唯一一个布尔值。
     if "suppress_normalized_phase" in config:
         # 字段必须恰好一个元素，避免不同批次掩码混入同一工件。
@@ -162,7 +163,7 @@ def _load_suppress_flag(config: Mapping[str, np.ndarray], expected_mask: bool) -
         # bool 把 np.bool_ 转为稳定的 Python 布尔值。
         actual = bool(np.asarray(config["suppress_normalized_phase"]).reshape(-1)[0])
     else:
-        # Round29 历史基础工件生成早于该字段，合同明确等价于未屏蔽。
+        # 兼容格式可省略该字段；仅基础 M0 角色允许按未屏蔽语义读取。
         actual = False
     # 工件角色与实际掩码不一致会让两个模型收到错误输入。
     if actual != expected_mask:
@@ -268,8 +269,8 @@ def load_m0_artifact(artifact_dir: Path, expected_mask: bool) -> M0Artifact:
 
 
 def load_dual_m0_bundle(base_dir: Path, masked_dir: Path) -> DualM0Bundle:
-    """加载基础和掩码 M0，并拒绝任何跨模型元数据不一致。"""
-    # base 角色固定要求不屏蔽 184:232；Round29 缺字段时按 False 兼容。
+    """加载基础 M0 和相位掩码 M0，并拒绝任何跨模型元数据不一致。"""
+    # base 角色固定要求不屏蔽 184:232；兼容格式缺字段时按 False 读取。
     base = load_m0_artifact(Path(base_dir), expected_mask=False)
     # masked 角色固定要求屏蔽 184:232，缺失或 False 均视为错误。
     masked = load_m0_artifact(Path(masked_dir), expected_mask=True)
@@ -971,7 +972,8 @@ def export_dual_m0_bundle(base_dir: Path, masked_dir: Path, output_dir: Path) ->
             feature_header_path.name: _sha256_file(feature_header_path),
             model_header_path.name: _sha256_file(model_header_path),
         },
-        "hardware_validation_status": "not_run_no_hardware",
+        # 模型导出器只证明数值和文件完整性，不能代替真板分类、计数、BLE 与 UI 验收。
+        "hardware_validation_status": "not_encoded_export_only",
     }
     # ensure_ascii=False 保留中文状态值；indent=2 便于 Git 和人工审计。
     manifest_path.write_text(
@@ -992,14 +994,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="导出最终基础 M0 与 184:232 掩码 M0 的 ESP32-S3 C 工件"
     )
-    # --base-artifact-dir 指向 Round29 类未掩码验证工件目录。
+    # --base-artifact-dir 指向保留全部 297 维输入的基础 M0 验证工件目录。
     parser.add_argument(
         "--base-artifact-dir",
         type=Path,
         required=True,
         help="包含基础 best_model.pt 与 scaler_and_config.npz 的目录",
     )
-    # --masked-artifact-dir 指向 Round37 类掩码验证工件目录。
+    # --masked-artifact-dir 指向屏蔽 184:232 归一化相位特征的 M0 验证工件目录。
     parser.add_argument(
         "--masked-artifact-dir",
         type=Path,

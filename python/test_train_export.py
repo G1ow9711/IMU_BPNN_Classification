@@ -14,7 +14,12 @@ from python import train_export as te
 
 
 class TrainExportCoreTests(unittest.TestCase):
+    """覆盖训练端核心数值、文件级防泄漏、工件导出和 ESP32 一致性边界。"""
+
     def test_preprocess_repairs_single_axis_spike_but_preserves_multi_axis_impact(self):
+        """验证孤立单轴毛刺会被修复，而多轴同步落地冲击保持；
+        失败表示清洗器可能删掉真实动作或把传感器毛刺送入特征。"""
+
         # 构造七点静止手腕窗口，通道顺序为 gx、gy、gz、ax、ay、az。
         single_axis = np.zeros((7, 6), dtype=np.float32)
         # az 保持 1g，模拟正常重力基线。
@@ -44,6 +49,9 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertAlmostEqual(float(preserved[3, 3]), 3.0, places=6)
 
     def test_causal_logit_smoother_uses_only_recent_history_and_resets(self):
+        """验证平滑器只使用当前与有限历史窗口且可完全复位；
+        失败表示推理会偷看未来或把上一会话证据带入新会话。"""
+
         # 使用三类、三窗口历史构造小型环形缓冲，便于精确验证淘汰顺序。
         smoother = te.CausalLogitSmoother(class_count=3, history_length=3)
         # 第一个窗口没有历史，输出必须等于当前 logits。
@@ -69,9 +77,12 @@ class TrainExportCoreTests(unittest.TestCase):
         )
 
     def test_fixed_ensemble_logits_use_reviewed_validation_weights(self):
-        # base 表示未抑制特征的 Round29 M0 三类无量纲 logits。
+        """验证基础 M0 与相位掩码 M0 严格按冻结的 0.85/0.15 权重融合；
+        失败表示 Python 验证结果与固件双模型决策不再同源。"""
+
+        # base 表示保留全部 297 维输入的基础 M0 三类无量纲 logits。
         base = np.asarray([10.0, 2.0, -4.0], dtype=np.float32)
-        # masked 表示把标准化阶段特征 184:232 固定为零的 Round37 M0 logits。
+        # masked 表示把标准化阶段特征 184:232 固定为零的相位掩码 M0 logits。
         masked = np.asarray([0.0, 12.0, 6.0], dtype=np.float32)
 
         # 使用验证集固定的 0.85/0.15 权重执行凸组合，测试集不得重新调权。
@@ -88,6 +99,9 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertEqual(combined.dtype, np.float32)
 
     def test_fixed_ensemble_logits_reject_contract_violations(self):
+        """验证融合入口拒绝形状不一致、非有限值和错误权重；
+        失败表示坏 logits 可能静默污染动作类别。"""
+
         # 不同类别维会造成标签错位，必须在融合前拒绝。
         with self.assertRaises(ValueError):
             te.combine_ensemble_logits(np.zeros(3), np.zeros(2))
@@ -105,6 +119,9 @@ class TrainExportCoreTests(unittest.TestCase):
             )
 
     def test_causal_bout_accumulator_uses_all_past_windows_and_resets(self):
+        """验证动作段累计器只累加本段既往窗口并支持清零；
+        失败表示早期证据或上一轮证据会被错误保留。"""
+
         # 三类动作段累计器从静止到动作触发时新建或重置。
         accumulator = te.CausalBoutLogitAccumulator(class_count=3)
         # 首窗口只支持第零类，输出应等于当前窗口。
@@ -130,6 +147,9 @@ class TrainExportCoreTests(unittest.TestCase):
         )
 
     def test_causal_bout_accumulator_rejects_invalid_input_without_state_change(self):
+        """验证非法 logits 被拒绝且累计和保持事务前状态；
+        失败表示一次 NaN、Inf 或错维输入会永久污染会话。"""
+
         # 两类累计器先接收一个有效窗口，建立可检查的历史状态。
         accumulator = te.CausalBoutLogitAccumulator(class_count=2)
         # 有效首窗口累计和为 [2,4]，计数为一。
@@ -148,6 +168,9 @@ class TrainExportCoreTests(unittest.TestCase):
         np.testing.assert_allclose(accumulator.running_sum, [2.0, 4.0], atol=1e-7)
 
     def test_motion_segment_bounds_remove_inactive_edges_with_context(self):
+        """验证离线裁剪删除静止首尾并保留规定动作上下文；
+        失败表示窗口可能只含准备静止或切掉完整动作边界。"""
+
         # 构造 200 点连续流，前 50 点和后 75 点为静止，中间 75 点为动作。
         data = np.zeros((200, 6), dtype=np.float32)
         # 静止和动作阶段均保留 1g 重力。
@@ -177,12 +200,15 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertEqual((static_start, static_end), (0, 200))
 
     def test_deep_narrow_bpnet_has_reviewed_shape_and_parameter_count(self):
+        """验证深窄模型的层宽与参数预算保持固定结构合同；
+        失败表示网络拓扑或 ESP32 资源估算已偏离声明值。"""
+
         # 构造 297 维 M1；六分支输入顺序与 M0 完全一致。
         model = te.DeepNarrowMultiBranchBPNet(input_dim=297, class_count=11, dropout=0.0)
-        # 三个样本用于验证批维不会因新增融合层改变。
+        # 三个样本用于验证批维不会经过深窄融合层后改变。
         samples = torch.randn(3, 297)
 
-        # M1 最终共享嵌入按审核方案收缩为 24 维。
+        # M1 共享嵌入按固定结构合同收缩为 24 维。
         embeddings = model.forward_features(samples)
         # 主分类输出仍为 11 类 logits。
         logits = model(samples)
@@ -196,10 +222,13 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertEqual(tuple(embeddings.shape), (3, 24))
         # 分类输出必须为 [批大小,11]。
         self.assertEqual(tuple(logits.shape), (3, 11))
-        # 297 维输入和 11 类输出下，审核公式得到 16619 个参数。
+        # 297 维输入和 11 类输出下，结构公式得到 16619 个参数。
         self.assertEqual(parameter_count, 16619)
 
     def test_multi_branch_bpnet_keeps_feature_groups_and_32_value_embedding(self):
+        """验证六个物理特征组独立编码并融合为 32 维嵌入；
+        失败表示 297 维分组顺序或训练/导出结构已漂移。"""
+
         # 构造 297 维候选模型；六组输入必须按生产特征顺序独立编码后融合。
         model = te.MultiBranchBPNet(input_dim=297, class_count=11, dropout=0.0)
         # 四个样本覆盖前向批维，输入形状为 [4,297]。
@@ -218,6 +247,9 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertEqual(model.group_input_dims, (112, 48, 24, 48, 32, 33))
 
     def test_multi_branch_auxiliary_loss_is_finite_for_declared_tasks(self):
+        """验证声明的辅助任务损失对合法批次保持有限；
+        失败表示属性头标签、维度或数值稳定保护失效。"""
+
         # 使用完整 11 类顺序构造多分支模型和每类一个样本。
         class_names = [
             "good_morning", "jumping_jack", "jumping_lunge", "jumping_squat",
@@ -236,6 +268,9 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertGreater(float(loss.item()), 0.0)
 
     def test_pk_file_batch_contains_equal_classes_and_multiple_files(self):
+        """验证 P×K 批次类别均衡且同类来自多个源文件；
+        失败表示对比损失可能只记住单文件风格。"""
+
         # 三类各提供两个文件、每文件两个窗口，便于检查 P=3、K=2 批次。
         x = np.arange(12 * 4, dtype=np.float32).reshape(12, 4)
         y = np.repeat(np.arange(3, dtype=np.int64), 4)
@@ -256,7 +291,10 @@ class TrainExportCoreTests(unittest.TestCase):
             self.assertEqual(len(torch.unique(batch_files[batch_y == label])), 2)
 
     def test_parse_args_accepts_integrated_weak_class_training_switches(self):
-        # 模拟第二阶段可见训练命令，三个开关应可同时解析。
+        """验证弱类联合训练开关能由 CLI 明确启用；
+        失败表示教程命令无法表达声明的联合训练配置。"""
+
+        # 模拟弱类联合训练命令，三个开关应可同时解析。
         with mock.patch.object(
             sys,
             "argv",
@@ -278,6 +316,9 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertTrue(args.auxiliary_heads)
 
     def test_pk_ce_prior_weights_restore_original_class_mass(self):
+        """验证 P×K 采样后的交叉熵权重恢复原始类别先验；
+        失败表示均衡采样会无意改变最终决策边界。"""
+
         # 类别 0/1/2 在原训练窗口中分别出现 2/4/6 次，表示非均匀自然先验。
         labels = np.repeat(np.arange(3, dtype=np.int64), [2, 4, 6])
 
@@ -288,7 +329,10 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertTrue(torch.allclose(weights, torch.tensor([0.5, 1.0, 1.5])))
 
     def test_parse_args_accepts_round25_regularization_controls(self):
-        # 模拟 Round25 的先验修正、SupCon 权重和多分支 dropout 参数。
+        """验证正则化参数可由 CLI 显式表达并按术语表复现；
+        失败表示报告中的 SupCon、先验修正或 Dropout 无法重放。"""
+
+        # 模拟先验修正、SupCon 权重和多分支 dropout 的联合参数配置。
         with mock.patch.object(
             sys,
             "argv",
@@ -312,6 +356,9 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertAlmostEqual(args.dropout, 0.20)
 
     def test_parse_args_accepts_targeted_window_list(self):
+        """验证 CLI 可显式限制候选窗口长度集合；
+        失败表示实验可能悄悄混入未声明时间上下文。"""
+
         with mock.patch.object(
             sys,
             "argv",
@@ -322,6 +369,9 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertEqual(args.window_seconds, [2.5])
 
     def test_parse_args_accepts_primary_artifact_directory(self):
+        """验证冻结主工件目录可由 CLI 指定；
+        失败表示复核流程可能误读默认目录中的另一模型。"""
+
         with mock.patch.object(
             sys,
             "argv",
@@ -336,6 +386,9 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertEqual(args.primary_artifact_dir, Path("outputs/round2"))
 
     def test_parse_args_accepts_validation_only_mode(self):
+        """验证仅验证模式可被明确选择；
+        失败表示验证文件角色可能意外读取固定测试集。"""
+
         with mock.patch.object(
             sys,
             "argv",
@@ -346,6 +399,9 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertTrue(args.validation_only)
 
     def test_parse_args_accepts_explicit_four_second_context(self):
+        """验证四秒窗口只能通过显式参数加入候选；
+        失败表示默认训练上下文可能被无意扩大。"""
+
         with mock.patch.object(
             sys,
             "argv",
@@ -356,6 +412,9 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertEqual(args.window_seconds, [4.0])
 
     def test_parse_args_accepts_additional_dataset_directories(self):
+        """验证额外训练集与外部留出集使用独立参数；
+        失败表示补充数据可能进入错误划分并造成泄漏。"""
+
         with mock.patch.object(
             sys,
             "argv",
@@ -376,6 +435,9 @@ class TrainExportCoreTests(unittest.TestCase):
         )
 
     def test_parse_args_accepts_valid_ema_decay(self):
+        """验证合法 EMA 衰减可从 CLI 进入训练；
+        失败表示报告中的权重平均配置无法复现。"""
+
         with mock.patch.object(
             sys,
             "argv",
@@ -386,12 +448,18 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertEqual(args.ema_decay, 0.9)
 
     def test_ema_decay_rejects_values_outside_zero_to_one(self):
+        """验证 EMA 衰减拒绝负数和不小于一的值；
+        失败表示移动平均会发散或停止更新。"""
+
         for value in ("-0.1", "1.0"):
             with self.subTest(value=value):
                 with self.assertRaises(ValueError):
                     te.parse_ema_decay(value)
 
     def test_parse_args_accepts_valid_label_smoothing(self):
+        """验证合法标签平滑系数可从 CLI 进入训练；
+        失败表示类别损失配置与报告不一致。"""
+
         with mock.patch.object(
             sys,
             "argv",
@@ -402,12 +470,18 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertEqual(args.label_smoothing, 0.05)
 
     def test_label_smoothing_rejects_values_outside_zero_to_one(self):
+        """验证标签平滑拒绝负数和不小于一的值；
+        失败表示交叉熵目标将不再是有效概率分布。"""
+
         for value in ("-0.1", "1.0"):
             with self.subTest(value=value):
                 with self.assertRaises(ValueError):
                     te.parse_label_smoothing(value)
 
     def test_update_ema_state_averages_floating_parameters(self):
+        """验证 EMA 只对浮点参数做加权平均并保留其它状态；
+        失败表示模型缓冲或整数计数可能被错误插值。"""
+
         previous = {
             "weight": torch.tensor([2.0, 4.0]),
             "step": torch.tensor(3, dtype=torch.int64),
@@ -424,6 +498,9 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertIsNot(updated["weight"], current["weight"])
 
     def test_convert_raw_imu_units_uses_plan_scales(self):
+        """验证原始 QMI 数值按冻结比例换算为 deg/s 与 g；
+        失败表示训练数据与真机物理单位不一致。"""
+
         raw = np.array([[16.4, -32.8, 49.2, 4096.0, -8192.0, 2048.0, 0.0, 0.0]])
 
         converted = te.convert_raw_imu_units(raw)
@@ -436,6 +513,9 @@ class TrainExportCoreTests(unittest.TestCase):
         )
 
     def test_load_imu_file_accepts_trailing_comma(self):
+        """验证数据加载器接受采集文件的行尾逗号且保持六列；
+        失败表示合法历史数据会被误拒绝或通道错位。"""
+
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "finals.txt"
             path.write_text(
@@ -454,6 +534,9 @@ class TrainExportCoreTests(unittest.TestCase):
         )
 
     def test_extract_features_returns_297_ordered_values_for_six_axis_window(self):
+        """验证 ``[62,6]`` 六轴窗口输出有限且同序的 297 维特征；
+        失败表示 Python 特征形状、名称或 ESP32 ABI 已漂移。"""
+
         # 构造 62 个采样点、六轴顺序为 gx/gy/gz/ax/ay/az 的确定性测试窗口。
         window = np.arange(62 * 6, dtype=np.float32).reshape(62, 6)
 
@@ -513,12 +596,15 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(features)))
 
     def test_model_feature_mask_only_zeros_normalized_phase_group(self):
+        """验证掩码只把索引 184:232 的归一化阶段组置为零；
+        失败表示相位掩码 M0 会抹除合同范围外的其它物理特征。"""
+
         # values 构造两个样本、297 个非零标准分，便于精确检查被修改范围。
         values = np.arange(2 * 297, dtype=np.float32).reshape(2, 297) + 1.0
         # original 保存调用前副本，用于确认函数不原地修改输入。
         original = values.copy()
 
-        # masked 启用 Round36 证据支持的 48 维归一化阶段抑制。
+        # masked 启用相位掩码 M0 合同规定的 48 维归一化阶段抑制。
         masked = te.apply_model_feature_mask(values, suppress_normalized_phase=True)
         # baseline 关闭开关，数值必须与原输入完全一致。
         baseline = te.apply_model_feature_mask(values, suppress_normalized_phase=False)
@@ -540,16 +626,19 @@ class TrainExportCoreTests(unittest.TestCase):
                 for name in te.build_feature_names()[184:232]
             )
         )
-        # 旧维度工件必须被拒绝，防止掩码落在错误特征位置。
+        # 非 297 维工件必须被拒绝，防止掩码落在错误特征位置。
         with self.assertRaises(ValueError):
-            # 296 维模拟旧模型输入，不能按当前 297 维合同处理。
+            # 296 维模拟不兼容输入，不能按 297 维部署合同处理。
             te.apply_model_feature_mask(
                 np.zeros((1, 296), dtype=np.float32),
                 suppress_normalized_phase=True,
             )
 
     def test_promoted_wrist_values_match_no_training_analyzer(self):
-        # 延迟导入无训练分析器，明确把它作为候选公式的独立参考实现。
+        """验证部署腕部特征与独立无训练分析器数值一致；
+        失败表示两处实现的公式、边界或输出顺序发生分叉。"""
+
+        # 延迟导入无训练分析器，明确把它作为部署特征公式的独立参考实现。
         from python import analyze_wrist_candidates as wrist_analysis
 
         # 固定随机种子构造可复现的 62 点手腕六轴窗口。
@@ -563,9 +652,9 @@ class TrainExportCoreTests(unittest.TestCase):
         # 按 gx、gy、gz、ax、ay、az 顺序拼成生产输入 [62,6]。
         window = np.column_stack([gyro, acceleration]).astype(np.float32)
 
-        # 分析器返回 16 项候选，代表本轮训练前的原始公式定义。
+        # 分析器返回 16 项独立参考值，用于核对进入部署子集的原始公式定义。
         analyzer_values = wrist_analysis.wrist_scalar_features(window)
-        # 生产提取器返回 297 项，末项是清洗后晋级的第一自相关峰。
+        # 生产提取器返回 297 项，末项是进入部署的清洗后第一自相关峰。
         production_values = te.extract_features(window)
         # 第一自相关峰在独立分析器中的固定索引为 12。
         expected = analyzer_values[12]
@@ -574,6 +663,9 @@ class TrainExportCoreTests(unittest.TestCase):
         np.testing.assert_allclose(production_values[-1], expected, rtol=1e-6, atol=1e-6)
 
     def test_normalized_phase_features_ignore_offset_and_positive_scale(self):
+        """验证归一化阶段特征对常量偏移和正比例缩放不变；
+        失败表示佩戴幅值差异会无谓改变阶段形状描述。"""
+
         signal = np.linspace(-2.0, 3.0, 64, dtype=np.float32) ** 3
 
         original = te.normalized_phase_features(signal)
@@ -582,6 +674,9 @@ class TrainExportCoreTests(unittest.TestCase):
         np.testing.assert_allclose(original, transformed, atol=2e-5, rtol=2e-5)
 
     def test_impact_distribution_features_are_finite_and_capture_max_jump(self):
+        """验证冲击分布特征保持有限并记录最大相邻跳变；
+        失败表示落地冲击信息丢失或常量窗产生 NaN。"""
+
         signal = np.array([0.0, 1.0, 2.0, 10.0, 3.0, 4.0], dtype=np.float32)
 
         features = te.impact_distribution_features(signal)
@@ -591,6 +686,9 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertAlmostEqual(features[-1], 8.0)
 
     def test_robust_temporal_features_are_shift_stable_for_periodic_signal(self):
+        """验证周期信号平移后时序特征保持稳定；
+        失败表示窗口起相位会主导主频和自相关特征。"""
+
         timeline = np.arange(64, dtype=np.float32)
         signal = np.sin(2.0 * np.pi * 4.0 * timeline / 64.0).astype(np.float32)
 
@@ -601,6 +699,9 @@ class TrainExportCoreTests(unittest.TestCase):
         np.testing.assert_allclose(original, shifted, atol=1e-5, rtol=1e-5)
 
     def test_split_records_by_file_keeps_each_source_in_one_split(self):
+        """验证同一源文件的所有窗口只属于一个数据集合；
+        失败表示重叠窗口泄漏会虚高验证和测试指标。"""
+
         records = [
             te.ImuRecord(Path(f"class_a/file_{i}.txt"), "class_a", 0) for i in range(8)
         ] + [
@@ -620,6 +721,9 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertEqual(sum(len(paths) for paths in split_paths), len(records))
 
     def test_scan_labeled_dataset_uses_existing_class_map(self):
+        """验证补充数据沿用基础数据集类别索引；
+        失败表示模型输出位置与标签目录可能错配。"""
+
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             action_dir = root / "jumping_squat"
@@ -634,6 +738,9 @@ class TrainExportCoreTests(unittest.TestCase):
         )
 
     def test_scan_labeled_dataset_rejects_unknown_action(self):
+        """验证补充目录中的未知动作被立即拒绝；
+        失败表示类别表会在实验中途静默扩展。"""
+
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             action_dir = root / "unknown_action"
@@ -644,6 +751,9 @@ class TrainExportCoreTests(unittest.TestCase):
                 te.scan_labeled_dataset(root, {"jumping_squat": 3})
 
     def test_split_records_for_experiment_appends_extra_only_to_train(self):
+        """验证额外标注记录只追加到训练集合；
+        失败表示补采样本可能污染验证选择或测试复核。"""
+
         base = [
             te.ImuRecord(Path(f"class_a/file_{i}.txt"), "class_a", 0)
             for i in range(8)
@@ -660,6 +770,9 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertNotIn(extra[0], test)
 
     def test_validation_only_does_not_scan_external_holdout(self):
+        """验证仅验证模式完全不扫描外部留出路径；
+        失败表示调参过程可能借助留出集做模型选择。"""
+
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             extra_root = root / "extra"
@@ -679,6 +792,9 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertEqual(holdout, [])
 
     def test_external_holdout_reports_separate_jumping_squat_recall(self):
+        """验证外部跳跃深蹲召回单独报告且不并入训练指标；
+        失败表示域外泛化证据会被总体准确率掩盖。"""
+
         class_names = ["jumping_jack", "jumping_squat"]
         feature_names = te.build_feature_names()
         model = te.BPNet(len(feature_names), len(class_names), dropout=0.0)
@@ -719,6 +835,9 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertEqual(report["files"], [str(path)])
 
     def test_external_holdout_reports_recall_for_each_present_class(self):
+        """验证外部留出中每个实际类别都有独立召回；
+        失败表示弱类失败可能因汇总方式被隐藏。"""
+
         class_names = ["jumping_jack", "jumping_lunge", "jumping_squat"]
         feature_names = te.build_feature_names()
         model = te.BPNet(len(feature_names), len(class_names), dropout=0.0)
@@ -759,6 +878,9 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertEqual(report["macro_recall"], 0.5)
 
     def test_external_holdout_is_explicitly_skipped_in_validation_mode(self):
+        """验证仅验证报告明确标记未运行外部留出；
+        失败表示缺失证据可能被误读为通过。"""
+
         report = te.evaluate_external_holdout(
             {},
             [],
@@ -770,6 +892,9 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertEqual(report, {"skipped": True, "reason": "validation_only"})
 
     def test_gravity_aligned_series_are_invariant_to_joint_rotation(self):
+        """验证加速度和陀螺共同旋转时重力对齐序列保持不变；
+        失败表示小角度佩戴变化仍被绝对坐标主导。"""
+
         rng = np.random.default_rng(12)
         window = rng.normal(size=(62, 6)).astype(np.float32)
         window[:, 5] += 1.0
@@ -783,6 +908,9 @@ class TrainExportCoreTests(unittest.TestCase):
             np.testing.assert_allclose(original, transformed, atol=1e-5, rtol=1e-5)
 
     def test_time_warp_preserves_endpoints_without_circular_wrap(self):
+        """验证时间伸缩保留首尾且不把末端环绕到开头；
+        失败表示增强会制造生理上不存在的跨边界动作。"""
+
         window = np.repeat(np.arange(50, dtype=np.float32)[:, None], 6, axis=1)
 
         warped = te.time_warp_window(
@@ -797,6 +925,9 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertTrue(np.all(np.diff(warped[:, 0]) >= 0.0))
 
     def test_dynamic_filter_rejects_low_activity_window(self):
+        """验证动态类别的低活动窗口被过滤；
+        失败表示静止片段会被标成运动并污染类别边界。"""
+
         quiet = np.zeros((62, 6), dtype=np.float32)
 
         keep = te.keep_window_for_label(
@@ -809,6 +940,9 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertFalse(keep)
 
     def test_file_balanced_weights_equalize_class_and_file_mass(self):
+        """验证采样权重同时平衡类别总量和类别内文件贡献；
+        失败表示长文件会压倒短文件或弱类。"""
+
         labels = np.array([0, 0, 0, 0, 1, 1], dtype=np.int64)
         file_ids = np.array([0, 0, 0, 1, 2, 3], dtype=np.int64)
 
@@ -824,6 +958,9 @@ class TrainExportCoreTests(unittest.TestCase):
         )
 
     def test_build_samples_filters_quiet_dynamic_file_and_returns_file_ids(self):
+        """验证样本构建过滤安静动态窗并保留源文件 ID；
+        失败表示后续文件均衡和防泄漏审计失去依据。"""
+
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             quiet_path = root / "quiet.txt"
@@ -858,6 +995,9 @@ class TrainExportCoreTests(unittest.TestCase):
             self.assertEqual(stats["files_without_valid_window"], 1)
 
     def test_training_loader_uses_file_balanced_weighted_sampler(self):
+        """验证普通训练加载器实际使用文件均衡采样器；
+        失败表示已计算权重没有进入批次生成。"""
+
         x = np.arange(6 * 4, dtype=np.float32).reshape(6, 4)
         y = np.array([0, 0, 0, 0, 1, 1], dtype=np.int64)
         file_ids = np.array([0, 0, 0, 1, 2, 3], dtype=np.int64)
@@ -876,6 +1016,9 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertEqual(len(next(iter(loader))), 3)
 
     def test_cross_file_supcon_prefers_same_class_embeddings(self):
+        """验证跨文件同类嵌入获得更低监督对比损失；
+        失败表示 SupCon 目标不能抑制文件身份捷径。"""
+
         labels = torch.tensor([0, 0, 1, 1])
         file_ids = torch.tensor([0, 1, 2, 3])
         good = torch.tensor([[1.0, 0.0], [0.9, 0.1], [0.0, 1.0], [0.1, 0.9]])
@@ -889,7 +1032,10 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertLess(float(good_loss), float(bad_loss))
 
     def test_hard_pair_margin_penalizes_confusing_logit_above_true_logit(self):
-        # 新方案仅对 lunge 与 squat 施加局部间隔，不再混合普通和跳跃深蹲。
+        """验证困难对错误 logit 越过真实类时产生间隔惩罚；
+        失败表示局部混淆约束没有梯度作用。"""
+
+        # 困难对约束仅对 lunge 与 squat 施加局部间隔，不混合普通和跳跃深蹲。
         class_names = ["lunge", "squat", "tuck_jump"]
         # 当前样本真实类别为 squat，即索引 1。
         labels = torch.tensor([1])
@@ -907,6 +1053,9 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertGreater(float(wrong_loss), float(correct_loss))
 
     def test_bpnet_exposes_32_value_training_embedding(self):
+        """验证平铺 BP 暴露固定 32 维训练嵌入；
+        失败表示对比损失或导出层索引将失配。"""
+
         model = te.BPNet(input_dim=264, class_count=11, dropout=0.0)
         batch = torch.zeros((3, 264), dtype=torch.float32)
 
@@ -917,6 +1066,9 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertEqual(tuple(logits.shape), (3, 11))
 
     def test_train_model_prints_every_epoch_with_component_and_weak_metrics(self):
+        """验证每个 epoch 输出损失分量、宏指标和弱类指标；
+        失败表示训练过程无法审计早停依据和弱类退化。"""
+
         rng = np.random.default_rng(21)
         class_names = ["jumping_squat", "squat", "tuck_jump", "jumping_lunge"]
         train_x = rng.normal(size=(24, 264)).astype(np.float32)
@@ -965,6 +1117,9 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertEqual(metadata["label_smoothing"], 0.05)
 
     def test_exported_header_contains_297_feature_pipeline_and_activity_thresholds(self):
+        """验证导出头包含 297 维特征链和训练同源活动阈值；
+        失败表示固件会使用不同特征或休息门。"""
+
         feature_names = te.build_feature_names()
         model = te.BPNet(input_dim=len(feature_names), class_count=3, dropout=0.0)
         result = {
@@ -974,7 +1129,7 @@ class TrainExportCoreTests(unittest.TestCase):
             "window_len": 62,
             "rest_threshold": 0.08,
             "active_point_threshold": 0.02,
-            # 启用候选掩码，验证生成 C 与 Python 使用相同 184:232 半开区间。
+            # 启用相位掩码 M0，验证生成 C 与 Python 使用相同 184:232 半开区间。
             "suppress_normalized_phase": True,
         }
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1028,6 +1183,9 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertIn("bp_predict_from_window", header)
 
     def test_model_header_is_published_to_esp32_only_after_target_is_reached(self):
+        """验证只有部署门通过才把模型头发布到 ESP32 路径；
+        失败表示未达标候选可能覆盖可用固件模型。"""
+
         feature_names = te.build_feature_names()
         model = te.BPNet(input_dim=len(feature_names), class_count=3, dropout=0.0)
         result = {
@@ -1078,6 +1236,9 @@ class TrainExportCoreTests(unittest.TestCase):
             self.assertFalse(below_repository.exists())
 
     def test_validation_only_outputs_omit_test_metrics_and_header(self):
+        """验证仅验证输出不含测试指标和部署模型头；
+        失败表示模型选择阶段会伪装成最终交付。"""
+
         feature_names = te.build_feature_names()
         model = te.BPNet(len(feature_names), 3, dropout=0.0)
         result = {
@@ -1117,6 +1278,9 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertNotIn("test_acc", report)
 
     def test_full_report_keeps_external_holdout_separate_from_export_gate(self):
+        """验证外部留出证据与基础导出门分别记录；
+        失败表示域外诊断会被错误用作调参或发布条件。"""
+
         feature_names = te.build_feature_names()
         class_names = ["a", "jumping_squat"]
         model = te.BPNet(len(feature_names), len(class_names), dropout=0.0)
@@ -1167,6 +1331,9 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertEqual(report["external_holdout"]["recall"], 0.8)
 
     def test_deployment_gate_requires_every_class_recall_at_least_90_percent(self):
+        """验证普通类别逐类召回必须达到 90%；
+        失败表示总体指标可能掩盖某一动作不可用。"""
+
         y_true = np.repeat(np.arange(3, dtype=np.int64), 10)
         all_pass = y_true.copy()
         all_pass[[0, 10, 20]] = np.array([1, 2, 0])
@@ -1188,6 +1355,9 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertAlmostEqual(float(failed_recalls[2]), 0.8)
 
     def test_deployment_gate_allows_85_percent_for_declared_weak_classes(self):
+        """验证只有显式弱类采用 85% 的独立门槛；
+        失败表示放宽范围可能扩散到其它类别。"""
+
         class_names = ["jumping_lunge", "class_a"]
         y_true = np.repeat(np.arange(2, dtype=np.int64), 20)
         y_pred = y_true.copy()
@@ -1202,6 +1372,9 @@ class TrainExportCoreTests(unittest.TestCase):
         np.testing.assert_allclose(recalls, [0.85, 0.90])
 
     def test_checkpoint_key_prioritizes_minimum_recall_over_macro_f1(self):
+        """验证 checkpoint 先比较最小召回再比较宏 F1；
+        失败表示弱类退化模型可能因平均指标较高被选中。"""
+
         higher_min_recall = te.validation_checkpoint_key(
             val_min_recall=0.75,
             val_weak_recall=0.81,
@@ -1218,6 +1391,9 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertGreater(higher_min_recall, higher_overall_f1)
 
     def test_family_subset_remaps_global_labels_to_local_indices(self):
+        """验证动作族子集把全局类别稳定映射到局部索引；
+        失败表示专家头标签与路由输出会错位。"""
+
         class_names = ["good_morning", "jumping_jack", "jumping_squat", "squat"]
         family_names = ["jumping_jack", "jumping_squat", "squat"]
         x = np.arange(5 * 3, dtype=np.float32).reshape(5, 3)
@@ -1237,6 +1413,9 @@ class TrainExportCoreTests(unittest.TestCase):
         np.testing.assert_array_equal(family_file_ids, file_ids[1:4])
 
     def test_load_primary_artifacts_restores_model_and_scaler(self):
+        """验证冻结平铺模型、标准化参数和配置可完整恢复；
+        失败表示复评结果无法复现原工件。"""
+
         feature_names = te.build_feature_names()
         model = te.BPNet(len(feature_names), 3, dropout=0.0)
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1263,11 +1442,14 @@ class TrainExportCoreTests(unittest.TestCase):
         np.testing.assert_array_equal(std, np.full(len(feature_names), 3.0))
 
     def test_load_primary_artifacts_restores_multi_branch_m0(self):
+        """验证冻结多分支 M0 按记录结构恢复；
+        失败表示当前双模型工件无法被训练工具复核。"""
+
         # 使用当前 297 项合同构造已训练六分支 M0 参数。
         feature_names = te.build_feature_names()
         # 三类足以验证分类头维度和参数键恢复。
         model = te.MultiBranchBPNet(len(feature_names), 3, dropout=0.0)
-        # 临时目录模拟 Round29 验证候选工件。
+        # 临时目录模拟基础 M0 的验证工件。
         with tempfile.TemporaryDirectory() as temp_dir:
             # artifact_dir 同时保存模型和标准化配置。
             artifact_dir = Path(temp_dir)
@@ -1293,6 +1475,9 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertIsInstance(restored, te.MultiBranchBPNet)
 
     def test_family_specialist_only_replaces_predictions_inside_family(self):
+        """验证专家路由只替换声明动作族内的预测；
+        失败表示已稳定类别可能被无关专家覆盖。"""
+
         class_names = ["good_morning", "jumping_jack", "jumping_squat", "squat"]
         family_names = ["jumping_jack", "jumping_squat", "squat"]
         primary_pred = np.array([0, 1, 2, 3, 0], dtype=np.int64)
@@ -1308,6 +1493,9 @@ class TrainExportCoreTests(unittest.TestCase):
         np.testing.assert_array_equal(combined, np.array([0, 3, 1, 2, 0]))
 
     def test_jump_shape_feature_selection_excludes_raw_amplitude_quantiles(self):
+        """验证跳跃形状子集排除绝对幅值分位数；
+        失败表示专家模型会重新依赖个体力度和佩戴幅值。"""
+
         feature_names = te.build_feature_names()
 
         indices = te.build_jump_shape_feature_indices(feature_names)
@@ -1317,7 +1505,7 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertTrue(any("normalized_phase" in name for name in selected))
         self.assertTrue(any(name.endswith("spectral_entropy") for name in selected))
         self.assertTrue(any(name.endswith("_skew") for name in selected))
-        # 三类专家必须显式获得清洗后晋级的第一自相关峰。
+        # 三类专家必须显式获得进入部署的清洗后第一自相关峰。
         self.assertIn("wrist_acf_first_peak", selected)
         # 原有主轴换向率保留，用于区分深蹲、跳蹲和收腹跳的手腕往返节律。
         self.assertIn("wrist_reversal_rate_hz", selected)
@@ -1325,6 +1513,9 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertFalse(any(name.endswith("_max") for name in selected))
 
     def test_exported_header_contains_family_specialist_network_and_routing(self):
+        """验证专家模型导出包含网络参数、特征索引和全局路由；
+        失败表示 Python 专家结果不能由 C 端复现。"""
+
         feature_names = te.build_feature_names()
         class_names = ["good_morning", "jumping_jack", "jumping_squat", "squat"]
         family_names = ["jumping_jack", "jumping_squat", "squat"]
@@ -1359,11 +1550,17 @@ class TrainExportCoreTests(unittest.TestCase):
         self.assertIn("bp_family_specialist_predict", header)
 
     def test_c_float_emits_valid_float_literals_for_integer_values(self):
+        """验证整数数值导出为合法 C 浮点字面量；
+        失败表示生成头可能被 C 编译器按整数或非法后缀解析。"""
+
         self.assertEqual(te.c_float(0.0), "0.0f")
         self.assertEqual(te.c_float(1.0), "1.0f")
         self.assertEqual(te.c_float(-2.0), "-2.0f")
 
     def test_serializable_experiment_keeps_activity_threshold(self):
+        """验证序列化实验保留训练估计的活动阈值；
+        失败表示固件休息门无法追溯到训练数据。"""
+
         keys = {
             "window_seconds",
             "window_len",
@@ -1404,3 +1601,9 @@ class TrainExportCoreTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+"""验证训练、特征、划分、导出和部署门的可复现合同。
+
+测试使用合成六轴窗口和项目本地临时目录，不把验证集或测试集写回训练状态。六轴顺序
+固定为 ``gx、gy、gz、ax、ay、az``，角速度单位 ``deg/s``，加速度单位 ``g``。
+每个测试的说明先指出被保护的合同，再说明失败会破坏哪一条训练或部署保证。
+"""

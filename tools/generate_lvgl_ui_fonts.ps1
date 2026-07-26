@@ -10,8 +10,10 @@ $ErrorActionPreference = 'Stop'
 
 # repositoryRoot 是当前脚本所在 tools 目录的父目录，即 Git 工作树根目录。
 $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
-# presenterPath 是设备所有用户可见中文字符串的权威来源。
+# presenterPath 是业务页面所有用户可见中文字符串的权威来源。
 $presenterPath = Join-Path $repositoryRoot 'esp32\firmware\components\ui\ui_presenter.c'
+# rendererPath 包含固定品牌、产品副标题、电池和连接状态文案。
+$rendererPath = Join-Path $repositoryRoot 'esp32\firmware\components\ui\ui_lvgl_renderer.c'
 # outputDirectory 保存可直接参与 ESP-IDF 编译的字体 C 文件、许可证和哈希清单。
 $outputDirectory = Join-Path $repositoryRoot 'esp32\firmware\components\ui\fonts'
 # npmCache 把 npx 下载缓存限制在当前工作树，避免污染用户全局缓存目录。
@@ -27,6 +29,11 @@ if (-not (Test-Path -LiteralPath $presenterPath -PathType Leaf)) {
     # 阻止在错误目录生成空字库。
     throw "找不到设备 UI 文案源：$presenterPath"
 }
+# renderer 不存在表示固定顶栏文案无法进入字库，禁止继续生成。
+if (-not (Test-Path -LiteralPath $rendererPath -PathType Leaf)) {
+    # 阻止生成缺少品牌和状态字形的字体。
+    throw "找不到设备 UI 渲染文案源：$rendererPath"
+}
 
 # 创建项目内 npm 缓存目录；目录已存在时保持其内容，便于离线重跑。
 New-Item -ItemType Directory -Force -Path $npmCache | Out-Null
@@ -35,8 +42,9 @@ New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
 # 把 npm 缓存环境变量设为项目路径；只影响当前 PowerShell 进程及其 npx 子进程。
 $env:npm_config_cache = $npmCache
 
-# 以 UTF-8 读取 presenter，保留所有简体中文用户文案。
-$presenterText = [System.IO.File]::ReadAllText($presenterPath, [System.Text.Encoding]::UTF8)
+# 以 UTF-8 读取 presenter 与 renderer，保留业务文案和固定品牌顶栏文案。
+$presenterText = [System.IO.File]::ReadAllText($presenterPath, [System.Text.Encoding]::UTF8) +
+    [System.IO.File]::ReadAllText($rendererPath, [System.Text.Encoding]::UTF8)
 # stringLiteralMatches 只提取 C 字符串字面量，排除中文代码注释，避免无意义扩大 Flash 字库。
 $stringLiteralMatches = [regex]::Matches($presenterText, '"(?:[^"\\]|\\.)*"')
 # glyphSet 使用有序字典语义去重；键表示 Unicode 字符，值不参与生成。
@@ -118,7 +126,7 @@ foreach ($fontSize in $fontSizes) {
     $chineseHeader = @"
 /*
  * 自动生成中文界面字体：Noto Sans SC ${fontSize}px、2 bpp 非压缩位图、ASCII 0x20～0x7E 与设备可见中文子集。
- * 输入文案：esp32/firmware/components/ui/ui_presenter.c；生成脚本：tools/generate_lvgl_ui_fonts.ps1。
+ * 输入文案：esp32/firmware/components/ui/ui_presenter.c 与 ui_lvgl_renderer.c；生成脚本：tools/generate_lvgl_ui_fonts.ps1。
  * 字体许可：SIL Open Font License 1.1，完整文本见同目录 OFL-1.1.txt。
  * 位图、字形描述和 Unicode 映射均由 lv_font_conv 生成，禁止手工调整数组；修改文案后必须重跑脚本。
  */

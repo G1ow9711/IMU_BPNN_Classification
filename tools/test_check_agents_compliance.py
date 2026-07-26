@@ -8,17 +8,223 @@ import json
 import tempfile
 # 导入 Path，为被审计的虚拟路径提供与生产函数相同的参数类型。
 from pathlib import Path
+# 导入 mock.patch，隔离 Git 查询并验证两种审计模式使用的精确命令。
+from unittest.mock import patch
 
 # 导入待测试的连续语义块审计函数和门槛常量。
 from check_agents_compliance import (
+    GENERATED_FEATURE_HEADER,
+    GENERATED_MODEL_HEADER,
+    GENERATED_UI_FONT_LICENSE,
+    GENERATED_UI_FONT_MANIFEST,
     MAX_UNCOMMENTED_SEMANTIC_LINES,
     audit_enum_member_comments,
     audit_long_parameter_comments,
     audit_public_array_pointer_contracts,
     audit_uncommented_semantic_blocks,
+    build_argument_parser,
+    collect_all_tracked_sources,
+    collect_changed_sources,
+    main,
     sha256_file,
     validate_generated_ui_fonts,
 )
+
+
+class SourceCollectionModeTests(unittest.TestCase):
+    """覆盖默认差异模式、--all 全跟踪模式和生成物专用合同入口。"""
+
+    def _write_source(self, repository_root: Path, relative_path: Path) -> None:
+        """创建最小中文源码或合同工件，使收集器能验证路径而不依赖真实仓库。"""
+
+        # absolute_path 把仓库相对路径绑定到当前临时目录。
+        absolute_path = repository_root / relative_path
+        # 创建父目录，兼容模型头和字体清单的深层固定路径。
+        absolute_path.parent.mkdir(parents=True, exist_ok=True)
+        # 写入最小中文内容；收集测试只验证路径，不执行文件内容合规审计。
+        absolute_path.write_text("/* 测试跟踪文件。 */\n", encoding="utf-8")
+
+    def test_argument_parser_defaults_to_changed_mode(self) -> None:
+        """未提供参数时必须保持历史差异模式，显式 --all 才切换全仓库。"""
+
+        # parser 使用生产中文帮助与参数定义，避免测试复制另一份 CLI 合同。
+        parser = build_argument_parser()
+        # 空参数列表代表日常提交前调用，audit_all 必须为 False。
+        self.assertFalse(parser.parse_args([]).audit_all)
+        # 显式 --all 代表开源发布前全量审计，audit_all 必须为 True。
+        self.assertTrue(parser.parse_args(["--all"]).audit_all)
+        # 帮助文本必须同时说明默认范围、全跟踪范围和 git ls-files 数据来源。
+        help_text = parser.format_help()
+        self.assertIn("默认只审计", help_text)
+        self.assertIn("git ls-files", help_text)
+        self.assertIn("显示此帮助信息并退出", help_text)
+
+    def test_changed_mode_keeps_tracked_and_untracked_sources(self) -> None:
+        """默认模式必须继续合并 HEAD 差异和未跟踪源码，不能因新增 --all 缩窄。"""
+
+        # 临时目录提供两个真实存在的 Python 文件，满足统一过滤器的 is_file 条件。
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            # repository_root 模拟仓库根。
+            repository_root = Path(temporary_directory)
+            # tracked_path 模拟相对 HEAD 修改的已跟踪源码。
+            tracked_path = Path("python/tracked_change.py")
+            # untracked_path 模拟尚未 git add 的新源码。
+            untracked_path = Path("python/new_module.py")
+            # 创建两个候选文件。
+            self._write_source(repository_root, tracked_path)
+            self._write_source(repository_root, untracked_path)
+            # side_effect 按生产调用顺序返回 diff 路径和未跟踪路径。
+            with patch(
+                "check_agents_compliance.run_git_lines",
+                side_effect=[[tracked_path.as_posix()], [untracked_path.as_posix()]],
+            ) as git_query:
+                # 执行默认差异收集器。
+                actual_paths = collect_changed_sources(repository_root)
+            # 两类路径必须全部保留且按稳定顺序返回。
+            self.assertEqual(
+                sorted([tracked_path, untracked_path], key=lambda path: path.as_posix().lower()),
+                actual_paths,
+            )
+            # 第一条查询必须继续使用相对 HEAD 差异。
+            self.assertEqual(
+                ["diff", "--name-only", "--diff-filter=ACMR", "HEAD"],
+                git_query.call_args_list[0].args[1],
+            )
+            # 第二条查询必须继续包含未跟踪且未忽略文件。
+            self.assertEqual(
+                ["ls-files", "--others", "--exclude-standard"],
+                git_query.call_args_list[1].args[1],
+            )
+
+    def test_all_mode_uses_only_git_tracked_sources_and_keeps_generated_contracts(self) -> None:
+        """--all 必须只用 git ls-files，并保留模型、特征和字体专用合同触发路径。"""
+
+        # 临时目录隔离全量文件集合，避免真实工作树未跟踪文件影响断言。
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            # repository_root 模拟仓库根。
+            repository_root = Path(temporary_directory)
+            # tracked_source 是普通已跟踪自研源码。
+            tracked_source = Path("python/train_export.py")
+            # generated_paths 覆盖模型头、特征头、字体清单和许可证四类专用入口。
+            generated_paths = [
+                GENERATED_MODEL_HEADER,
+                GENERATED_FEATURE_HEADER,
+                GENERATED_UI_FONT_MANIFEST,
+                GENERATED_UI_FONT_LICENSE,
+            ]
+            # documentation_path 是已跟踪 Markdown，必须被源码过滤器排除。
+            documentation_path = Path("docs/README.md")
+            # missing_source 模拟索引存在但工作树缺失的路径，不得送入文本读取。
+            missing_source = Path("python/deleted_locally.py")
+            # 创建普通源码和全部生成合同入口。
+            self._write_source(repository_root, tracked_source)
+            for generated_path in generated_paths:
+                self._write_source(repository_root, generated_path)
+            # Markdown 虽被 git ls-files 返回，但不属于本审计器源码范围。
+            self._write_source(repository_root, documentation_path)
+            # git_paths 精确模拟索引内容；missing_source 故意不创建。
+            git_paths = [
+                tracked_source.as_posix(),
+                *(path.as_posix() for path in generated_paths),
+                documentation_path.as_posix(),
+                missing_source.as_posix(),
+            ]
+            # mock 保证测试只验证 `git ls-files` 合同，不依赖系统 Git。
+            with patch(
+                "check_agents_compliance.run_git_lines",
+                return_value=git_paths,
+            ) as git_query:
+                # 执行全跟踪源码收集器。
+                actual_paths = collect_all_tracked_sources(repository_root)
+            # 全量模式必须只执行一次不带其它筛选参数的 git ls-files。
+            git_query.assert_called_once_with(repository_root, ["ls-files"])
+            # 普通源码和四类生成合同入口必须进入主审计循环。
+            expected_paths = sorted(
+                [tracked_source, *generated_paths],
+                key=lambda path: path.as_posix().lower(),
+            )
+            self.assertEqual(expected_paths, actual_paths)
+            # Markdown 和工作树缺失文件必须被排除，防止读取异常或文档误报。
+            self.assertNotIn(documentation_path, actual_paths)
+            self.assertNotIn(missing_source, actual_paths)
+
+    def test_main_without_all_dispatches_only_changed_collector(self) -> None:
+        """main 空参数必须只调用差异收集器，防止日常审计意外变成昂贵全仓扫描。"""
+
+        # 差异收集器返回空集合，使 main 无需读取真实源码即可完成确定性分派测试。
+        with patch(
+            "check_agents_compliance.collect_changed_sources",
+            return_value=[],
+        ) as changed_collector:
+            # 全量收集器若被误调用会被断言捕获。
+            with patch(
+                "check_agents_compliance.collect_all_tracked_sources",
+                return_value=[],
+            ) as all_collector:
+                # 屏蔽成功标记输出，保持单元测试日志聚焦断言。
+                with patch("builtins.print"):
+                    # 空参数列表模拟默认命令行调用。
+                    return_code = main([])
+        # 无源码变更仍应返回成功。
+        self.assertEqual(0, return_code)
+        # 默认模式必须且只能调用一次差异收集器。
+        changed_collector.assert_called_once()
+        # 默认模式不得读取全部 Git 跟踪文件。
+        all_collector.assert_not_called()
+
+    def test_main_all_dispatches_generated_specialized_contracts(self) -> None:
+        """--all 主流程必须执行模型、特征和中文字体三类专用完整性合同。"""
+
+        # full_paths 用最少三个入口覆盖主循环的三条生成物专用分支。
+        full_paths = [
+            GENERATED_MODEL_HEADER,
+            GENERATED_FEATURE_HEADER,
+            GENERATED_UI_FONT_MANIFEST,
+        ]
+        # 全量收集器返回专用入口，避免测试依赖真实 Git 状态。
+        with patch(
+            "check_agents_compliance.collect_all_tracked_sources",
+            return_value=full_paths,
+        ) as all_collector:
+            # 差异收集器在 --all 模式绝不能被调用。
+            with patch(
+                "check_agents_compliance.collect_changed_sources",
+                return_value=[],
+            ) as changed_collector:
+                # 模型头验证器返回通过并记录调用。
+                with patch(
+                    "check_agents_compliance.validate_generated_header",
+                    return_value=[],
+                ) as model_validator:
+                    # 特征头验证器返回通过并记录调用。
+                    with patch(
+                        "check_agents_compliance.validate_generated_feature_header",
+                        return_value=[],
+                    ) as feature_validator:
+                        # 字体包验证器返回通过并记录调用。
+                        with patch(
+                            "check_agents_compliance.validate_generated_ui_fonts",
+                            return_value=[],
+                        ) as font_validator:
+                            # 普通特征头中文审计返回通过，避免读取测试夹具外文件。
+                            with patch(
+                                "check_agents_compliance.audit_source_file",
+                                return_value=[],
+                            ):
+                                # 屏蔽成功标记输出。
+                                with patch("builtins.print"):
+                                    # 显式 --all 启动全仓库主流程。
+                                    return_code = main(["--all"])
+        # 三类专用合同全部通过时主流程返回成功。
+        self.assertEqual(0, return_code)
+        # --all 必须调用全跟踪收集器一次。
+        all_collector.assert_called_once()
+        # --all 不得混入默认差异收集器。
+        changed_collector.assert_not_called()
+        # 模型、特征和字体专用验证器都必须执行一次。
+        model_validator.assert_called_once()
+        feature_validator.assert_called_once()
+        font_validator.assert_called_once()
 
 
 class SemanticBlockAuditTests(unittest.TestCase):

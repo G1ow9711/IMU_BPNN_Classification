@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- 文档截图器是 Windows WPF 控制台程序；它只渲染生产视图，不启动正式应用。 -->
+  <PropertyGroup>
+    <!-- 输出可由命令行直接调用的截图工具。 -->
+    <OutputType>Exe</OutputType>
+    <!-- 与正式上位机使用同一 .NET 8 Windows 目标，避免 XAML 或字体行为漂移。 -->
+    <TargetFramework>net8.0-windows10.0.26100.0</TargetFramework>
+    <!-- 运行系统下限与正式 WinRT BLE 上位机一致，但本工具不会创建 BLE transport。 -->
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+    <!-- 开启 WPF 程序集和 XAML 控件支持，供 RenderTargetBitmap 离屏渲染生产视图。 -->
+    <UseWPF>true</UseWPF>
+    <!-- 开启可空引用分析，防止截图数据缺字段时静默产生空白界面。 -->
+    <Nullable>enable</Nullable>
+    <!-- 自动导入基础命名空间，业务类型仍使用显式 using 说明来源。 -->
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- 截图工具警告同样视为错误，避免教程资产建立在可疑构建上。 -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- 固定入口类型，避免引用 FitnessCoach.App 后与正式 App 入口产生歧义。 -->
+    <StartupObject>FitnessCoach.UiCapture.Program</StartupObject>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- 引用正式 WPF 视图、ViewModel、样式和矢量动作控件。 -->
+    <ProjectReference Include="..\FitnessCoach.App\FitnessCoach.App.csproj" />
+    <!-- 引用纯领域动作、状态和会话摘要。 -->
+    <ProjectReference Include="..\FitnessCoach.Domain\FitnessCoach.Domain.csproj" />
+    <!-- 引用分类诊断、RawStream 与协议事件对象，不引用 Windows 真 BLE transport。 -->
+    <ProjectReference Include="..\FitnessCoach.Bluetooth\FitnessCoach.Bluetooth.csproj" />
+    <!-- 引用会话和偏好仓储端口；实现使用进程内确定性替身。 -->
+    <ProjectReference Include="..\FitnessCoach.Infrastructure\FitnessCoach.Infrastructure.csproj" />
+  </ItemGroup>
+</Project>

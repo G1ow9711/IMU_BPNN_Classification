@@ -15,6 +15,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FitnessCoach.Tests", "Fitne
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FitnessCoach.Bluetooth.Windows", "FitnessCoach.Bluetooth.Windows\FitnessCoach.Bluetooth.Windows.csproj", "{C5F7E7D2-91F7-4B33-BACF-A2B7AF16A5A9}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FitnessCoach.UiCapture", "FitnessCoach.UiCapture\FitnessCoach.UiCapture.csproj", "{4F437559-6981-439F-BDB0-AAC39CB3F882}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -97,6 +99,18 @@ Global
 		{C5F7E7D2-91F7-4B33-BACF-A2B7AF16A5A9}.Release|x64.Build.0 = Release|Any CPU
 		{C5F7E7D2-91F7-4B33-BACF-A2B7AF16A5A9}.Release|x86.ActiveCfg = Release|Any CPU
 		{C5F7E7D2-91F7-4B33-BACF-A2B7AF16A5A9}.Release|x86.Build.0 = Release|Any CPU
+		{4F437559-6981-439F-BDB0-AAC39CB3F882}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{4F437559-6981-439F-BDB0-AAC39CB3F882}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{4F437559-6981-439F-BDB0-AAC39CB3F882}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{4F437559-6981-439F-BDB0-AAC39CB3F882}.Debug|x64.Build.0 = Debug|Any CPU
+		{4F437559-6981-439F-BDB0-AAC39CB3F882}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{4F437559-6981-439F-BDB0-AAC39CB3F882}.Debug|x86.Build.0 = Debug|Any CPU
+		{4F437559-6981-439F-BDB0-AAC39CB3F882}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{4F437559-6981-439F-BDB0-AAC39CB3F882}.Release|Any CPU.Build.0 = Release|Any CPU
+		{4F437559-6981-439F-BDB0-AAC39CB3F882}.Release|x64.ActiveCfg = Release|Any CPU
+		{4F437559-6981-439F-BDB0-AAC39CB3F882}.Release|x64.Build.0 = Release|Any CPU
+		{4F437559-6981-439F-BDB0-AAC39CB3F882}.Release|x86.ActiveCfg = Release|Any CPU
+		{4F437559-6981-439F-BDB0-AAC39CB3F882}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

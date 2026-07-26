@@ -1,290 +1,261 @@
-# IMU 健身动作 BP 神经网络识别
+# 手腕 IMU 健身动作识别与实时计数教程
 
-本项目使用手腕六轴 IMU 数据识别 11 类健身动作。当前最终算法采用 297 项特征、两个轻量六分支 BP、固定 logits 融合和全动作段因果累计；双 M0 权重与标准化参数已经自动导出。手柄中文 LVGL、Windows 中文上位机、安全配对、会话存储、低功耗和训练协调软件均已落地；开发板尚未烧录，真实外设、BLE 射频、功耗和长稳仍由用户后续验证。
-
-项目严格采用以下技术路线：
+本项目展示一条可落到 ESP32-S3 智能手表的完整机器学习链路：从六轴 IMU 原始数据出发，完成数据清洗、297 项可解释特征、双轻量 BP 分类、单动作会话确认、实时计数、BLE 同步和 Windows 上位机展示。
 
 ```text
-六轴 IMU -> 数据清洗 -> 297项特征 -> 双六分支BP -> 因果动作段累计 -> ESP32-S3
+QMI8658 六轴 IMU
+  -> 25 Hz 统一采样
+  -> 62 点滑动窗口
+  -> 清洗与重力相对序列
+  -> 297 项可解释特征
+  -> 双六分支 BP 与固定 logits 融合
+  -> 会话主动作 + 实时计数许可
+  -> 次数 / 步数 / 时长 / 热量
+  -> AMOLED + BLE + Windows 上位机
 ```
 
-不使用 CNN、RNN、LSTM 或 Transformer 作为部署模型。
+部署模型不使用 CNN、RNN、LSTM 或 Transformer。重点不是追求网络规模，而是学习如何让数据合同、特征、验证隔离、嵌入式数值一致性和产品状态机共同闭环。
 
-第一次阅读本项目，先打开[项目文档索引](docs/README.md)，再按需阅读算法、系统、通信、硬件界面和测试运维五份正文。算法总文档按真实数据流解释每一步的直观含义、公式、输入输出、边界处理、复杂度、最终精度和 ESP32-S3 资源预算。
+## 你能看到什么
 
-## 目录结构
+- 手表点击开始后，自动确认本轮主动作并保持该动作类型。
+- 计数器确认一个完整周期后，设备权威累计立即加一；行走和小跑按步数统计，静坐按时长统计。
+- 对次数和步数动作，中途休息、静止或无效数据由活动门和质量门冻结；低置信度或异类分类只作诊断，不切换主动作。`sit` 是持续时长动作，在 `RUNNING` 的合法单调 tick 中累计，`PAUSE` 或 `STOP` 后停止。
+- Windows 上位机可用 Mock 无硬件演示，也可通过 Windows BLE 连接真表。
+- Python 与 ESP32 共用固定通道、特征顺序、标准化、类别顺序和模型导出合同。
+- 数据、图表和结论均有可复现入口，不靠人工挑选一条“最好看”的样本。
+
+当前产品口径固定为右手腕、一次会话只做一种动作。真表没有振动马达，反馈只通过 AMOLED 数字和 BLE 事件呈现。10 次动作的计数验收允许误差为 ±2 次。
+
+### 产品界面
+
+![PC 上位机实时训练界面](docs/assets/ui/pc/pc-live-training.png)
+
+上位机把连接状态、主动作、实时次数、训练时长、热量和动作示范集中在同一训练页。图片使用固定 Mock 数据生成，不包含用户设备标识或真实训练记录。
+
+![手表主页](docs/assets/ui/watch/home.png)
+
+手表主页显示“毕昇杯——智慧运动助手”、电池、BLE 和训练入口。教程界面资产的生成方式与哈希见 [`docs/assets/ui/README.md`](docs/assets/ui/README.md)。
+
+## 学习目标
+
+完成教程后，你应能回答这些问题：
+
+1. 原始整数 IMU 如何换算为 `deg/s` 和 `g`，为什么通道顺序不能漂移？
+2. 为什么直接比较 `gx/gy/gz` 容易受佩戴姿态影响，重力相对序列如何降低影响？
+3. 297 项特征分别描述强度、阶段、周期、频谱、冲击和手腕换向的哪些差异？
+4. 如何按采集文件划分训练、验证和测试，避免同一长记录的重叠窗口泄漏？
+5. 如何把两个轻量 BP、标准化参数和类别表安全导出到 ESP32？
+6. 为什么“主动作保持不变”和“休息时冻结计数”必须是两个独立状态？
+7. 如何用 C/Python 逐值一致性、主机测试和真板测试构成发布门？
+
+## 用真实数据直观看特征
+
+下图不是人工挑选单个标准动作。生成器使用固定文件级验证划分；每个采集文件先聚合，再进行类别统计，使长记录不会因窗口更多而获得更高权重。图中分位区间保留动作幅度、节奏和执行差异。
+
+![六种现场动作的时域特征](docs/assets/algorithm/01_六类派生信号曲线.png)
+
+六种常用动作使用重力方向上的垂直加速度和角速度模长对比。原始单轴没有直接跨文件平均，因为数据中的佩戴姿态变化会改变传感器坐标轴方向。
+
+![十一类动作的角速度相对功率谱](docs/assets/algorithm/02_十一类功率谱对比.png)
+
+相对功率谱展示不同动作的节奏与频率能量分布；它对窗口内相位偏移比原始时域曲线更稳健。
+
+![关键可解释特征分布](docs/assets/algorithm/03_关键特征分布.png)
+
+![动作与关键特征热力图](docs/assets/algorithm/04_特征中位数热力图.png)
+
+图表的数据集指纹、文件划分、窗口参数、阈值、文件级聚合方法和限制记录在[图表可复现清单](docs/assets/algorithm/figure_manifest.json)。生成代码位于 [`python/visualize_action_features.py`](python/visualize_action_features.py)。
+
+## 仓库结构
 
 ```text
 IMU_BPNN_Classification/
-├─ python/                 Python 训练、评估、导出与测试代码
-├─ esp32/                  ESP32-S3 固件、双 M0 模型包和生成的 C 头文件
-│  ├─ include/
-│  └─ src/
-├─ pc/                     上位机端代码与通信协议说明
-├─ docs/                   1 份索引和 5 份按领域收敛的权威文档
-├─ README.md               中文项目说明
-└─ .gitignore
+├─ python/                     数据、特征、训练、评估、导出、可视化与测试
+├─ esp32/                      ESP32-S3 固件、模型包、主机测试与烧录入口
+├─ pc/                         .NET 8 WPF 上位机、BLE、Mock、历史与测试
+├─ docs/
+│  ├─ assets/algorithm/        正式算法图和可复现清单
+│  ├─ assets/ui/               PC 与手表界面截图及生成清单
+│  └─ *.md                     五份按领域收敛的中文文档
+├─ shared/                     跨端共享协议与合同
+├─ README.md                   教程入口
+└─ .gitignore                  本地数据、环境、缓存和构建输出规则
 ```
 
-数据集、虚拟环境、训练输出和本机缓存不会提交到仓库。
+数据集、虚拟环境、训练输出、ESP-IDF 构建目录和本机缓存不提交 Git。正式源码、文档图和图表清单放在上述固定目录，不使用临时文件作为教程依赖。
 
-## 数据集
+## 10 分钟快速开始
 
-数据集来源：[G1ow9711/IMU_Datasrt](https://github.com/G1ow9711/IMU_Datasrt)。
+以下命令均从仓库根目录执行。
 
-将数据放到：
+### 路径 A：没有手表，先运行 Mock 上位机
 
-```text
-IMU_Dataset/imu_dataset_for_final/
-```
-
-数据包含陀螺仪 `gx, gy, gz` 和加速度计 `ax, ay, az`，采样率为 25 Hz。
-
-### 决赛弱类会话
-
-仓库提供 `python/finals_jumping_squat_manifest.json` 和校验脚本，用于接入根目录 `决赛` 中 11 个去重后的独立弱类录制。数据本身不提交仓库。
-
-| 文件 | SHA-256 | 行数 | 用途 |
-|---|---|---:|---|
-| `jumping_squat_scy1_20.txt` | `FE10A5B4...BDE0F379` | 2975 | 仅追加到训练集 |
-| `jumping_squat_scy2_20.txt` | `E9A02819...6C3A52C9` | 2977 | 仅追加到训练集 |
-| `jumping_squat_scy3_20.txt` | `4B4C5420...9C189111` | 2969 | 延迟外部盲测 |
-
-准备数据：
+要求 Windows 10/11 和 .NET 8 SDK。
 
 ```powershell
-.\.venv\Scripts\python.exe python\prepare_finals_dataset.py `
-  --source-dir "..\决赛\MATLAB\实测数据集\A类活动" `
-  --output-dir IMU_Dataset\finals_jumping_squat
+dotnet build pc\FitnessCoach.sln -c Release --nologo --verbosity minimal
+powershell -NoProfile -ExecutionPolicy Bypass -File pc\tools\run.ps1
 ```
 
-脚本先校验哈希、行数和重复内容，再按清单标签复制到 `train/<动作>` 与 `external_holdout/<动作>`。当前 8 个会话只追加到训练划分，3 个 `scy3` 会话只允许在验证候选通过后加载。
+上位机默认使用 `MockDeviceSession`。进入实时训练页即可体验连接、开始、暂停、恢复、计数、步数、热量、电量、断线恢复和历史记录。切换真 BLE 的方法见 [`pc/README.md`](pc/README.md)。
 
-## Python 环境
+### 路径 B：有数据，复现特征图
 
-在项目根目录创建虚拟环境并安装依赖：
+要求 Python 3.10 以上。先把数据集放到 `IMU_Dataset/imu_dataset_for_final/`，目录下每个动作一个子目录。
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r python\requirements.txt
+
+.\.venv\Scripts\python.exe -m python.visualize_action_features `
+  --dataset-dir IMU_Dataset\imu_dataset_for_final `
+  --output-dir docs\assets\algorithm
 ```
 
-运行全部测试：
+脚本只读取数据，不训练模型；输出四张正式 PNG 和一个稳定 JSON 清单。运行后用 `git diff -- docs/assets/algorithm` 检查数据或算法是否改变了图表。
 
-```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s python -p "test_*.py"
-```
-
-运行完整训练：
+完整训练：
 
 ```powershell
 .\.venv\Scripts\python.exe -u python\train_export.py `
   --dataset-dir IMU_Dataset\imu_dataset_for_final
 ```
 
-训练会逐 epoch 输出总损失、交叉熵、跨文件监督对比损失、定向类别 margin、训练期辅助损失、验证准确率、宏平均 F1、全部逐类召回率、最弱类别名称/召回率和早停状态。
+训练逐 epoch 输出损失、验证准确率、宏平均 F1、逐类召回率、最弱类别和早停状态。详细学习路线见 [`python/README.md`](python/README.md)。
 
-![逐 epoch 可见训练过程](docs/训练过程截图.png)
+### 路径 C：有手表，构建并烧录
 
-## 特征与 BP 网络
+目标硬件为 Waveshare `ESP32-S3-Touch-AMOLED-2.06`。先准备项目锁定的 ESP-IDF 5.5.4 工具链，再执行主机测试和真构建：
 
-当前最终特征维度为 297：
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File `
+  esp32\host_tests\run_all.ps1
 
-- 112 个全局统计特征；
-- 48 个原始四阶段时序特征；
-- 24 个峰值、频率、谱熵和自相关特征；
-- 48 个窗口内标准化四阶段形状特征；
-- 32 个分位数、偏度、峰度和最大跳变特征；
-- 24 个弱类定向频谱、自相关、峰形和跨通道时序耦合特征；
-- 6 个事件对齐特征：水平加速度/角速度各向异性、起跳到落地时间、落地冲击宽度、腾空水平与垂直角速度积分。
-- 3 个手腕周期特征：PCA 主轴换向率、自相关第二峰/第一峰比，以及清洗后三折晋级的第一正自相关峰。Round28 中导致退化的另外 6 项已从生产顺序移除。
+powershell -NoProfile -ExecutionPolicy Bypass -File `
+  esp32\firmware\tools\idf_project.ps1 -Action build
+```
 
-方向鲁棒特征包括重力方向上的垂直分量和垂直于重力的水平分量。训练增强使用六轴同步有限角度旋转、非循环时间变形和轻微传感器噪声。
+确认设备管理器中的目标串口后烧录；`COM7` 必须替换为实际端口：
 
-仅用于历史兼容和消融复现的平铺 BP 结构：
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File `
+  esp32\firmware\tools\idf_project.ps1 `
+  -Action flash-monitor `
+  -Port COM7
+```
+
+脚本不会自动猜串口。烧录后仍需验证 AMOLED、触摸、QMI8658、AXP2101、RTC、BLE 配对、会话存储、任务栈、功耗和长时间稳定性。完整步骤见 [`esp32/README.md`](esp32/README.md)。
+
+## 数据合同
+
+基础数据集来源：[G1ow9711/IMU_Datasrt](https://github.com/G1ow9711/IMU_Datasrt)。
+
+每个 TXT 文件包含 `N×8` 数据：
+
+| 列 | 含义 | 换算后单位 |
+|---:|---|---|
+| 0–2 | `gx、gy、gz` | `deg/s` |
+| 3–5 | `ax、ay、az` | `g` |
+| 6–7 | 原始时间戳字段，当前基础数据中为 0 | 不用于采样时间 |
+
+采样率固定为 25 Hz；陀螺仪原始值除以 `16.4`，加速度原始值除以 `4096`。训练、图表和 ESP32 均固定使用 `gx、gy、gz、ax、ay、az` 顺序。
+
+基础数据当前包含 11 类动作和 189 个动作文件。部分高动态文件包含“动作—休息—动作”，因此休息不是异常数据；训练窗口筛选和产品计数状态机都必须显式处理它。
+
+## 当前算法合同
+
+- 输入：清洗后的 62 点、六通道窗口，约 2.5 秒。
+- 特征：297 项，覆盖全局统计、阶段形状、周期/频谱、自相关、冲击分布和手腕机制。
+- 分类：两个六分支 M0，第二模型屏蔽一组相位敏感特征，logits 固定融合。
+- 会话：开始后确认一个 `selected_action`；本轮不因静坐或异类噪声切换主动作。
+- 计数：次数和步数由独立的活动/休息许可控制；休息清除未完成半周期，恢复后从新完整周期继续。`sit` 按运行时长累计，不使用动态活动门。
+- 一致性：Python 和 C 共用特征名称、顺序、标准化、类别和导出清单。
+
+部署产物位于 `esp32/include/`：
 
 ```text
-297 -> 96 -> 64 -> 32 -> 11
+esp32_bp_features.h
+esp32_dual_m0_model.h
+dual_m0_manifest.json
+dual_m0_bundle.npz
 ```
 
-Round24 起验证六分支 BP。当前 M0 六组输入维度为 `(112,48,24,48,32,33)`，分支输出维度为 `(24,12,8,12,8,16)`，拼接后执行 `80 -> 64 -> 32 -> 11`。训练检查点含辅助头时共 12,853 个参数；ESP32 主推理路径去掉辅助头后为 12,523 个参数。实验性 M1 把弱类分支输出增至 24，并使用 `88 -> 64 -> 48 -> 32 -> 24 -> 11` 深窄融合；其验证结果低于 M0，因此默认关闭。
+算法公式、物理解释、资源预算和当前验证数据见[算法原理、训练与实时计数](docs/算法原理、训练与实时计数.md)。
 
-代码还保留实验性的跳跃动作形状专家开关：
+## 验证边界
+
+已经具备的验证能力：
+
+- 文件级训练/验证/测试划分，避免同一采集文件窗口跨集合；
+- Python 单元测试和异常输入测试；
+- 297 项特征、双 M0 logits、融合和类别的 C/Python 逐值核对；
+- ESP32 领域、协议、计数、传感器替身和协调器主机测试；
+- WPF、BLE 编解码、Mock、存储和会话补传测试；
+- 真板烧录、串口和逐轮动作测试流程。
+
+不能从当前数据直接推出的结论：
+
+- 数据集没有完整受试者 ID，文件级隔离不等于严格跨人员盲测；
+- 数据集没有可靠佩戴侧元数据，当前产品只承诺右手腕，不承诺左右手等价；
+- 文档图用于解释差异，不用于选择模型、阈值或宣称跨人泛化；
+- Mock、主机测试和构建成功不能替代射频、触摸、传感器、功耗与长稳真板验收；
+- 一次真板测试通过只说明该轮场景，不代表所有用户、速度和动作幅度均已覆盖。
+
+当前版本的发布门、实机验收方法和已知限制见[测试验收与故障排查](docs/测试验收与故障排查.md)。
+
+## 文档学习路线
+
+1. [项目文档索引](docs/README.md)
+2. [算法原理、训练与实时计数](docs/算法原理、训练与实时计数.md)
+3. [系统架构与业务流程](docs/系统架构与业务流程.md)
+4. [BLE 通信、设备配置与会话存储](docs/BLE通信、设备配置与会话存储.md)
+5. [硬件平台、手表界面与低功耗](docs/硬件平台、手表界面与低功耗.md)
+6. [测试验收与故障排查](docs/测试验收与故障排查.md)
+
+## 测试
+
+Python：
 
 ```powershell
---enable-family-specialist
+.\.venv\Scripts\python.exe -m unittest discover -s python -p "test_*.py"
 ```
 
-当前三目标专家使用 127 个尺度不变和弱类机制特征。普通文件均衡和 P×K 跨文件批次两种消融均低于主 M0，因此默认关闭，不作为正式模型。
-
-模型选择阶段可使用验证隔离模式：
+Windows 上位机：
 
 ```powershell
-.\.venv\Scripts\python.exe -u python\train_export.py `
-  --dataset-dir IMU_Dataset\imu_dataset_for_final `
-  --validation-only `
-  --window-seconds 2.5
+dotnet build pc\FitnessCoach.sln -c Release --nologo --verbosity minimal
+dotnet run --project pc\FitnessCoach.Tests\FitnessCoach.Tests.csproj `
+  -c Release --no-build --nologo
 ```
 
-该模式不构建测试窗口、不计算测试指标，也不导出 C 头文件；结果写入 `validation_report.json`。候选方案只有先超过既有验证基线，才允许进行一次正式测试评估。
-
-加入决赛训练会话的验证隔离命令：
+ESP32 主机替身：
 
 ```powershell
-.\.venv\Scripts\python.exe -u python\train_export.py `
-  --dataset-dir IMU_Dataset\imu_dataset_for_final `
-  --extra-train-dir IMU_Dataset\finals_weak_classes\train `
-  --external-holdout-dir IMU_Dataset\finals_weak_classes\external_holdout `
-  --validation-only `
-  --window-seconds 2.5
+powershell -NoProfile -ExecutionPolicy Bypass -File `
+  esp32\host_tests\run_all.ps1
 ```
 
-分析训练/验证特征分离度：
+测试通过后仍需按硬件发布门进行真板验证。
 
-```powershell
-.\.venv\Scripts\python.exe python\analyze_feature_separability.py `
-  --dataset-dir IMU_Dataset\imu_dataset_for_final `
-  --extra-train-dir IMU_Dataset\finals_weak_classes\train `
-  --validation-report outputs\round20_targeted_peak_features_validation_20260711\validation_report.json `
-  --output-json outputs\feature_separability.json `
-  --output-csv outputs\feature_separability_top.csv
-```
+## 参与开发
 
-分析器只读取训练/验证文件，输出 Fisher 分数、文件级 Fisher 分数、训练/验证同方向 Cohen's d，以及候选特征与现有特征的相关性。
+提交改动时保持单一事实来源：
 
-执行手腕 20 项候选的文件分组三折分析：
+- 算法和特征修改：同步 Python、生成 C、测试、算法总文档和图表；
+- 协议修改：同步 ESP32、PC、共享合同、测试和通信文档；
+- UI 或硬件修改：遵守 Waveshare 官方 BSP/LVGL 锁与真板 A/B 规则；
+- 数据不提交仓库；正式图和清单提交到 `docs/assets/algorithm/`；
+- 不把 `.codex-local/`、`outputs/`、`build/`、虚拟环境或临时日志加入 Git。
 
-```powershell
-.\.venv\Scripts\python.exe python\analyze_wrist_candidates.py `
-  --dataset-dir IMU_Dataset\imu_dataset_for_final `
-  --extra-train-dir IMU_Dataset\finals_weak_classes\train `
-  --validation-report outputs\round25_prior_corrected_pk_validation_20260712\validation_report.json `
-  --output-json outputs\wrist_feature_analysis.json `
-  --fold-count 3 `
-  --maximum-promoted 12
-```
+## 开源发布清单
 
-该分析器把采集文件作为不可拆分分组，在每折内单独建立 DTW 模板；输出 16 项标量和 4 项模板距离的跨折方向、文件级效应、AUC、现有特征相关性及弱类物理组覆盖。报告中的 `test_read=false`、`external_holdout_read=false` 是隔离审计字段。
+代码和教程结构已按公开仓库阅读方式整理。正式对外发布前仍需：
 
-优化依据、手腕限制、MATLAB 对照、候选晋级、轻量深层 BP 停止规则及历史实验状态统一见[算法原理、训练与实时计数](docs/算法原理、训练与实时计数.md)。
+- 由仓库所有者选择并添加合适的开源许可证 `LICENSE`；
+- 检查数据集、字体、图标、第三方 BSP 和依赖的许可证及再分发条件；
+- 确认模型权重与图表所用数据具有发布授权；
+- 补充贡献规范、行为准则、安全问题报告方式和版本发布说明；
+- 在发布标签中记录模型清单、固件哈希、上位机版本和已完成的真板验收范围。
 
-## 输出文件
-
-训练结果默认写入本地 `outputs/`：
-
-```text
-best_model.pt
-scaler_and_config.npz
-training_report.json
-confusion_matrix.png
-training_console.log
-```
-
-最终 ESP32 双模型部署包已写入 `esp32/include/`：
-
-```text
-esp32_bp_features.h        297项特征、前处理和时间决策 C 实现
-esp32_dual_m0_model.h      两个六分支 M0 的权重、前向与固定融合
-dual_m0_manifest.json      类别、维度、掩码、融合权重和文件校验信息
-dual_m0_bundle.npz         Python 侧可复核的双模型参数包
-```
-
-部署门槛按动作逐类验收：
-
-```text
-五个批准弱类的测试集召回率 >= 0.85，其余六类 >= 0.90
-```
-
-五个弱类固定为 `jumping_jack`、`jumping_lunge`、`jumping_squat`、`squat`、`tuck_jump`。召回率定义为该动作测试样本中被正确识别的比例。最终固定方案已达到门槛，并由双 M0 导出器生成上述四项部署产物；旧的单平铺模型 `esp32_bp_model.h` 不是 Round41 最终模型，不能替代 `esp32_dual_m0_model.h`。
-
-## 当前最终软件状态
-
-- 生产输入固定为清洗后的 297 项特征；推理固定使用 Round29 基础 M0 与 Round37 掩码 M0，logits 权重为 `0.85/0.15`，随后执行因果动作段累计。
-- 点击开始后立即以 25 Hz 采样并形成 62 点窗口；准备态要求当前独立窗口 Top-1 连续两窗一致且各自概率至少 50%，避免首个强起手噪声通过累计惯性锁错整轮；若到第四窗仍不稳定，才按四窗累计平均 logits 兜底。`selected_action` 固定整轮计数器、界面动作和会话摘要；`inferred_action` 仅写诊断，噪声窗不再切类或切断计数。训练集同源的 25 点运动/静止迟滞门负责休息冻结，恢复活动后继续同一主动作；准备期保存最近 160 点并按原时间回放，质量边界只清空不能跨段拼接的半周期。
-- 八类重复动作统一使用右腕主向、回向、闭合完整周期，方向和幅度包络缓慢自适应；walk/trot 使用高峰触发、回落慢基线后重新武装的施密特步峰。两条生产计数链均为逐点 $O(1)$，完成一次即产生 MetricEvent，不等待新的分类窗口。
-- 双 M0 自动导出已完成；`esp32_bp_features.h` 与 `esp32_dual_m0_model.h` 分别提供特征/时序逻辑和六分支模型前向，清单与 NumPy 参数包用于完整性复核。
-- C99/Python 数值一致性已通过：297 项特征、两个 M0 logits、融合类别和动作段状态均已覆盖；最终分类结果一致。
-- ESP-IDF 5.5.4 整机工程已完成构建；13 个设备页面使用 16/20/28 px Noto Sans SC 中文子集。显示先完成初始化并呈现开机/自检页，再初始化 QMI8658、AXP2101、RTC 和会话存储；这些后续关键项失败时，已可在屏幕显示中文 ERROR 页和稳定故障码。
-- 熄屏不再只把亮度写为 0：真实后端执行 AMOLED `Display Off`。训练熄屏和连接待机为保留首击唤醒而维持触摸活动；只有 Deep-sleep/安全关机等策略明确停用触摸时，FT3168 才写入 hibernate。唤醒时先恢复触摸硬件和冻结阈值，再启用 LVGL 输入并执行面板 `Display On`。进入 Deep-sleep 前先验证 WOM/RTC/触摸唤醒前提，失败时保持当前外设和运行状态。
-- BLE 首次绑定的六位码由 NimBLE 无阻塞邮箱交给 LVGL 显示；成功、失败、断线、超时、停止或忘记电脑时清除。设备设置页可“忘记电脑”，Windows 设备页可“忘记设备”，两端分别清理自己的绑定状态。
-- Windows 上位机支持公制/英制显示和持久化；英制体重只在 UI 使用磅，写入 BLE 协议前仍换算为克。总结页显示每日目标进度、设备保存状态和本地历史保存状态。
-- 最终完整整机构建产物 `imu_fitness_handheld.bin` 大小为 `0x13def0`；最小 4 MiB 应用分区剩余 `0x2c2110`，余量约 `69%`。修改后必须重新运行统一软件验证入口，以新产物为准。
-- 真表没有振动马达，固件和上位机均不提供振动功能；旧 BLE/NVS 马达位只作协议兼容且固定为零。仍需逐版真板验收 AMOLED/触摸、QMI8658、AXP2101、BLE 配对与弱信号、实际电流、睡眠唤醒及长时间稳定性。
-
-## 训练与消融历史（非当前部署状态）
-
-以下内容按时间保留研究轨迹。文中的 264 维、单 BP、“未导出头文件”或“未采用双 BP”只描述对应历史轮次，不代表当前 297 维双 M0 部署状态。
-
-- Python 单元测试覆盖特征顺序、方向不变性、时间变形、活动过滤、文件均衡、训练损失、逐 epoch 日志和 C 头文件合同。
-- 早期 264 维阶段的 C 特征提取器曾使用 MinGW C99 编译，并与当轮 Python 特征逐值对照；最大绝对误差约为 `4.58e-05`。
-- 早期最佳平铺 BP 使用 2.5 秒窗口，测试准确率 `94.61%`，宏平均 F1 `93.49%`。
-- 两项后续方案仅在验证集消融：320 维周期形状特征得到验证准确率 `90.33%`、宏平均 F1 `89.97%`、最小类别召回 `78.19%`；保重力动态强度增强得到 `90.68%`、`90.35%`、`78.76%`。二者均低于 264 维基线的 `91.63%`、`91.16%`、`79.92%`，未读取测试指标，也未进入正式模型。
-- 当时将原模型与动态增强模型做验证集 logits 加权融合后，最优权重仍为原模型 `100%`，因此没有采用“原模型+动态增强模型”这组历史双 BP；该结论不否定后来通过验证并用于 Round41 的 Round29/Round37 双 M0。
-- 决赛数据扩展和事件特征也严格只做验证消融：264 维加 `scy1/scy2` 得到 `90.95%/90.68%/78.38%`；12 项事件候选得到 `92.31%/92.01%/78.76%`；按分离度精选 3 项后得到 `90.82%/90.41%/78.78%`。三组数字依次为验证准确率、宏平均 F1、最小类别召回，均未同时超过固定基线 `91.63%/91.16%/79.92%`，因此测试集和 `scy3` 都未读取。
-- 分离度分析表明 `event_gyro_vertical_correlation` 对四组易混动作最稳定；自由落体比例及最长连续比例主要区分 `jumping_squat` 与 `jumping_jack`；事件垂直跳变与现有特征相关系数为 `1.0`，属于重复特征。当轮提取器因此恢复为 264 维，12 项候选只保留在分析工具中；后续经过多轮筛选形成了当前 297 维合同。
-- Round20 的 280 维验证候选达到 `91.57%/91.08%/79.73%`，但 `jumping_squat`、`squat`、`tuck_jump`、`lunge` 和 `wave` 未达各自门槛，因此测试集、`scy3` 和正式头文件保持隔离。
-- Round21 候选在训练前先完成 346 维分离度分析。新增 8 项值将输入扩展到 288 维；MinGW C99 与 Python 在合成和真实决赛窗口上的最大绝对误差为 `6.11e-05`。详细公式和类中位数见 [docs/算法原理、训练与实时计数.md](docs/算法原理、训练与实时计数.md)。
-- Round21 可视验证训练在 epoch 98 早停并恢复 epoch 53，验证准确率/宏 F1/最低召回为 `91.88%/91.56%/81.47%`。`squat` 和 `wave` 已提升到约 `84.59%/91.21%`，但 `jumping_lunge`、`jumping_squat`、`tuck_jump` 和 `lunge` 仍未达精确门槛，因此未读取测试集或 `scy3`，也未导出正式头文件。
-- Round22 在 Round21 误分类窗口子集上先筛选 7 项三重同方向候选，形成 295 维输入；训练前 56 项测试和 C/Python 真实窗口一致性均已通过。可视训练在 epoch 52 早停并恢复 epoch 7，验证准确率/宏 F1/最低召回为 `91.36%/91.06%/79.34%`，低于 Round21 的 `91.88%/91.56%/81.47%`。Round22 因此被拒绝，未读取测试集或 `scy3`，也未导出正式头文件。
-- Round23 在无训练分离度审计后加入 6 个事件对齐/方向特征，形成 294 维 Python/C 一致管线。平铺 BP 验证为 `91.01%/90.84%/78.76%`，仅 `jumping_lunge` 提升到 `90.61%`，其余弱类仍未达标。
-- Round24 使用六分支 BP、P=11/K=6 跨文件批次、三组定向 margin 和五个训练期辅助头，可视训练在 epoch 80 早停并恢复 epoch 35。验证准确率/宏 F1/最低召回为 `90.95%/90.53%/77.80%`；`jumping_jack 94.47%`、`jumping_lunge 92.36%` 通过，`jumping_squat 80.99%`、`squat 80.41%`、`tuck_jump 77.80%` 未通过，普通类 `wave 89.78%` 也略低于门槛。测试集、`scy3` 和正式头文件继续保持隔离。
-- Round25 在相同 294 维输入和多分支结构上，用原训练窗口计数修正 P×K 交叉熵先验，将 SupCon 权重降到 `0.01`，并使用 `0.20` dropout 与 `0.03` 标签平滑。可视训练在 epoch 60 早停并恢复 epoch 15，验证准确率/宏 F1/最低召回为 `91.04%/90.99%/77.22%`。`jumping_squat 80.41%`、`squat 77.97%`、`tuck_jump 77.22%` 和 `lunge 89.37%` 未达标，因此该全局损失修正被拒绝，测试集、`scy3` 和正式头文件仍未访问。
-- 手腕候选三折分析覆盖 197 个训练角色文件、40,727 个有效窗口，晋级 8 项跨折同方向且相关性受限的标量特征。先加入换向率和自相关峰比形成 296 维 M0，验证准确率/宏 F1/最低召回为 `92.01%/91.67%/80.50%`；五个弱类召回依次为 `90%/96%/83%/83%/81%`，仍未全部达到 85%。
-- 296 维 M1 深窄融合退化到 `89.54%/89.45%/76.45%`，因此拒绝继续增加模型规模。完整 8 项 302 维 M0 作为后续单变量特征消融；训练前 73 项测试和 Python/C 逐值一致性均已通过。
-- Round28 完整 302 维 M0 可视训练在 epoch 86 早停并恢复 epoch 41，验证准确率/宏 F1/最低召回为 `90.81%/90.65%/77.41%`，低于 296 维 M0 的 `92.01%/91.67%/80.50%`。逐类召回为 `good_morning 98.03%`、`jumping_jack 91.32%`、`jumping_lunge 88.86%`、`jumping_squat 78.37%`、`lunge 93.15%`、`sit 100%`、`squat 80.95%`、`trot 99.87%`、`tuck_jump 77.41%`、`walk 99.18%`、`wave 89.78%`。该候选被拒绝，基础测试集、`scy3` 和正式 ESP32 头文件均未读取或生成。
-- Round28 证明“单项文件级可分”不等于“全部联合输入后必然提升 BP”。下一阶段禁止直接训练 302 维 M1 或继续整包堆叠特征；先按摆幅换向、回摆形态、冲击恢复、周期性四组做文件分组增量子集审计，要求每个拟加入子集对目标混淆对都有跨折增益且不损害普通类，再决定是否训练新的单变量候选。
-- Round29 先执行数据前处理：300 deg/s/1.5 g 的单轴孤立尖峰修复只修改训练角色约 0.18% 的采样行；首尾活动段裁剪删除 7,315 点，其中 6,237 点来自 8 个补充训练文件的长静止尾段。清洗后三折只晋级 `wrist_acf_first_peak`，生产合同回退失败 6 项并形成 297 维输入。M0 在 epoch 50 早停、恢复 epoch 5，单窗口验证准确率/宏 F1/最低召回为 `91.12%/90.96%/78.10%`，三目标为 `85.74%/78.10%/81.85%`。
-- Round30 三目标专家和 Round32 P×K 跨文件专家都未改善最低召回，均被拒绝。两折文件级 logit 偏置、偏置加 2～7 窗口因果平滑也未稳定达到三类 85%，没有作为部署补丁。
-- Round31 仅对主 M0 logits 使用当前及过去窗口的因果均值。K=15 是最短通过项：`jumping_squat 91.27%`、`squat 85.31%`、`tuck_jump 85.14%`，11 类最低召回同为 `85.14%`；K=15 对应 0.48 秒步长下最多 6.72 秒历史。Python/C 环形缓冲逐值误差为 0，297 项特征最大绝对误差为 `7.63e-05`。公式、重置条件和 RAM 预算见 [docs/算法原理、训练与实时计数.md](docs/算法原理、训练与实时计数.md)。
-- Round31 在锁定 297 维特征、M0 epoch 5 权重和 K=15 后首次读取固定测试角色。测试集 `squat 96.79%`、`tuck_jump 95.20%` 通过，但 `jumping_squat 78.57%` 未达到 85%，因此冻结测试总门槛失败；该测试结果没有用于重新选择 K、偏置或模型参数。
-- `external_holdout/scy3` 的 K=15 召回为 `jumping_jack 53.73%`、`jumping_lunge 62.41%`、`jumping_squat 46.84%`，证明跨人员/跨佩戴会话分布偏移仍明显。Round33 又验证四个高动态跳跃类专家，最佳 epoch 84 的组合验证为 `jumping_squat 88.94%`、`squat 78.10%`、`tuck_jump 77.41%`，仍低于主 M0+K15，已拒绝且未进入生产默认配置。
-- Round34/35 分别验证全局动态强度增强和仅 `jumping_squat` 强度增强，验证最低召回仍只有 `75.78%/76.19%`，两套增强均已回退。Round36 在不训练、不读取测试集的前提下做特征依赖审计，发现把标准化后的归一化阶段组索引 `184:232` 固定为零，可减少跨会话相位对齐依赖。Round37 按该掩码可视训练，每个 epoch 均输出损失、宏 F1 和逐类召回；在 epoch 52 早停并恢复 epoch 7，单模型验证三目标为 `86.90%/82.31%/78.76%`，不能单独发布。
-- Round39 只在固定验证角色选择双 M0 logits 权重：Round29 未掩码模型 `0.85`、Round37 掩码模型 `0.15`。Round41 再固定为活动段内从起点累计当前及全部历史 logits，不读取未来窗口；验证三目标为 `100%/98.78%/100%`，全部 11 类最低召回为 `96.21%`。该模式通过验证后才执行固定基础测试和外部确认。
-- 动作机理、分段公式、联合诊断矩阵和资料依据见 [docs/算法原理、训练与实时计数.md](docs/算法原理、训练与实时计数.md)。
-
-## 最终固定验收结果
-
-最终配置保持 Round29 的前处理与 297 项特征合同，使用两个相同六分支 M0。每个 M0 为 `12,853` 参数，双模型共 `25,706` 参数，float32 权重约 `100.41 KiB`；动作段状态 11 项 `float` 累计和加一个 `uint32_t` 计数，共 `48` 字节 RAM。第二模型在标准化后把索引 `184:232` 的 48 项归一化阶段特征置零。两个模型 logits 固定按 `0.85/0.15` 融合，然后从活动段起点累计到当前窗口并取均值。静止、动作切换、设备断连或用户切换时必须重置状态。
-
-| 动作 | 固定基础测试召回率 | 85% 门槛 |
-|---|---:|---:|
-| `jumping_squat` | 89.12% | 通过 |
-| `squat` | 99.80% | 通过 |
-| `tuck_jump` | 100.00% | 通过 |
-
-固定基础测试共 29 个文件、5,634 个有效窗口，总准确率 `99.29%`、宏平均 F1 `98.96%`、全部 11 类最低召回 `89.12%`。外部 `scy3` 三个新增会话的 `jumping_jack`、`jumping_lunge`、`jumping_squat` 召回均为 `100%`，总体准确率 `100%`。原固定测试在 Round31 已经打开；最终确认阶段没有用它选择融合权重或决策模式，权重和动作段累计均先由验证角色锁定，再做确认。
-
-最终审计报告已保存到 `docs/results/final_fixed_ensemble_confirmation_20260712.json`；命令会重新生成 `outputs/final_fixed_ensemble_confirmation_20260712.json`。可复现入口为 `python/evaluate_fixed_ensemble.py`：
-
-```powershell
-python python/evaluate_fixed_ensemble.py `
-  --dataset-dir "G:\Free_Project\BiShengBei_BPNN_ESP32\Project\IMU_Dataset\imu_dataset_for_final" `
-  --extra-train-dir IMU_Dataset\finals_weak_classes\train `
-  --external-holdout-dir IMU_Dataset\finals_weak_classes\external_holdout `
-  --base-artifact-dir outputs\round29_clean297_m0_validation_20260712 `
-  --masked-artifact-dir outputs\round37_suppress_normalized_phase_validation_20260712 `
-  --output outputs\final_fixed_ensemble_confirmation_20260712.json
-```
-
-当前双 M0 导出链路已经完成：`dual_m0_bundle.npz` 保存两套模型和标准化参数，`dual_m0_manifest.json` 固化维度、类别、掩码与融合合同，`esp32_dual_m0_model.h` 提供两个六分支前向及 `0.85/0.15` 融合，`esp32_bp_features.h` 提供 297 项特征和时间决策。C99/Python 逐值测试已通过；旧单模型头文件仍不能当作最终 Round41 模型。
-
-### 早期弱类验证历史（Round 11-16）
-
-该历史阶段在保持“264 项手工特征 + 单 BP + 可生成 C 头文件”不变的前提下，完成了以下 PyCharm 可见训练。每轮均逐 epoch 输出，且仅使用训练集和验证集：
-
-| 方案 | 最佳 epoch | 验证准确率 | 宏平均 F1 | 最小类别召回 |
-|---|---:|---:|---:|---:|
-| 参数 EMA `0.90` | 65 | 91.58% | 91.22% | 77.41% |
-| 扩展对称 hard-pair margin | 44 | 90.27% | 89.65% | 77.61% |
-| 标签平滑 `0.05`、2.5 秒 | 35 | 91.27% | 90.91% | 79.15% |
-| 12 项冲击对齐形态特征 | 11 | 90.71% | 90.23% | 77.80% |
-| 4.0 秒上下文 | 38 | 90.48% | 89.76% | 79.23% |
-| 4.0 秒 + 标签平滑 `0.05` | 54 | 92.31% | 91.81% | 79.81% |
-
-最后一轮整体指标超过固定基线，但最小类别召回仍比 `79.92%` 基线低约 0.11 个百分点，因此当时没有进入测试评估。其验证召回仍低于 90% 的动作包括 `jumping_jack` 82%、`jumping_squat` 87%、`squat` 86% 和 `tuck_jump` 80%；`jumping_lunge` 达到 90%。该历史轮次未读取测试集与 `scy3`，也未生成当轮 ESP32 正式头文件；后续 Round41 已采用 297 维双 M0 并完成部署包导出。
-
-训练器现在支持显式 `--window-seconds 4.0`，默认窗口列表仍保持 `1.5/2.0/2.5` 秒；`--ema-decay` 和 `--label-smoothing` 默认均为 `0`。这些开关用于可复现实验，不改变默认生产路径。
-
-## 说明
-
-原始数据没有采集者 ID，因此当前结果能够证明原始文件之间无泄漏，但不能声称严格的跨人员泛化。正式部署前应使用目标手表采集独立用户、独立会话和不同佩戴方向的数据作为最终盲测集。
+许可证必须由仓库所有者在确认源码、数据、模型和第三方依赖的授权边界后选择。

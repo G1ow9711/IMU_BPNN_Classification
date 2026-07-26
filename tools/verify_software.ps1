@@ -2,9 +2,9 @@
 param(
     # SkipIdfBuild 仅用于快速本地回归；正式交付验收不得启用。
     [switch]$SkipIdfBuild,
-    # BaseArtifactDir 可覆盖基础 M0 工件目录；留空时使用相邻训练工作树的冻结 Round29。
+    # BaseArtifactDir 可覆盖基础 M0 工件目录；留空时使用相邻训练工作树中已验证的基础 M0。
     [string]$BaseArtifactDir = "",
-    # MaskedArtifactDir 可覆盖掩码 M0 工件目录；留空时使用相邻训练工作树的冻结 Round37。
+    # MaskedArtifactDir 可覆盖相位掩码 M0 工件目录；留空时使用相邻训练工作树中已验证的相位掩码 M0。
     [string]$MaskedArtifactDir = ""
 )
 
@@ -61,14 +61,14 @@ if ($null -eq $pythonExe) {
     throw "未找到项目 Python 环境；请先在仓库根创建 .venv 并安装 python/requirements.txt。"
 }
 
-# 未显式传入基础工件时定位相邻 finals-jumping-squat 冻结输出。
+# 未显式传入基础工件时定位相邻 finals-jumping-squat 的已验证输出。
 if ([string]::IsNullOrWhiteSpace($BaseArtifactDir)) {
-    # Round29 是未屏蔽 297 维输入的基础六分支 M0。
+    # 基础 M0 使用完整 297 维输入，作为固定融合的主要分类证据。
     $BaseArtifactDir = Join-Path $projectRoot "..\finals-jumping-squat\outputs\round29_clean297_m0_validation_20260712"
 }
-# 未显式传入掩码工件时定位相邻 finals-jumping-squat 冻结输出。
+# 未显式传入掩码工件时定位相邻 finals-jumping-squat 的已验证输出。
 if ([string]::IsNullOrWhiteSpace($MaskedArtifactDir)) {
-    # Round37 在标准化后屏蔽索引 184:232 的归一化阶段特征。
+    # 相位掩码 M0 在标准化后屏蔽索引 184:232，用于补充基础模型的分类证据。
     $MaskedArtifactDir = Join-Path $projectRoot "..\finals-jumping-squat\outputs\round37_suppress_normalized_phase_validation_20260712"
 }
 # 基础工件必须存在，否则无法重建 Python 参考 logits。
