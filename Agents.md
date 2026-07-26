@@ -149,8 +149,10 @@ $$
 
 ## 9. Git 管理范围
 
-1. 本仓库日常 Git 管理只覆盖三个产品工程：Python 训练与模型工程 `python/`、ESP32 工程 `esp32/`、上位机工程 `pc/`。
-2. 执行 `git add`、提交、变基、推送或创建 PR 时，默认只允许包含 `python/**`、`esp32/**` 和 `pc/**`；不得把根目录训练数据、`docs/`、`tools/`、`shared/`、`artifacts/`、`animation-plans/`、分析结果、构建目录、缓存或本地运行产物带入产品提交。
-3. 根目录 `Agents.md` 是范围规则本身的唯一常规例外；只有修改工程协作规则时才允许与三个产品工程一起提交。
-4. 三个产品工程之外的文件即使已经被 Git 跟踪或处于修改状态，也必须保留在工作树中且不得暂存；确需提交时必须先取得用户明确授权。
-5. 提交前必须用限定路径的暂存清单复核范围，并确认 `git diff --cached --name-only` 中只有 `Agents.md`、`python/`、`esp32/` 或 `pc/`。
+1. 本仓库唯一允许的开发、Git、构建和运行根目录是 `G:\Free_Project\BiShengBei_BPNN_ESP32\Project`；后续任务必须先确认当前目录位于该路径内。
+2. 禁止为本仓库创建或使用 linked worktree，也不得在 `G:\Free_Project\BiShengBei_BPNN_ESP32\worktrees` 或其它目录维护第二份工程副本。需要分支开发时，必须直接在 `Project` 内切换分支。
+3. 本仓库日常 Git 管理只覆盖三个产品工程：Python 训练与模型工程 `python/`、ESP32 工程 `esp32/`、上位机工程 `pc/`。
+4. 执行 `git add`、提交、变基、推送或创建 PR 时，默认只允许包含 `python/**`、`esp32/**` 和 `pc/**`；不得把根目录训练数据、`docs/`、`tools/`、`shared/`、`artifacts/`、`animation-plans/`、分析结果、构建目录、缓存或本地运行产物带入产品提交。
+5. 根目录 `Agents.md` 是范围规则本身的唯一常规例外；只有修改工程协作规则时才允许与三个产品工程一起提交。
+6. 三个产品工程之外的文件即使已经被 Git 跟踪或处于修改状态，也必须保留在工作树中且不得暂存；确需提交时必须先取得用户明确授权。
+7. 提交前必须用限定路径的暂存清单复核范围，并确认 `git diff --cached --name-only` 中只有 `Agents.md`、`python/`、`esp32/` 或 `pc/`。

@@ -60,8 +60,8 @@
   },
   "generated_files": {
     "dual_m0_bundle.npz": "25c28449524d333d95a534c11c238884d03f8104b9f0d80b28bf981e5a64e95c",
-    "esp32_bp_features.h": "80206768ff07b416178756243a04a08f22bb3c04f93afdfb19d433f5096957fa",
-    "esp32_dual_m0_model.h": "9ab5eecdc4ee2cd71774ce01dad4ea73620bb6325b8f3041979c4522e990a0f5"
+    "esp32_bp_features.h": "e0358391ef4ce0848ff8c248938eb453cc9d643d89019bf6a48fda5936b1e39e",
+    "esp32_dual_m0_model.h": "d4306b50aad275b8be86b1400c217543bf072440bb4a74949169d0abe344e334"
   },
   "hardware_validation_status": "not_encoded_export_only"
 }
