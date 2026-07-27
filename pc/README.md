@@ -1,4 +1,4 @@
-# 健身动作助手 Windows 上位机
+# ESP32智慧运动助手 Windows 上位机
 
 ## 当前能力
 
@@ -23,6 +23,43 @@
 - 设备页显示设备 ID、型号、硬件修订、固件版本、权威电量、ATT MTU 和最新 `state_revision`。
 - 诊断页显示扫描 RSSI、ATT MTU、设备版本、权威电量、`state_revision`、自动重连尝试次数、CRC 与分片错误累计，以及双模型短 SHA、能力位和 LittleFS 可用容量。
 - 诊断页提供显式开发者“诊断六轴流”开关；协议内部名称仍为 `RawStream`。页面保留最近十分钟同步样本，滑块可回看任意十秒窗口并一键回到实时。数据默认只驻留内存；用户点击“导出”并确认路径后，实时模式导出全部缓存，暂停/回看模式只导出当前窗口。
+
+## 上位机为什么分成七个工程
+
+WPF 页面、Windows BLE、协议状态机和本地存储具有不同失败模式。拆分不是为了增加目录，而是为了让每层只拥有一种责任，并能在没有真表时使用替身验证。
+
+| 工程/层 | 为什么独立 | 做完有什么效果 | 若直接耦合的典型问题 |
+|---|---|---|---|
+| `FitnessCoach.Domain` | 动作、状态、事件和只读快照不应依赖 Windows API | 业务类型可被 Mock、真 BLE 和测试共同使用 | 页面字符串会反向成为协议规则 |
+| `FitnessCoach.Bluetooth` | 帧、分片、幂等、重连和权威 revision 是协议语义，不是 WinRT 调用细节 | 同一状态机可用 fake transport 注入丢包和乱序 | 射频故障与协议错误混在一起 |
+| `FitnessCoach.Bluetooth.Windows` | 配对、Association Endpoint 和 GATT 资源释放只属于 Windows | 平台生命周期可单独诊断和替换 | ViewModel 持有 GATT 对象后难以正确释放 |
+| `FitnessCoach.Infrastructure` | 历史和设置需要原子落盘、幂等键和可恢复写入 | UI 或 BLE 重试不会制造重复会话 | 页面直接写文件会阻塞 UI 并留下半文件 |
+| `FitnessCoach.App` | ViewModel 负责展示状态，XAML 负责布局，二者不重新计数 | UI 深度改版不改变设备事实 | code-behind 中累加会与手表分叉 |
+| `FitnessCoach.Tests` | 无窗口验证协议、仓储、线程切换和 ViewModel | 常见边界能在 CI 重复运行 | 只能靠人工点击发现回归 |
+| `FitnessCoach.UiCapture` | 文档截图要稳定、无隐私、无需蓝牙 | 相同 Mock 状态生成可比的正式界面资产 | 手工截图会混入设备 ID、时间和随机数据 |
+
+端到端数据方向固定为：
+
+```text
+WinRT 字节
+  -> 协议校验与状态机
+  -> 只读设备快照
+  -> UI Dispatcher
+  -> ViewModel 属性
+  -> XAML / DrawingContext
+```
+
+反方向只传用户意图：
+
+```text
+按钮点击
+  -> ViewModel 命令
+  -> IDeviceSession
+  -> 幂等控制帧
+  -> 设备权威响应
+```
+
+因此，点击“开始”后界面不会先假装进入训练；它等待设备响应和新的 `state_revision`。这种设计略增加了状态处理，但能避免“PC 显示已开始、手表实际拒绝”的假成功。
 
 ## 界面导览
 

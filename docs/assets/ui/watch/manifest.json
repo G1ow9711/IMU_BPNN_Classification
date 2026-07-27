@@ -1,6 +1,6 @@
 {
   "Generator": "docs/tools/watch_ui_preview/watch_ui_preview.py",
-  "GeneratorSha256": "60bad3ee62fc3e5ae25ee8344f10eb0797705fa9b6f297710727d5f893dfa21e",
+  "GeneratorSha256": "13ea959cd8529725ae75ce3d5b66d19841fa31228bca9931f90d415e7f940fdd",
   "CaptureMode": "deterministic-pillow-production-semantics-preview",
   "UsesBluetooth": false,
   "ReadsDevice": false,
@@ -15,7 +15,7 @@
       "Description": "主页、连接状态、电池图标和训练入口",
       "Width": 410,
       "Height": 502,
-      "Sha256": "2f393e1040d2491a73e876e0659959c51fdeda97251c4fe2efc9d9fe84554b3e"
+      "Sha256": "3d40d61c010564d7369d51c5e35d0785beddb9d35529c52675e6b169ddd5dd48"
     },
     {
       "File": "prepare.png",
@@ -26,7 +26,7 @@
       "Description": "点击开始后的即时采样与动作识别",
       "Width": 410,
       "Height": 502,
-      "Sha256": "18991b658040cbed46d238addb4cab45432571b6573905a3e41d386480208c41"
+      "Sha256": "2237ab3c42e87cd637a1693160e585ec3c2a112a93b2e6d8a91c224230c381e5"
     },
     {
       "File": "running.png",
@@ -37,7 +37,7 @@
       "Description": "稳定动作、实时次数、时长和热量",
       "Width": 410,
       "Height": 502,
-      "Sha256": "c35c3c05659bf3eb1400828af619549c2d9bbd163250cc5c872b722a0983913e"
+      "Sha256": "f51fa36c3eba27078fa70be234852cb47818f9fdb5888900cfb05d3bf07619a2"
     },
     {
       "File": "running_rest.png",
@@ -48,7 +48,7 @@
       "Description": "休息门生效，动作名称和累计保持不变",
       "Width": 410,
       "Height": 502,
-      "Sha256": "b49957c599b5fb6780919224ba26c1f76530468bc70c1b145d1748754a75ee7e"
+      "Sha256": "b3530ba5f75b5d3a0e208a4e77b1a7fb462051c282802ad69b3216c6042d5626"
     },
     {
       "File": "settings.png",
@@ -59,7 +59,7 @@
       "Description": "亮度、诊断、忘记电脑和返回入口",
       "Width": 410,
       "Height": 502,
-      "Sha256": "c69629526a7ca41d38cbf268cff4c648f56f0877fcf8d1b6a399ed4d19596b09"
+      "Sha256": "771cd26f6ff26776bd2d73c7dd4a43b8ababfef098143d67495e290f2d7dfc4b"
     },
     {
       "File": "pairing.png",
@@ -70,7 +70,7 @@
       "Description": "中文蓝牙配对码与超时提示",
       "Width": 410,
       "Height": 502,
-      "Sha256": "1473fbdc93800a277b7985c01200bc42752b5575cf44ef4768322df06754aad1"
+      "Sha256": "860f14f99b8e597f9438ebe9596dc5365c7ef0bca2f3fbb4fa80c268f8af67cc"
     },
     {
       "File": "summary.png",
@@ -81,7 +81,7 @@
       "Description": "会话动作、最终次数、时长和热量",
       "Width": 410,
       "Height": 502,
-      "Sha256": "a543cfb1a09e22892e836928fbf0ece75aa43fe5a743659668ce39e86f9ea136"
+      "Sha256": "d0b42872e31ffc7640e4f452c959570aa922f47c30350246b264dfd10bf07145"
     },
     {
       "File": "error.png",
@@ -92,7 +92,7 @@
       "Description": "稳定故障码、训练阻断和安全关机",
       "Width": 410,
       "Height": 502,
-      "Sha256": "18ef6fa5d2d5f1ce4a47be68397efcd8a326310cd2c1a3041e08d9ac4d9ba773"
+      "Sha256": "6608e450842e401c4d0c3e3c9a052f8eb3d1137e34a52a1c7412fe623dbbcc8d"
     }
   ]
 }

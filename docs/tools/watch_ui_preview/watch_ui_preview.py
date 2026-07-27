@@ -969,12 +969,12 @@ def render_preview_state_to_image(state: PreviewState) -> Image.Image:
     spec = build_page_spec(state)
     # 绘制左上角科技蓝品牌方标。
     draw.rounded_rectangle((32, 28, 70, 66), radius=12, fill=COLOR_ACCENT)
-    # 在品牌标中绘制白色“毕”字。
-    _draw_export_centered_text(draw, 51, 47, "毕", "#FFFFFF", 30, 22, 18, bold=True)
+    # 在品牌标中绘制白色“32”平台缩写。
+    _draw_export_centered_text(draw, 51, 47, "32", "#FFFFFF", 30, 22, 15, bold=True)
     # 加载品牌标题字体。
     brand_font = _load_export_font(19, bold=True)
-    # 绘制“毕昇杯”主品牌。
-    draw.text((80, 28), "毕昇杯", fill=COLOR_TEXT, font=brand_font, anchor="la")
+    # 绘制“ESP32”平台品牌。
+    draw.text((80, 28), "ESP32", fill=COLOR_TEXT, font=brand_font, anchor="la")
     # 加载品牌副标题字体。
     brand_subtitle_font = _load_export_font(13)
     # 绘制“智慧运动助手”产品主题。
@@ -1361,9 +1361,9 @@ class WatchUiPreviewApp:
         self._create_control_button(control_panel, CONTROL_BUTTON_LABELS[7], self.root.destroy)
         # 创建品牌字标字体；Tk 缺少指定字体时会安全回退系统中文字体。
         self.font_brand_mark = tkfont.Font(family="Microsoft YaHei UI", size=17, weight="bold")
-        # 创建“毕昇杯”品牌字体。
+        # 创建“ESP32”平台品牌字体。
         self.font_brand = tkfont.Font(family="Microsoft YaHei UI", size=14, weight="bold")
-        # 创建“智慧运动助手”副品牌字体。
+        # 创建“智慧运动助手”产品名称字体。
         self.font_brand_subtitle = tkfont.Font(family="Microsoft YaHei UI", size=10)
         # 创建电量和 BLE 状态字体。
         self.font_top_status = tkfont.Font(family="Microsoft YaHei UI", size=10, weight="bold")
@@ -1569,25 +1569,25 @@ class WatchUiPreviewApp:
         self.canvas.create_rectangle(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT, fill=COLOR_BACKGROUND, outline="")
         # 绘制蓝色品牌方标，左上形成稳定的产品识别锚点。
         self._rounded_rectangle(32, 28, 70, 66, 12, fill=COLOR_ACCENT, outline="")
-        # 品牌方标只使用一个“毕”字，避免小屏塞入复杂图形。
+        # 品牌方标使用“32”平台缩写，避免小屏塞入复杂图形。
         self.canvas.create_text(
             51,
             47,
-            text="毕",
+            text="32",
             fill="#FFFFFF",
             font=self.font_brand_mark,
             anchor="center",
         )
-        # 绘制主品牌“毕昇杯”。
+        # 绘制“ESP32”平台品牌。
         self.canvas.create_text(
             80,
             28,
-            text="毕昇杯",
+            text="ESP32",
             fill=COLOR_TEXT,
             font=self.font_brand,
             anchor="nw",
         )
-        # 绘制产品主题“智慧运动助手”，满足设备开机后持续可见的品牌合同。
+        # 绘制产品名称“智慧运动助手”，满足设备开机后持续可见的品牌合同。
         self.canvas.create_text(
             80,
             51,

@@ -2,7 +2,7 @@
   "SchemaVersion": 1,
   "Generator": "pc/FitnessCoach.UiCapture",
   "GeneratorVersion": "1.0",
-  "SourceFilesSha256": "ef448f1204fd238e9301e8dcc2928db13ff4f88460522ab9042ad10acddbcc7a",
+  "SourceFilesSha256": "4d0d46e4e690a624a59a390a648cb976904ca749dae7832629e4a91c78f81651",
   "CaptureMode": "deterministic-mock-render-target-bitmap",
   "ReadsLocalApplicationData": false,
   "UsesBluetooth": false,
@@ -13,7 +13,7 @@
       "Description": "确定性 Mock 设备与链路摘要",
       "Width": 1440,
       "Height": 900,
-      "Sha256": "9f255ef6f2065884debcd257e922236b6ee4d1d1a588676d164afd7f8ea66f8d"
+      "Sha256": "0f4a3e3198d2335081c86e47887b2283b0f0b743b21198f071efc1c8bf2ee1c9"
     },
     {
       "File": "pc-live-training.png",
@@ -21,7 +21,7 @@
       "Description": "深蹲八次与本地矢量动作示范",
       "Width": 1440,
       "Height": 900,
-      "Sha256": "1858dc84dbc436686bb3b3a21e48e2497fc9b1fec26fb40ad8a60bad03efdd06"
+      "Sha256": "e773cb827b1a833b457dfd52f05781a54310a83b112c1089948adc682e49e28b"
     },
     {
       "File": "pc-training-monitor.png",
@@ -29,7 +29,7 @@
       "Description": "25 Hz 六轴曲线与分类诊断",
       "Width": 1440,
       "Height": 900,
-      "Sha256": "6f01aefd67a55cf2d0cda84dd6feaede4068f39d062c6295e7d72bb1402a6b14"
+      "Sha256": "207e7eac8b73c7f509bbf124f4d8ee523fdff68ea4c19f4dc99b8da60a912d4f"
     },
     {
       "File": "pc-history.png",
@@ -37,7 +37,7 @@
       "Description": "三条固定教程会话及详情",
       "Width": 1440,
       "Height": 900,
-      "Sha256": "845792ccb2cdd2d024a063a824c4150fc738226fb1317c5aff215182630490d7"
+      "Sha256": "2066d296514b44efd5b93ae8aa6b900d70dcb32d8c24d49a2e5d40df3e6ff738"
     },
     {
       "File": "pc-settings.png",
@@ -45,7 +45,7 @@
       "Description": "公制、亮度、熄屏与减少动画",
       "Width": 1440,
       "Height": 900,
-      "Sha256": "bbbe03d564eabb47d94aa9eb77abf38a8530c9d2bab46b88f0d34224b51e6ff9"
+      "Sha256": "572435819f42644ee691fb50e6283a6dc0038339f2f035bd5e74b2a77975a5c9"
     },
     {
       "File": "pc-summary.png",
@@ -53,7 +53,7 @@
       "Description": "深蹲会话的双端保存结果",
       "Width": 1440,
       "Height": 900,
-      "Sha256": "dad2a35c21cd9d14ef39e6557af8a907f722ca2fff9a515cd215494be60b1e60"
+      "Sha256": "502311f8df18fc23e0f2463050b5dde91e8e0f61a22df07c4f6b50238ddaf6e6"
     }
   ]
 }
