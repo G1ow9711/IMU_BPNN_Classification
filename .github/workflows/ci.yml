@@ -68,6 +68,21 @@ jobs:
           # 允许最新 8.0 补丁，目标框架仍固定为 net8.0。
           dotnet-version: "8.0.x"
 
+      # 稀疏检出真板已验证的 Waveshare 提交，为 renderer 提供权威 LVGL 9 头文件。
+      - name: 获取 Waveshare LVGL 9 语法基线
+        uses: actions/checkout@v6
+        with:
+          # 厂家仓库与 AGENTS.md 中锁定的硬件基线一致。
+          repository: waveshareteam/ESP32-S3-Touch-AMOLED-2.06
+          # 固定提交避免厂家主分支更新后悄悄改变公开测试结果。
+          ref: 434e5bfa90178d56a3f9f939b76b5f9ef787a7dd
+          # 测试脚本从项目本地缓存路径读取，CI 使用相同目录合同。
+          path: .codex-local/cache/vendor/ESP32-S3-Touch-AMOLED-2.06
+          # 只下载 LVGL 9 头文件及源码，避免拉取完整示例和固件资源。
+          sparse-checkout: examples/arduino/libraries/lvgl
+          # 公共依赖只读，后续步骤不需要保留 GitHub 凭据。
+          persist-credentials: false
+
       # 执行 BLE、传感器替身、UI、计数、存储和协调器十二组 C 主机测试；不连接真板。
       - name: 运行 ESP32 主机测试
         shell: powershell
