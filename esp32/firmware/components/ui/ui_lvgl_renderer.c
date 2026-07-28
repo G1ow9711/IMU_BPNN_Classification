@@ -12,6 +12,8 @@
 
 /* 固定加锁超时为 250 ms，超过后放弃本帧避免阻塞算法任务。 */
 #define UI_LVGL_LOCK_TIMEOUT_MS (250U)
+/* 官方 taskLVGL 每 500 ms 推进一次健康节拍，远低于 20 ms 刷新周期且不触发重绘。 */
+#define UI_LVGL_HEALTH_PERIOD_MS (500U)
 /* AMOLED 主背景使用接近纯黑的石墨色，降低发光面积并形成智能手表质感。 */
 #define UI_COLOR_BACKGROUND_HEX (0x05070BU)
 /* 主信息卡使用深蓝黑表面，和背景形成低对比层级。 */
@@ -87,9 +89,9 @@ typedef struct {
     lv_obj_t *brand_mark;
     /* 保存品牌标内的“毕”字。 */
     lv_obj_t *brand_mark_label;
-    /* 保存“毕昇杯”品牌名称。 */
+    /* 保存“ESP32”平台品牌名称。 */
     lv_obj_t *brand_label;
-    /* 保存“智慧运动助手”产品副标题。 */
+    /* 保存“智慧运动助手”产品名称。 */
     lv_obj_t *title_label;
     /* 保存电池外框。 */
     lv_obj_t *battery_shell;
@@ -147,7 +149,24 @@ typedef struct {
     uint32_t previous_count;
     /* 保存上一动作索引，变化时播放淡入动画。 */
     uint8_t previous_action_id;
+    /* 保存由官方 taskLVGL 调度的健康定时器；页面销毁前必须先删除。 */
+    lv_timer_t *health_timer;
 } ui_lvgl_implementation_t;
+
+/* LVGL 健康定时器：只递增计数，不访问页面对象、不触发刷新。 */
+static void ui_lvgl_health_timer_callback(lv_timer_t *timer)
+{
+    /* 定时器 user_data 固定指向生命周期覆盖全部页面的公开渲染器。 */
+    ui_lvgl_renderer_t *renderer =
+        (ui_lvgl_renderer_t *)lv_timer_get_user_data(timer);
+    /* 初始化未完成或已经开始释放时不写状态。 */
+    if ((renderer == NULL) || !renderer->initialized) {
+        /* 安全返回；下一周期会在初始化完成后正常推进。 */
+        return;
+    }
+    /* 32 位无符号计数允许自然回绕；监督端只比较是否变化。 */
+    renderer->lvgl_heartbeat += UINT32_C(1);
+}
 
 /* 动画回调：把 0~255 数值写入文字不透明度。 */
 static void ui_lvgl_set_text_opacity(void *object, int32_t value)
@@ -357,14 +376,14 @@ static void ui_lvgl_apply_product_layout(ui_lvgl_page_t *page, ui_state_t state)
     lv_obj_set_pos(page->brand_mark, UI_SAFE_HORIZONTAL_PX, UI_TOP_BAR_Y_PX);
     /* 品牌标固定为 38×38 像素，兼顾识别度和圆角屏安全区。 */
     lv_obj_set_size(page->brand_mark, 38, 38);
-    /* “毕”字始终位于品牌标中央。 */
+    /* “32”平台缩写始终位于品牌标中央。 */
     lv_obj_center(page->brand_mark_label);
     /* 品牌名称固定在品牌标右侧第一行。 */
     lv_obj_set_pos(page->brand_label, 80, UI_TOP_BAR_Y_PX - 2);
     /* 品牌名称使用单行裁剪，避免任何状态改变顶栏高度。 */
     lv_label_set_long_mode(page->brand_label, LV_LABEL_LONG_CLIP);
-    /* 品牌名称可用宽度固定为 104 像素。 */
-    lv_obj_set_size(page->brand_label, 104, 26);
+    /* ESP32 品牌名称可用宽度固定为 82 像素。 */
+    lv_obj_set_size(page->brand_label, 82, 26);
     /* 产品副标题固定在品牌名称下方。 */
     lv_obj_set_pos(page->title_label, 80, UI_TOP_BAR_Y_PX + 22);
     /* 产品副标题单行显示。 */
@@ -458,7 +477,7 @@ static bool ui_lvgl_create_page(
     }
     /* 应用统一背景和布局。 */
     ui_lvgl_style_screen(page->root);
-    /* 创建蓝色圆角品牌标，内部只承载一个“毕”字，避免依赖外部图片资源。 */
+    /* 创建蓝色圆角品牌标，内部承载“32”平台缩写，避免依赖外部图片资源。 */
     page->brand_mark = ui_lvgl_create_surface(
         page->root,
         UI_SAFE_HORIZONTAL_PX,
@@ -474,24 +493,24 @@ static bool ui_lvgl_create_page(
         UI_FONT_CHINESE_20,
         LV_TEXT_ALIGN_CENTER,
         38);
-    /* 品牌标固定显示“毕”。 */
+    /* 品牌标固定显示“32”。 */
     if (page->brand_mark_label != NULL) {
-        /* 品牌字不随页面业务状态变化。 */
-        lv_label_set_text(page->brand_mark_label, "毕");
+        /* 平台缩写不随页面业务状态变化。 */
+        lv_label_set_text(page->brand_mark_label, "32");
     }
-    /* 创建“毕昇杯”品牌名称。 */
+    /* 创建“ESP32”平台品牌名称。 */
     page->brand_label = ui_lvgl_create_label(
         page->root,
         lv_color_hex(UI_COLOR_TEXT_HEX),
         UI_FONT_CHINESE_20,
         LV_TEXT_ALIGN_LEFT,
-        104);
+        82);
     /* 品牌名称固定，不由 presenter 覆盖。 */
     if (page->brand_label != NULL) {
-        /* 写入赛事主题品牌。 */
-        lv_label_set_text(page->brand_label, "毕昇杯");
+        /* 写入 ESP32 平台品牌。 */
+        lv_label_set_text(page->brand_label, "ESP32");
     }
-    /* 创建“智慧运动助手”产品副标题。 */
+    /* 创建“智慧运动助手”产品名称。 */
     page->title_label = ui_lvgl_create_label(
         page->root,
         lv_color_hex(UI_COLOR_MUTED_HEX),
@@ -944,6 +963,8 @@ ui_lvgl_result_t ui_lvgl_renderer_init(
     renderer->implementation = implementation;
     /* 产品默认保留动画；真板静态诊断由公开接口在首帧前显式关闭。 */
     renderer->animations_enabled = true;
+    /* 健康节拍从零开始，首个 500 ms 定时器回调后变为非零。 */
+    renderer->lvgl_heartbeat = UINT32_C(0);
     /* 获取厂家 BSP 创建的默认显示器；页面创建依赖有效的默认显示目标。 */
     lv_display_t *display = lv_display_get_default();
     /* BSP 未创建显示器时不能继续创建页面。 */
@@ -980,12 +1001,49 @@ ui_lvgl_result_t ui_lvgl_renderer_init(
             return UI_LVGL_ERR_MEMORY;
         }
     }
+    /* 创建不重绘的健康定时器；只有官方 taskLVGL 的 timer handler 能推进该计数。 */
+    implementation->health_timer = lv_timer_create(
+        ui_lvgl_health_timer_callback,
+        UI_LVGL_HEALTH_PERIOD_MS,
+        renderer);
+    /* 定时器分配失败意味着无法证明输入/刷新任务存活，初始化必须失败关闭。 */
+    if (implementation->health_timer == NULL) {
+        /* 删除已创建的全部页面；每个 screen 会递归释放子对象。 */
+        for (ui_state_t cleanup = UI_STATE_BOOT; cleanup < UI_STATE_COUNT;
+             cleanup = (ui_state_t)(cleanup + 1)) {
+            /* 只删除创建成功的页面根对象。 */
+            if (implementation->pages[cleanup].root != NULL) {
+                /* 删除该页面及全部子控件。 */
+                lv_obj_delete(implementation->pages[cleanup].root);
+            }
+        }
+        /* 释放不再拥有 LVGL 对象的内部结构。 */
+        free(implementation);
+        /* 清除公开句柄中的悬空内部指针。 */
+        renderer->implementation = NULL;
+        /* 释放 BSP LVGL 锁。 */
+        port->unlock(port->context);
+        /* 返回内存错误，启动链会显示明确故障而不是无监督运行。 */
+        return UI_LVGL_ERR_MEMORY;
+    }
     /* 全部页面创建后标记初始化。 */
     renderer->initialized = true;
     /* 释放锁。 */
     port->unlock(port->context);
     /* 返回成功。 */
     return UI_LVGL_OK;
+}
+
+/* 无锁读取官方 taskLVGL 健康节拍。 */
+uint32_t ui_lvgl_renderer_get_heartbeat(const ui_lvgl_renderer_t *renderer)
+{
+    /* 空对象或未完成初始化时没有有效健康事实。 */
+    if ((renderer == NULL) || !renderer->initialized) {
+        /* 零是启动宽限期哨兵，不伪造 taskLVGL 进度。 */
+        return UINT32_C(0);
+    }
+    /* ESP32-S3 对齐 32 位读取为单次原子访问，允许与 timer 回调并发。 */
+    return renderer->lvgl_heartbeat;
 }
 
 /* 启用或禁用页面与文字动画；静态模式用于分离字体数据和刷新时序问题。 */
@@ -1070,6 +1128,13 @@ ui_lvgl_result_t ui_lvgl_renderer_deinit(ui_lvgl_renderer_t *renderer)
     /* 获取内部实现。 */
     ui_lvgl_implementation_t *implementation =
         (ui_lvgl_implementation_t *)renderer->implementation;
+    /* 先停止健康回调，防止页面和公开句柄清理期间再次访问 renderer。 */
+    if (implementation->health_timer != NULL) {
+        /* 删除由本渲染器创建的唯一健康定时器。 */
+        lv_timer_delete(implementation->health_timer);
+        /* 清除内部句柄，避免后续失败路径重复删除。 */
+        implementation->health_timer = NULL;
+    }
     /* 删除全部 screen；LVGL 递归释放子对象。 */
     for (ui_state_t state = UI_STATE_BOOT; state < UI_STATE_COUNT; state = (ui_state_t)(state + 1)) {
         if (implementation->pages[state].root != NULL) {

@@ -1,6 +1,6 @@
 # 上位机界面截图
 
-这些图片由 `pc/FitnessCoach.UiCapture` 使用生产 `FitnessCoach.App` 的 XAML、控件、主题和 ViewModel 离屏生成。生成器使用固定内存数据与 WPF `RenderTargetBitmap`，不会启动正式 `App.OnStartup`，不会创建 Windows BLE 会话，也不会读取或修改 `%LOCALAPPDATA%\IMUFitness`。
+`pc/FitnessCoach.UiCapture` 复用生产应用的 XAML、控件、主题和 ViewModel，通过 WPF `RenderTargetBitmap` 离屏生成这些图片。生成器使用固定内存数据，跳过正式 `App.OnStartup` 和 Windows BLE 会话，也不读取或修改 `%LOCALAPPDATA%\IMUFitness`。
 
 ## 生成
 
@@ -35,7 +35,7 @@ PC_UI_CAPTURE_OK pages=6 size=1440x900 mode=deterministic-mock
 
 所有图片固定为 `1440×900`、96 DPI。`manifest.json` 使用 `SchemaVersion`、生成器版本和排序源码内容哈希描述来源，不记录 Git HEAD 或时间戳。
 
-## 安全边界
+## 数据边界
 
 - 模拟设备 ID 固定为 `DOCS-MOCK-01`。
 - 六轴曲线由固定数学波形生成，单位和 25 Hz 采样合同与生产页面一致。

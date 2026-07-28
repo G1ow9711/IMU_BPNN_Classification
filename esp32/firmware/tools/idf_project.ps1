@@ -21,6 +21,10 @@ $idfPath = Join-Path $workspaceRoot '.codex-local\cache\esp-idf-v5.5.4'
 $idfToolsPath = Join-Path $workspaceRoot '.codex-local\cache\espressif-tools'
 # 固定临时文件目录，长路径和构建中间文件均留在当前 G 盘工程。
 $localTemp = Join-Path $workspaceRoot '.codex-local\tmp'
+# 固定 ccache 对象缓存目录，避免编译缓存写入用户 LocalAppData。
+$ccacheRoot = Join-Path $workspaceRoot '.codex-local\cache\ccache'
+# 固定 ccache 临时响应文件目录，避免编译参数文件短暂落到系统盘。
+$ccacheTemp = Join-Path $workspaceRoot '.codex-local\tmp\ccache'
 
 # ESP-IDF 源码不存在说明尚未准备开发环境，直接给出可执行错误。
 if (-not (Test-Path -LiteralPath (Join-Path $idfPath 'tools\idf.py'))) {
@@ -32,8 +36,8 @@ if (-not (Test-Path -LiteralPath $idfToolsPath)) {
     # 提示先执行安装，不能静默退回 C 盘默认目录。
     throw "缺少项目本地 ESP-IDF 工具链：$idfToolsPath"
 }
-# 创建项目本地临时目录；Force 允许目录已存在。
-New-Item -ItemType Directory -Force -Path $localTemp | Out-Null
+# 创建项目本地临时目录和 ccache 目录；Force 允许目录已存在。
+New-Item -ItemType Directory -Force -Path $localTemp, $ccacheRoot, $ccacheTemp | Out-Null
 # 告诉 ESP-IDF 所有下载工具和 Python 环境都从项目本地目录读取。
 $env:IDF_TOOLS_PATH = $idfToolsPath
 # 固定 SoC 为 ESP32-S3；没有该变量时全新 build 目录会错误回退到经典 ESP32。
@@ -44,6 +48,10 @@ $env:IDF_SKIP_CHECK_SUBMODULES = '1'
 $env:TEMP = $localTemp
 # 同步设置 TMP，覆盖部分工具只读取 TMP 的情况。
 $env:TMP = $localTemp
+# 告诉 ccache 把可复用编译对象保存到项目缓存。
+$env:CCACHE_DIR = $ccacheRoot
+# 告诉 ccache 把响应文件和原子写入临时文件保存到项目临时目录。
+$env:CCACHE_TEMPDIR = $ccacheTemp
 # exportTool 是 ESP-IDF 官方环境导出器；key-value 格式可在当前 PowerShell 内安全解析。
 $exportTool = Join-Path $idfPath 'tools\idf_tools.py'
 # 调用系统现有 Python 读取项目本地工具清单；此步骤不下载或修改工具链。

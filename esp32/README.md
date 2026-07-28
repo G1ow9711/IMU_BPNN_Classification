@@ -17,7 +17,7 @@
 - 当前源码启用 `APP_BENCH_ALWAYS_ON=true`。自动熄屏、Light-sleep 和 Deep-sleep 暂时关闭，开发者诊断门只在 RAM 中开启。本镜像是常亮功能联调版，不代表低功耗产品版已经通过。
 - 当前 BLE 联调 PIN 固定为 `123456`，仍启用认证、加密和绑定；量产前必须替换固定 PIN 方案。
 
-## 从模型文件到真板运行为什么分六步
+## 从模型文件到真板运行的六道门
 
 | 步骤 | 为什么要做 | 做完有什么效果 | 不能替代的下一层 |
 |---:|---|---|---|
@@ -28,7 +28,7 @@
 | 5. 精确识别 USB 后四段烧录 | 同一电脑可能有多个 COM 设备；只写应用也可能与旧分区/OTA 数据不匹配 | bootloader、分区表、OTA 数据和应用来自同一构建，片上 Hash 可追踪 | 仍需运行态验收 |
 | 6. 真板分层验收 | 面板、触摸、I²C、BLE、任务调度和佩戴数据只存在于真实硬件 | 证明本次镜像能完成用户流程并长时间保持响应 | 一块板一次通过不等于跨设备和跨用户泛化 |
 
-严格顺序的效果是避免“反复烧录猜问题”。主机层失败就修业务；真构建失败就修组件或资源；烧录后才出现故障，再查板级驱动、栈、时序和真实输入。
+这六道门把故障固定在最近一层。主机层失败就修业务；真构建失败就修组件或资源；烧录后才出现故障，再查板级驱动、栈、时序和真实输入。
 
 ## 2. 目录结构
 
@@ -160,7 +160,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
 HOST_TESTS_OK count=12
 ```
 
-十二组覆盖 BLE、板载传感器、UI runtime、设备配置、健身核心、IMU pipeline、动作相位、功耗/UI、会话传输、会话存储、训练引擎和总协调器。
+十二组覆盖 BLE、板载传感器、UI runtime、设备配置、健身核心、IMU pipeline、动作相位、功耗/UI、会话传输、会话存储、训练引擎和总协调器。`motion_phase` 的合成边界测试随仓库运行；三份人工核数现场数据不随代码发布。维护者可把包含 `jumping_jack_scy1_20.txt`、`jumping_jack_scy2_20.txt`、`jumping_jack_scy3_20.txt` 的目录写入 `IMU_MOTION_PHASE_DATA_ROOT`，追加执行视觉核数为 16、15、16 次的外部回放。未配置时会明确输出 `MOTION_PHASE_EXTERNAL_REPLAY_SKIPPED`，不会把数据缺失误报为算法失败。
 
 ### 6.2 ESP-IDF 构建
 
@@ -403,7 +403,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
 完成后清理候选目录：
 
 ```powershell
-Remove-Item -LiteralPath $candidateDir, $verifyDir -Recurse -Force
+Remove-Item -LiteralPath $candidateDir -Recurse -Force
 ```
 
 训练与冻结选模方法见[Python 训练端说明](../python/README.md)。

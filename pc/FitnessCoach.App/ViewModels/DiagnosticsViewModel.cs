@@ -1443,13 +1443,13 @@ public sealed class DiagnosticsViewModel : ObservableObject, IDisposable
         if (!RawChartPaused && behindLiveSeconds <= 0.05)
         {
             // 短文案适配单页仪表盘。
-            RawChartWindowText = $"实时 · {startSeconds:F1}–{endSeconds:F1} 秒";
+            RawChartWindowText = $"实时 · {startSeconds:F1} 至 {endSeconds:F1} 秒";
             // 实时文字更新完成。
             return;
         }
 
         // 暂停或历史浏览显示实际窗口和距实时秒数。
-        RawChartWindowText = $"回看 · {startSeconds:F1}–{endSeconds:F1} 秒 · 距实时 {behindLiveSeconds:F1} 秒";
+        RawChartWindowText = $"回看 · {startSeconds:F1} 至 {endSeconds:F1} 秒 · 距实时 {behindLiveSeconds:F1} 秒";
     }
 
     /// <inheritdoc />

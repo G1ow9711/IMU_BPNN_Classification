@@ -6,40 +6,40 @@
     "license":  "SIL Open Font License 1.1",
     "license_file":  "esp32/firmware/components/ui/fonts/OFL-1.1.txt",
     "ascii_range":  "0x20-0x7E",
-    "chinese_glyph_count":  161,
-    "chinese_symbols":  "、。下中亮件休体作佩保信候做停储充入全关内准击别前动助千卡原取右合后启回在地坐型备复始存安完对导小屈屏已幕度建开式弓录待心忘恢息惯慧成戴手打持挥接摸收故效数整断早时昇智暂有未本机杯查检模次止正步毕毫消深点熄版牙用电码硬确禁秒稍立等系累练统继续置脑腹自蓝行见触计认训记设识诊请质走跃跑跳蹲输过运返连通配重量障静！（），：；？",
+    "chinese_glyph_count":  158,
+    "chinese_symbols":  "、。下中亮件休体作佩保信候做停储充入全关内准击别前动助千卡原取右合后启回在地坐型备复始存安完对导小屈屏已幕度建开式弓录待心忘恢息惯慧成戴手打持挥接摸收故效数整断早时智暂有未本机查检模次止正步毫消深点熄版牙用电码硬确禁秒稍立等系累练统继续置脑腹自蓝行见触计认训记设识诊请质走跃跑跳蹲输过运返连通配重量障静！（），：；？",
     "generated_fonts":  [
                             {
                                 "name":  "ui_font_noto_sans_sc_16",
                                 "size_px":  16,
                                 "bpp":  2,
                                 "file":  "esp32/firmware/components/ui/fonts/ui_font_noto_sans_sc_16.c",
-                                "bytes":  103055,
-                                "sha256":  "3320d79ef0863ebc64dbdc5a0be441084c8120b523a34265777c30d6a4d41178"
+                                "bytes":  101641,
+                                "sha256":  "4616030d3df1b91a4d719fb11330ee3a8aec770482367dc6ffef7b68ae9b2e27"
                             },
                             {
                                 "name":  "ui_font_noto_sans_sc_20",
                                 "size_px":  20,
                                 "bpp":  2,
                                 "file":  "esp32/firmware/components/ui/fonts/ui_font_noto_sans_sc_20.c",
-                                "bytes":  139272,
-                                "sha256":  "de252a0450082fcc9bf03ae040ae3fd74769aaa464ffcc11d2ea5851e4060adc"
+                                "bytes":  137243,
+                                "sha256":  "c9cfae9b0a507f8f9454e153c224b90dcad7efc0fa766e0b1c08a77d4bcd9905"
                             },
                             {
                                 "name":  "ui_font_noto_sans_sc_28",
                                 "size_px":  28,
                                 "bpp":  2,
                                 "file":  "esp32/firmware/components/ui/fonts/ui_font_noto_sans_sc_28.c",
-                                "bytes":  229433,
-                                "sha256":  "de4c01a1adc0f248181e45ee76a51717f6e254a216d67a149502cfe05fa6b804"
+                                "bytes":  225993,
+                                "sha256":  "173d199e698bf9b7fcd19a18e3dd16314ce2974a0fde27c93c79d55ac799c506"
                             },
                             {
                                 "name":  "ui_font_noto_sans_sc_36",
                                 "size_px":  36,
                                 "bpp":  2,
                                 "file":  "esp32/firmware/components/ui/fonts/ui_font_noto_sans_sc_36.c",
-                                "bytes":  348543,
-                                "sha256":  "dd03d91495518372b933d274f5d914487a0712746b0dbb97f273fae885808a1f"
+                                "bytes":  343100,
+                                "sha256":  "33e2d93aa4998ba17660da43a9e3cc44049a38e3f6f1742d3d4dc3fd50dde1d4"
                             }
                         ]
 }

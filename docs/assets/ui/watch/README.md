@@ -1,6 +1,6 @@
 # 手表界面预览图
 
-这些图片由 `docs/tools/watch_ui_preview/watch_ui_preview.py` 使用 Pillow 离屏绘制，固定复现当前手表页面的产品语义、信息层级和交互状态。它们不是对 LVGL 帧缓冲的逐像素抓取，也不能替代真板显示、触摸、圆角安全区和刷新稳定性验收。
+`docs/tools/watch_ui_preview/watch_ui_preview.py` 使用 Pillow 离屏绘制这些图片，固定复现当前手表页面的产品语义、信息层级和交互状态。图片用于文档和布局回归；它们不等同于 LVGL 帧缓冲抓取，真板显示、触摸、圆角安全区和刷新稳定性仍需单独验收。
 
 ## 生成
 
@@ -37,7 +37,7 @@ python .\docs\tools\watch_ui_preview\watch_ui_preview.py --export-png .\docs\ass
 
 图片固定为 `410×502 RGB`。批量导出同时生成 `manifest.json`，记录生成器源码 SHA-256、页面变体、尺寸和图片摘要；清单明确标注 `PixelEquivalentToLvgl=false`。
 
-## 真板验收边界
+## 图片无法代替的真板检查
 
 文档发布前仍需独立验证：
 

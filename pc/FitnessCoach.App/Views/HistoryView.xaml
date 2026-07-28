@@ -7,10 +7,10 @@
         <Grid.RowDefinitions>
             <!-- 筛选和导出工具栏按内容高度布局。 -->
             <RowDefinition Height="Auto" />
-            <!-- 历史表格占用剩余主区域。 -->
-            <RowDefinition Height="*" />
-            <!-- 选中会话详情最多占页面约三分之一。 -->
+            <!-- 历史表格按实际记录使用有限高度，避免少量记录形成巨大空表格。 -->
             <RowDefinition Height="Auto" />
+            <!-- 选中会话详情占用剩余空间。 -->
+            <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
         <!-- 筛选工具栏允许窄窗口横向滚动，避免控件被截断。 -->
@@ -50,7 +50,9 @@
                   IsReadOnly="True"
                   SelectionMode="Single"
                   SelectionUnit="FullRow"
-                  MinHeight="220">
+                  MinHeight="180"
+                  MaxHeight="300"
+                  VerticalAlignment="Top">
             <!-- 使用稳定显示列，原始数值仍保留在领域摘要中供表格导出使用。 -->
             <DataGrid.Columns>
                 <!-- 会话开始时间列。 -->
@@ -68,27 +70,135 @@
             </DataGrid.Columns>
         </DataGrid>
 
-        <!-- 状态和选中会话详情卡片。 -->
+        <!-- 状态和选中会话详情使用剩余空间形成可扫读仪表板。 -->
         <Border Grid.Row="2"
                 Background="{StaticResource CardBrush}"
                 BorderBrush="{StaticResource BorderBrush}"
                 BorderThickness="1"
-                CornerRadius="12"
-                Padding="16"
-                Margin="0,12,0,0"
-                MaxHeight="260">
-            <!-- 详情内容在空间不足时垂直滚动。 -->
-            <ScrollViewer VerticalScrollBarVisibility="Auto">
-                <!-- 状态、标题和完整指标纵向排列。 -->
-                <StackPanel>
-                    <!-- 显示筛选和导出结果。 -->
-                    <TextBlock Text="{Binding StatusMessage}" Foreground="{StaticResource SecondaryTextBrush}" TextWrapping="Wrap" Margin="0,0,0,10" />
-                    <!-- 详情标题。 -->
-                    <TextBlock Text="选中会话详情" FontSize="17" FontWeight="SemiBold" Margin="0,0,0,8" />
-                    <!-- 未选择时绑定为空；选择后显示设备、时间、总量和逐动作指标。 -->
-                    <TextBlock Text="{Binding SelectedSession.DetailsText}" FontFamily="Consolas" TextWrapping="Wrap" />
-                </StackPanel>
-            </ScrollViewer>
+                CornerRadius="14"
+                Padding="22"
+                Margin="0,14,0,0">
+            <!-- 状态条位于顶部，下方两列分别展示训练成果和会话信息。 -->
+            <Grid>
+                <!-- 状态按内容高度，详情占剩余高度。 -->
+                <Grid.RowDefinitions>
+                    <!-- 筛选和同步状态行。 -->
+                    <RowDefinition Height="Auto" />
+                    <!-- 会话详情行。 -->
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+                <!-- 显示筛选、同步和导出结果。 -->
+                <TextBlock Grid.Row="0"
+                           Text="{Binding StatusMessage}"
+                           Foreground="{StaticResource SecondaryTextBrush}"
+                           TextWrapping="Wrap" />
+                <!-- 训练成果与会话信息使用左右两列。 -->
+                <Grid Grid.Row="1" Margin="0,18,0,0">
+                    <!-- 成果列略宽，中央分隔线固定一像素。 -->
+                    <Grid.ColumnDefinitions>
+                        <!-- 训练成果列。 -->
+                        <ColumnDefinition Width="1.05*" />
+                        <!-- 中央分隔线。 -->
+                        <ColumnDefinition Width="1" />
+                        <!-- 会话信息列。 -->
+                        <ColumnDefinition Width="0.95*" />
+                    </Grid.ColumnDefinitions>
+                    <!-- 左侧突出动作、时长和能量。 -->
+                    <Grid Grid.Column="0" Margin="0,0,28,0">
+                        <!-- 动作标题按内容高度，指标垂直居中。 -->
+                        <Grid.RowDefinitions>
+                            <!-- 标题行。 -->
+                            <RowDefinition Height="Auto" />
+                            <!-- 指标行。 -->
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+                        <!-- 选中会话标题。 -->
+                        <StackPanel Grid.Row="0">
+                            <!-- 分区标签。 -->
+                            <TextBlock Text="选中会话" Style="{StaticResource EyebrowTextStyle}" />
+                            <!-- 动作摘要允许显示多个动作，但正常单动作会话保持单行。 -->
+                            <TextBlock Text="{Binding SelectedSession.ActionsText}"
+                                       FontSize="26"
+                                       FontWeight="SemiBold"
+                                       TextWrapping="Wrap"
+                                       Margin="0,6,0,0" />
+                        </StackPanel>
+                        <!-- 时长和能量两项等宽排列。 -->
+                        <Grid Grid.Row="1" VerticalAlignment="Center">
+                            <!-- 两项指标等宽。 -->
+                            <Grid.ColumnDefinitions>
+                                <!-- 时长列。 -->
+                                <ColumnDefinition Width="*" />
+                                <!-- 能量列。 -->
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <!-- 时长指标。 -->
+                            <StackPanel Grid.Column="0">
+                                <!-- 指标名称。 -->
+                                <TextBlock Text="训练时长" Foreground="{StaticResource SecondaryTextBrush}" FontSize="11" />
+                                <!-- 设备单调时长。 -->
+                                <TextBlock Text="{Binding SelectedSession.DurationText}"
+                                           FontSize="24"
+                                           FontWeight="SemiBold"
+                                           Margin="0,6,0,0" />
+                            </StackPanel>
+                            <!-- 能量指标使用左分隔线。 -->
+                            <Border Grid.Column="1"
+                                    BorderBrush="{StaticResource BorderBrush}"
+                                    BorderThickness="1,0,0,0"
+                                    Padding="24,0">
+                                <!-- 能量指标两级文字。 -->
+                                <StackPanel>
+                                    <!-- 指标名称。 -->
+                                    <TextBlock Text="能量消耗" Foreground="{StaticResource SecondaryTextBrush}" FontSize="11" />
+                                    <!-- 会话总千卡。 -->
+                                    <TextBlock Text="{Binding SelectedSession.CaloriesText}"
+                                               Foreground="{StaticResource AccentBrush}"
+                                               FontSize="24"
+                                               FontWeight="SemiBold"
+                                               Margin="0,6,0,0" />
+                                </StackPanel>
+                            </Border>
+                        </Grid>
+                    </Grid>
+                    <!-- 中央细线分隔成果和会话来源。 -->
+                    <Border Grid.Column="1"
+                            Background="{StaticResource BorderBrush}" />
+                    <!-- 右侧会话元数据使用标签和值两列。 -->
+                    <Grid Grid.Column="2" Margin="28,0,0,0" VerticalAlignment="Center">
+                        <!-- 标签列固定宽度，值列使用剩余空间。 -->
+                        <Grid.ColumnDefinitions>
+                            <!-- 标签列。 -->
+                            <ColumnDefinition Width="78" />
+                            <!-- 值列。 -->
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <!-- 四项元数据按内容高度排列。 -->
+                        <Grid.RowDefinitions>
+                            <!-- 开始时间行。 -->
+                            <RowDefinition Height="Auto" />
+                            <!-- 结束时间行。 -->
+                            <RowDefinition Height="Auto" />
+                            <!-- 设备行。 -->
+                            <RowDefinition Height="Auto" />
+                            <!-- 原因行。 -->
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <!-- 开始时间。 -->
+                        <TextBlock Grid.Row="0" Text="开始" Foreground="{StaticResource SecondaryTextBrush}" Margin="0,7" />
+                        <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding SelectedSession.StartedAtText}" FontWeight="SemiBold" Margin="0,7" />
+                        <!-- 结束时间。 -->
+                        <TextBlock Grid.Row="1" Text="结束" Foreground="{StaticResource SecondaryTextBrush}" Margin="0,7" />
+                        <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding SelectedSession.EndedAtText}" FontWeight="SemiBold" Margin="0,7" />
+                        <!-- 来源设备。 -->
+                        <TextBlock Grid.Row="2" Text="设备" Foreground="{StaticResource SecondaryTextBrush}" Margin="0,7" />
+                        <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding SelectedSession.DeviceId}" FontWeight="SemiBold" Margin="0,7" />
+                        <!-- 会话结束原因。 -->
+                        <TextBlock Grid.Row="3" Text="结束原因" Foreground="{StaticResource SecondaryTextBrush}" Margin="0,7" />
+                        <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding SelectedSession.EndReason}" FontWeight="SemiBold" Margin="0,7" />
+                    </Grid>
+                </Grid>
+            </Grid>
         </Border>
     </Grid>
 </UserControl>

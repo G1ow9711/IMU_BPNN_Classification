@@ -841,8 +841,8 @@ static int test_boundaries(void)
 /* 主函数串行运行全部测试，任一失败立即返回非零。 */
 int main(int argc, char **argv)
 {
-    /* 运行器必须传入 scy1、scy2、scy3 三份真数据绝对路径。 */
-    CHECK(argc == 4);
+    /* 公开克隆可不传外部数据；维护者真板门必须一次传齐 scy1、scy2、scy3 三份绝对路径。 */
+    CHECK((argc == 1) || (argc == 4));
     /* 验证两相位完整周期。 */
     CHECK(test_two_phase_cycle() == 0);
     /* 验证开合跳连续周期不依赖整机静止。 */
@@ -861,12 +861,19 @@ int main(int argc, char **argv)
     CHECK(test_periodic_pair_counter_counts_ten_acceleration_cycles() == 0);
     /* 验证采样间断不清除已完成峰谷累计。 */
     CHECK(test_periodic_pair_gap_preserves_completed_total() == 0);
-    /* scy1 用户视觉核数为 16。 */
-    CHECK(test_periodic_pair_real_dataset(argv[1], 16ULL) == 0);
-    /* scy2 用户视觉核数为 15。 */
-    CHECK(test_periodic_pair_real_dataset(argv[2], 15ULL) == 0);
-    /* scy3 用户视觉核数为 16。 */
-    CHECK(test_periodic_pair_real_dataset(argv[3], 16ULL) == 0);
+    /* 仅当三份外部数据齐全时执行人工视觉核数回放，公开自包含门不依赖仓库外文件。 */
+    if (argc == 4) {
+        /* scy1 用户视觉核数为 16。 */
+        CHECK(test_periodic_pair_real_dataset(argv[1], 16ULL) == 0);
+        /* scy2 用户视觉核数为 15。 */
+        CHECK(test_periodic_pair_real_dataset(argv[2], 15ULL) == 0);
+        /* scy3 用户视觉核数为 16。 */
+        CHECK(test_periodic_pair_real_dataset(argv[3], 16ULL) == 0);
+    }
+    else {
+        /* 输出稳定跳过标记，说明合成回归已执行而外部数据门未提供。 */
+        (void)printf("motion_phase external replay: SKIP (dataset not supplied)\n");
+    }
     /* 验证异常边界。 */
     CHECK(test_boundaries() == 0);
     /* 输出稳定成功标记和断言总数。 */

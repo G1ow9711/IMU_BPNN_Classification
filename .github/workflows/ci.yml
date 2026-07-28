@@ -1,0 +1,86 @@
+# 工作流名称直接说明覆盖对象，便于教程读者从 Actions 页面定位验证结果。
+name: 教程工程持续集成
+
+# 主分支提交和拉取请求都执行同一组公开可复现检查。
+on:
+  # main 更新后保存一份可追溯的基线结果。
+  push:
+    # 只监控正式发布分支，避免临时分支重复消耗额度。
+    branches:
+      - main
+  # 拉取请求在合并前验证三个工程的公开入口。
+  pull_request:
+
+# 默认只授予读取仓库内容的权限，测试不需要写入 Issue、Release 或包仓库。
+permissions:
+  contents: read
+
+# 同一分支的新提交到达时取消旧运行，避免排队验证过时源码。
+concurrency:
+  # 以工作流和分支或拉取请求引用组成互斥键。
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # 新运行已经覆盖旧提交，允许取消仍在执行的旧任务。
+  cancel-in-progress: true
+
+# 两个作业按操作系统能力分开：Python 语法检查使用 Linux，现有 PowerShell/GCC 主机测试与 WPF 使用 Windows。
+jobs:
+  # Python 公共源码不需要训练数据或模型权重，可在 Linux 上做快速语法检查。
+  python-source:
+    # 使用 GitHub 当前 Ubuntu 长期支持镜像；镜像自带 GCC 和 PowerShell。
+    runs-on: ubuntu-latest
+    # 设置十分钟上限，防止脚本等待外部设备或私有数据。
+    timeout-minutes: 10
+    steps:
+      # 检出当前提交，后续命令都从仓库根运行。
+      - name: 检出源码
+        uses: actions/checkout@v4
+
+      # 固定 Python 3.12，与本项目训练和本地验证环境保持同代。
+      - name: 配置 Python
+        uses: actions/setup-python@v5
+        with:
+          # 公开门只做语法编译，不下载训练依赖或数据集。
+          python-version: "3.12"
+
+      # 编译全部公开 Python 模块，捕获语法错误和编码错误。
+      - name: 检查 Python 工程
+        run: python -m compileall -q python
+
+  # ESP32 主机脚本显式调用 powershell.exe，WPF 也依赖 Windows Desktop SDK，因此统一放在 Windows runner。
+  esp32-host-and-pc-windows:
+    # 使用 GitHub 当前 Windows 长期支持镜像。
+    runs-on: windows-latest
+    # 十二组 C 主机测试和首次还原 Windows Desktop 引用耗时较长，设置二十五分钟上限。
+    timeout-minutes: 25
+    # 关闭遥测和首次运行横幅，使日志只保留项目构建与测试结果。
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_NOLOGO: "true"
+    steps:
+      # 检出与 Linux 作业相同的当前提交。
+      - name: 检出源码
+        uses: actions/checkout@v4
+
+      # 安装项目目标框架 .NET 8 SDK 和 Windows Desktop 运行时。
+      - name: 配置 .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          # 允许最新 8.0 补丁，目标框架仍固定为 net8.0。
+          dotnet-version: "8.0.x"
+
+      # 执行 BLE、传感器替身、UI、计数、存储和协调器十二组 C 主机测试；不连接真板。
+      - name: 运行 ESP32 主机测试
+        shell: powershell
+        run: ./esp32/host_tests/run_all.ps1 -StopOnFailure
+
+      # Release 构建七项目 Solution，警告和错误会直接使作业失败。
+      - name: 构建上位机
+        run: dotnet build pc/FitnessCoach.sln -c Release --nologo --verbosity minimal
+
+      # 复用上一步产物执行协议、仓储、ViewModel、Windows BLE 和 UI 合同测试。
+      - name: 运行上位机综合测试
+        run: dotnet run --project pc/FitnessCoach.Tests/FitnessCoach.Tests.csproj -c Release --no-build --nologo
+
+      # 会话分页补传项目不在 Solution 中，单独构建和执行。
+      - name: 运行会话补传测试
+        run: dotnet run --project pc/FitnessCoach.SessionTransfer.Tests/FitnessCoach.SessionTransfer.Tests.csproj -c Release --nologo

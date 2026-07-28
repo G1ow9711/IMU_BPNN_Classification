@@ -8,8 +8,12 @@ int board_runtime_backend_init(board_runtime_t *runtime)
     runtime->diagnostics.real_backend = false;
     /* Mock 屏幕始终可创建，便于纯状态测试。 */
     runtime->diagnostics.display_ready = true;
+    /* 使用 runtime 自身地址模拟非空显示句柄，使显示唤醒合同可在主机测试中执行。 */
+    runtime->platform_display = (void *)runtime;
     /* Mock 触摸始终可用。 */
     runtime->diagnostics.touch_ready = true;
+    /* 使用同一稳定地址模拟触摸句柄；Mock 不解引用该不透明值。 */
+    runtime->platform_touch = (void *)runtime;
     /* Mock I2C 总线视为可用。 */
     runtime->diagnostics.i2c_ready = true;
     /* Mock 使用 runtime 自身地址作为非空不透明总线句柄。 */
@@ -82,6 +86,15 @@ int board_runtime_backend_set_storage(board_runtime_t *runtime, bool enabled)
     /* 保存挂载状态。 */
     runtime->diagnostics.storage_mounted = enabled;
     /* 返回成功。 */
+    return 0;
+}
+
+/* Mock 模拟成功唤醒 taskLVGL，供主机测试验证上层非重启恢复合同。 */
+int board_runtime_backend_wake_display_task(board_runtime_t *runtime)
+{
+    /* Mock 没有真实显示任务；读取参数仅保持与真实后端一致的签名。 */
+    (void)runtime;
+    /* 返回零表示用户唤醒事件已被平台接受。 */
     return 0;
 }
 

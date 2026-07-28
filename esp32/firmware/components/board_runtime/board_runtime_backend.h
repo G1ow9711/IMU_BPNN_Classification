@@ -16,6 +16,8 @@ int board_runtime_backend_set_touch_active(board_runtime_t *runtime, bool enable
 int board_runtime_backend_set_speaker(board_runtime_t *runtime, bool enabled);
 /* 挂载或卸载 TF 卡。 */
 int board_runtime_backend_set_storage(board_runtime_t *runtime, bool enabled);
+/* 唤醒平台 LVGL 任务的事件等待；不得在后端内重建页面或重启设备。 */
+int board_runtime_backend_wake_display_task(board_runtime_t *runtime);
 /* 获取平台 LVGL 互斥锁。 */
 bool board_runtime_backend_lvgl_lock(board_runtime_t *runtime, uint32_t timeout_ms);
 /* 释放平台 LVGL 互斥锁。 */

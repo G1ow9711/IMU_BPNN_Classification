@@ -12,6 +12,8 @@ CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y
 CONFIG_SPIRAM_RODATA=y
+# 所有 FreeRTOS 任务栈固定使用片内 RAM；Flash cache 关闭时 PSRAM 不可访问，禁止外部任务栈。
+# CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM is not set
 # 科技风页面包含大量小型 LVGL 对象；阈值为 0 让普通 malloc 优先使用 PSRAM，避免它们切碎 BLE 和任务栈依赖的片内堆。
 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=0
 # 显式保留 32 KiB 片内 RAM，只供 FreeRTOS 内部栈、显示 DMA 与必须在 Flash cache 关闭时访问的数据。

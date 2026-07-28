@@ -397,6 +397,23 @@ board_runtime_result_t board_runtime_request_pmic_shutdown(board_runtime_t *runt
     return BOARD_RUNTIME_OK;
 }
 
+/* 通过平台后端唤醒官方 taskLVGL；不直接访问 LVGL 对象或显示锁。 */
+board_runtime_result_t board_runtime_wake_display_task(board_runtime_t *runtime)
+{
+    /* 只有板级运行时完成初始化且持有显示句柄时，唤醒事件才有接收者。 */
+    if ((runtime == NULL) || !runtime->initialized ||
+        (runtime->platform_display == NULL)) {
+        /* 未就绪时返回明确状态，禁止上层把无效唤醒误记为恢复成功。 */
+        return BOARD_RUNTIME_ERR_NOT_READY;
+    }
+    /* 调用真实 esp_lvgl_port 事件队列或主机 Mock；不获取 LVGL 互斥锁。 */
+    const int result = board_runtime_backend_wake_display_task(runtime);
+    /* 保存平台返回码，供诊断页和串口日志追查唤醒失败。 */
+    runtime->diagnostics.last_platform_error = result;
+    /* 平台零值表示事件已入队；其它结果统一映射为可恢复的 I/O 错误。 */
+    return result == 0 ? BOARD_RUNTIME_OK : BOARD_RUNTIME_ERR_IO;
+}
+
 /* 获取 LVGL 锁。 */
 bool board_runtime_lvgl_lock(void *runtime_context, uint32_t timeout_ms)
 {

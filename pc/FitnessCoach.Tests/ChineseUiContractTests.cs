@@ -23,6 +23,10 @@ internal static partial class ChineseUiContractTests
     [GeneratedRegex("[A-Za-z]", RegexOptions.CultureInvariant)]
     private static partial Regex LatinLetterRegex();
 
+    // 匹配 XAML 中用于 Segoe Fluent Icons 的完整十六进制字符实体；实体本身不是用户可见英文。
+    [GeneratedRegex("^&#x[0-9A-Fa-f]+;$", RegexOptions.CultureInvariant)]
+    private static partial Regex UnicodeCharacterEntityRegex();
+
     /// <summary>顺序执行静态 XAML 与动态视图模型中文化检查。</summary>
     public static async Task RunAllAsync()
     {
@@ -100,9 +104,16 @@ internal static partial class ChineseUiContractTests
                     continue;
                 }
 
-                // 静态可见文案不得夹带英文缩写；技术值应放在绑定数据区而非标签中。
+                // 用户指定产品品牌允许精确的 ESP32 平台名，其它英文缩写仍应放在绑定数据区而非标签中。
+                bool isExactProductBrand = string.Equals(
+                    visibleText,
+                    "ESP32智慧运动助手",
+                    StringComparison.Ordinal);
+                // Windows 系统图标以单个 Unicode 字符实体保存，渲染后不会显示实体源码。
+                bool isSystemIconEntity = UnicodeCharacterEntityRegex().IsMatch(visibleText);
+                // 静态可见文案除精确品牌和单个系统图标实体外不得夹带英文字母。
                 Assert(
-                    !LatinLetterRegex().IsMatch(visibleText),
+                    isExactProductBrand || isSystemIconEntity || !LatinLetterRegex().IsMatch(visibleText),
                     $"用户可见 XAML 文案仍含英文：{Path.GetRelativePath(repositoryRoot, xamlFile)} -> {visibleText}");
             }
         }

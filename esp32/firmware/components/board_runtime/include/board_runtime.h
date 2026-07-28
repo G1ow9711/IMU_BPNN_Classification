@@ -168,6 +168,11 @@ board_runtime_result_t board_runtime_read_rtc_unix_seconds(
     uint64_t *unix_seconds);
 /* 请求 AXP2101 安全关机；未注册 PMIC 驱动时返回 UNSUPPORTED。 */
 board_runtime_result_t board_runtime_request_pmic_shutdown(board_runtime_t *runtime);
+/*
+ * 向厂家 taskLVGL 发送用户唤醒事件；仅解除事件等待，不直接读取触摸、不刷新页面。
+ * 该接口供独立健康监督在发现显示任务长时间无进展时使用，禁止升级为整机重启。
+ */
+board_runtime_result_t board_runtime_wake_display_task(board_runtime_t *runtime);
 /* 获取 LVGL 互斥锁；runtime_context 必须非空且指向有效 board_runtime_t，生命周期覆盖同步调用；timeout_ms=0 表示无限等待。 */
 bool board_runtime_lvgl_lock(void *runtime_context, uint32_t timeout_ms);
 /* 释放 LVGL 互斥锁；runtime_context 必须非空且生命周期覆盖同步调用，必须与成功的 lock 成对调用。 */

@@ -6,29 +6,29 @@
     <!-- 全局资源定义阶段一上位机的视觉系统、交互反馈和页面映射。 -->
     <Application.Resources>
         <!-- 页面使用带轻微冷色的浅灰底，减少纯黑大面积造成的压迫。 -->
-        <SolidColorBrush x:Key="AppBackgroundBrush" Color="#F4F7FB" />
+        <SolidColorBrush x:Key="AppBackgroundBrush" Color="#F2F5FA" />
         <!-- 侧栏使用稳定石墨蓝，形成明确的应用导航区域。 -->
-        <SolidColorBrush x:Key="SidebarBrush" Color="#101828" />
+        <SolidColorBrush x:Key="SidebarBrush" Color="#0B1220" />
         <!-- 一级卡片使用白色表面，承载主要任务。 -->
         <SolidColorBrush x:Key="CardBrush" Color="#FFFFFF" />
         <!-- 二级表面用于列表、图表和只读信息块。 -->
-        <SolidColorBrush x:Key="SubtleSurfaceBrush" Color="#F8FAFC" />
+        <SolidColorBrush x:Key="SubtleSurfaceBrush" Color="#F7F9FC" />
         <!-- 分隔线使用低对比冷灰色，不与内容争夺注意力。 -->
-        <SolidColorBrush x:Key="BorderBrush" Color="#E4EAF1" />
+        <SolidColorBrush x:Key="BorderBrush" Color="#DCE4EE" />
         <!-- 深色分隔线用于侧栏内部。 -->
-        <SolidColorBrush x:Key="SidebarBorderBrush" Color="#27344A" />
+        <SolidColorBrush x:Key="SidebarBorderBrush" Color="#1C2A3D" />
         <!-- 主文字使用深石墨蓝，保证浅色背景可读性。 -->
-        <SolidColorBrush x:Key="PrimaryTextBrush" Color="#172033" />
+        <SolidColorBrush x:Key="PrimaryTextBrush" Color="#14213D" />
         <!-- 次文字使用中性蓝灰，表达说明和次要状态。 -->
-        <SolidColorBrush x:Key="SecondaryTextBrush" Color="#667085" />
+        <SolidColorBrush x:Key="SecondaryTextBrush" Color="#64748B" />
         <!-- 反色文字用于深色侧栏。 -->
         <SolidColorBrush x:Key="InverseTextBrush" Color="#F8FAFC" />
-        <!-- 主强调色使用克制青蓝，统一连接、选择和关键动作。 -->
-        <SolidColorBrush x:Key="AccentBrush" Color="#0F8FA8" />
+        <!-- 主强调色使用清晰电蓝，统一连接、选择和关键训练动作。 -->
+        <SolidColorBrush x:Key="AccentBrush" Color="#1677FF" />
         <!-- 强调色浅底用于选中、状态胶囊和辅助卡片。 -->
-        <SolidColorBrush x:Key="AccentSoftBrush" Color="#E6F5F7" />
+        <SolidColorBrush x:Key="AccentSoftBrush" Color="#EAF3FF" />
         <!-- 成功色只表示已连接、质量正常或模型有效。 -->
-        <SolidColorBrush x:Key="SuccessBrush" Color="#159A71" />
+        <SolidColorBrush x:Key="SuccessBrush" Color="#169B70" />
         <!-- 成功浅底保证状态标签不依赖纯色文字。 -->
         <SolidColorBrush x:Key="SuccessSoftBrush" Color="#E8F7F1" />
         <!-- 警告色表示需要注意但可恢复的状态。 -->
@@ -44,10 +44,10 @@
 
         <!-- 卡片阴影仅用于一级表面，模糊半径保持克制。 -->
         <DropShadowEffect x:Key="CardShadowEffect"
-                          Color="#180F1F33"
-                          BlurRadius="18"
-                          ShadowDepth="2"
-                          Opacity="0.18" />
+                          Color="#14213D"
+                          BlurRadius="12"
+                          ShadowDepth="1"
+                          Opacity="0.10" />
 
         <!-- 所有窗口使用浅色页面背景和中文优先字体。 -->
         <Style TargetType="Window">
@@ -103,10 +103,10 @@
             <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
             <!-- 只使用一像素边框。 -->
             <Setter Property="BorderThickness" Value="1" />
-            <!-- 统一十六像素圆角。 -->
-            <Setter Property="CornerRadius" Value="16" />
-            <!-- 统一二十四像素内边距。 -->
-            <Setter Property="Padding" Value="24" />
+            <!-- 统一十四像素圆角，保持桌面产品的紧凑感。 -->
+            <Setter Property="CornerRadius" Value="14" />
+            <!-- 统一二十二像素内边距。 -->
+            <Setter Property="Padding" Value="22" />
             <!-- 一级卡片使用轻阴影。 -->
             <Setter Property="Effect" Value="{StaticResource CardShadowEffect}" />
         </Style>
@@ -120,7 +120,7 @@
             <!-- 使用一像素边框。 -->
             <Setter Property="BorderThickness" Value="1" />
             <!-- 二级圆角略小。 -->
-            <Setter Property="CornerRadius" Value="12" />
+            <Setter Property="CornerRadius" Value="10" />
             <!-- 二级内容使用十六像素内边距。 -->
             <Setter Property="Padding" Value="16" />
         </Style>
@@ -176,7 +176,7 @@
                                     Background="{TemplateBinding Background}"
                                     BorderBrush="{TemplateBinding BorderBrush}"
                                     BorderThickness="{TemplateBinding BorderThickness}"
-                                    CornerRadius="10"
+                                CornerRadius="12"
                                     Padding="{TemplateBinding Padding}">
                                 <!-- 按模板对齐方式显示文字或自定义内容。 -->
                                 <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
@@ -188,7 +188,7 @@
                             <Border x:Name="FocusRing"
                                     BorderBrush="{StaticResource AccentBrush}"
                                     BorderThickness="2"
-                                    CornerRadius="10"
+                                    CornerRadius="12"
                                     Opacity="0"
                                     IsHitTestVisible="False" />
                         </Grid>
@@ -252,7 +252,7 @@
             <!-- 使用强调色文字。 -->
             <Setter Property="Foreground" Value="{StaticResource AccentBrush}" />
             <!-- 使用浅色边框。 -->
-            <Setter Property="BorderBrush" Value="#B8DDE3" />
+            <Setter Property="BorderBrush" Value="#B9D6FF" />
         </Style>
 
         <!-- 危险按钮使用浅红底和红色文字。 -->
@@ -280,7 +280,7 @@
             <!-- 导航按钮使用十二像素圆角。 -->
             <Setter Property="MinHeight" Value="48" />
             <!-- 导航内边距略大。 -->
-            <Setter Property="Padding" Value="14,10" />
+            <Setter Property="Padding" Value="12,10" />
         </Style>
 
         <!-- 输入框使用白色表面和清晰焦点边框。 -->

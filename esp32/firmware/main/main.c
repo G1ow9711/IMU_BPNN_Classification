@@ -63,8 +63,6 @@
 #include "freertos/semphr.h"
 /* 引入多任务创建、延时和删除。 */
 #include "freertos/task.h"
-/* 引入可指定 PSRAM/片内能力的 ESP-IDF 任务创建接口。 */
-#include "freertos/idf_additions.h"
 /* 引入 NVS 初始化；NimBLE 绑定密钥依赖 NVS。 */
 #include "nvs.h"
 /* 引入 NVS 分区初始化；NimBLE 绑定密钥依赖 NVS。 */
@@ -91,8 +89,12 @@ static const char *const APP_TAG = "imu_handheld";
 #define APP_STACK_BOUNDARY __attribute__((noinline))
 /* 应用任务最深静态链约 10.9 KiB；16 KiB 保留约 5 KiB 中断与库调用余量。 */
 #define APP_OWNER_TASK_STACK_BYTES (16U * 1024U)
-/* UI 渲染任务使用 8 KiB 栈；该任务不执行 Flash/NVS 写入，可安全放入板载 PSRAM。 */
+/* UI 渲染任务使用 8 KiB 片内栈；Flash 写入期间 PSRAM 不可访问，任务栈禁止放外部内存。 */
 #define APP_UI_TASK_STACK_BYTES (8U * 1024U)
+/* UI 任务每 500 ms 醒来一次更新健康节拍；无页面变化时不调用 LVGL、不产生刷新。 */
+#define APP_UI_HEALTH_POLL_MS UINT32_C(500)
+/* UI 或官方 taskLVGL 连续 8 秒无进展才判定故障，覆盖正常 Flash 写入和短时调度抖动。 */
+#define APP_UI_HEALTH_STALL_MS UINT32_C(8000)
 /* LittleFS VFS 根目录固定为 /littlefs。 */
 #define APP_LITTLEFS_BASE_PATH "/littlefs"
 /* 双槽摘要文件固定放在内部 Flash LittleFS。 */
@@ -356,6 +358,24 @@ static session_file_backend_t s_session_file_backend;
 static session_transfer_service_t s_session_transfer;
 /* LVGL 页面渲染器。 */
 static ui_lvgl_renderer_t s_ui_renderer;
+/* 保存 ui_render 任务句柄，仅供低频健康诊断读取片内栈余量，不用于跨任务删除或挂起。 */
+static TaskHandle_t s_ui_task_handle;
+/* UI 任务最近一次完成等待或渲染的单调毫秒低 32 位；单写单读且对齐访问原子。 */
+static volatile uint32_t s_ui_task_heartbeat_ms;
+/* 标记独立 BLE 任务是否已建立 UI/LVGL 健康基线。 */
+static bool s_ui_health_armed;
+/* 保存建立健康基线的单调毫秒低 32 位，启动宽限与回绕差值均用无符号运算。 */
+static uint32_t s_ui_health_armed_ms;
+/* 保存最近观察到的官方 taskLVGL 节拍值。 */
+static uint32_t s_ui_health_last_lvgl_heartbeat;
+/* 保存官方 taskLVGL 最近一次推进的单调毫秒低 32 位。 */
+static uint32_t s_ui_health_last_lvgl_progress_ms;
+/* 标记健康监督已观察到显示链停顿；恢复后才清除，防止每秒重复刷日志。 */
+static bool s_ui_health_stall_active;
+/* 保存最近一次向 taskLVGL 发送用户唤醒事件的单调毫秒低 32 位。 */
+static uint32_t s_ui_health_last_wake_ms;
+/* 统计当前连续停顿期间的唤醒次数，串口可据此判断瞬态延迟或持续失活。 */
+static uint32_t s_ui_health_wake_attempts;
 /* NimBLE 主机任务到应用任务的最新配对码/清除事件邮箱；不保存动态指针。 */
 static ui_app_pairing_mailbox_t s_pairing_mailbox;
 /* 保存 BLE 命令同步 broker 单槽。 */
@@ -2514,12 +2534,16 @@ static void app_ui_task(void *argument)
     (void)argument;
     /* 保存页面快照。 */
     ui_context_t ui;
-    /* 永久等待最新页面。 */
+    /* 任务启动即发布第一份健康节拍，监督端不会把正常队列等待误判为失活。 */
+    s_ui_task_heartbeat_ms = (uint32_t)app_now_ms();
+    /* 永久等待最新页面，同时按固定周期更新任务健康节拍。 */
     while (true) {
-        /* 所有页面都只等待领域层新快照；准备页不再用本地倒计时制造额外唤醒和重绘。 */
-        const TickType_t wait_ticks = portMAX_DELAY;
+        /* 有界等待只用于健康观测；超时不会修改页面或调用任何 LVGL API。 */
+        const TickType_t wait_ticks = pdMS_TO_TICKS(APP_UI_HEALTH_POLL_MS);
         /* 标记本轮是否收到领域层新快照。 */
         const bool received = xQueueReceive(s_ui_queue, &ui, wait_ticks) == pdPASS;
+        /* 能从队列等待返回证明 ui_render 任务仍被调度；低 32 位约 49.7 天自然回绕。 */
+        s_ui_task_heartbeat_ms = (uint32_t)app_now_ms();
         /* 只有收到新的领域事实才渲染，减少 QSPI 局部刷新并保持官方异步显示路径。 */
         if (received) {
             /* 渲染失败只记录，业务状态仍保持。 */
@@ -2529,7 +2553,131 @@ static void app_ui_task(void *argument)
                 /* 记录错误。 */
                 ESP_LOGE(APP_TAG, "LVGL render failed=%d", (int)status);
             }
+            /* 渲染调用已经返回；再次更新时间可区分队列活着但 renderer 内部卡住。 */
+            s_ui_task_heartbeat_ms = (uint32_t)app_now_ms();
         }
+    }
+}
+
+/*
+ * 从独立 BLE 任务监督 ui_render 与官方 taskLVGL。
+ *
+ * ui_render 节拍证明按值快照消费任务仍能调度；renderer 内的 LVGL timer 节拍证明官方
+ * `lv_timer_handler()`、触摸读取和刷新循环仍在推进。任一链连续 8 秒停止时，仅记录两条
+ * 任务的栈余量并通过 esp_lvgl_port 用户事件解除 taskLVGL 等待；禁止因 UI 延迟重启整机。
+ */
+static void app_check_ui_health(const uint64_t now_ms)
+{
+    /* 低功耗恢复后需按面板状态重新设计监督；当前只在明确常亮产品联调模式启用。 */
+    if (!APP_BENCH_ALWAYS_ON || !s_ui_renderer.initialized) {
+        /* 未进入可监督运行域时清除基线，防止未来模式切换继承旧时间。 */
+        s_ui_health_armed = false;
+        /* 同时清除停顿状态，使未来重新启用时从干净基线开始。 */
+        s_ui_health_stall_active = false;
+        /* 清零连续唤醒次数，避免跨模式累计无意义诊断值。 */
+        s_ui_health_wake_attempts = 0U;
+        /* 安全返回。 */
+        return;
+    }
+    /* 统一使用低 32 位无符号差值，约 49.7 天回绕时仍保持正确短间隔。 */
+    const uint32_t now_low = (uint32_t)now_ms;
+    /* 读取 ui_render 单写节拍；ESP32-S3 对齐 32 位读写不会撕裂。 */
+    const uint32_t ui_task_heartbeat = s_ui_task_heartbeat_ms;
+    /* 读取只由官方 taskLVGL timer 回调递增的节拍。 */
+    const uint32_t lvgl_heartbeat =
+        ui_lvgl_renderer_get_heartbeat(&s_ui_renderer);
+    /* 首次检查只建立基线；完整 8 秒宽限允许 taskLVGL 完成启动和首帧。 */
+    if (!s_ui_health_armed) {
+        /* 标记基线有效。 */
+        s_ui_health_armed = true;
+        /* 保存启动宽限起点。 */
+        s_ui_health_armed_ms = now_low;
+        /* 保存当前 taskLVGL 节拍。 */
+        s_ui_health_last_lvgl_heartbeat = lvgl_heartbeat;
+        /* 即使当前计数仍为零，也从本次检查开始计算无进展时间。 */
+        s_ui_health_last_lvgl_progress_ms = now_low;
+        /* 本轮不判故障。 */
+        return;
+    }
+    /* taskLVGL 节拍变化表示 timer handler 已完整运行至少一轮。 */
+    if (lvgl_heartbeat != s_ui_health_last_lvgl_heartbeat) {
+        /* 保存新节拍用于下一轮比较。 */
+        s_ui_health_last_lvgl_heartbeat = lvgl_heartbeat;
+        /* 保存本次观察时刻。 */
+        s_ui_health_last_lvgl_progress_ms = now_low;
+    }
+    /* 启动宽限未结束时只积累证据，不触发恢复。 */
+    if ((uint32_t)(now_low - s_ui_health_armed_ms) < APP_UI_HEALTH_STALL_MS) {
+        /* 返回等待下一秒检查。 */
+        return;
+    }
+    /* 计算 ui_render 自身距离最后一次可调度的时间。 */
+    const uint32_t ui_task_age_ms =
+        (uint32_t)(now_low - ui_task_heartbeat);
+    /* 计算官方 taskLVGL 距离最后一次 timer handler 进展的时间。 */
+    const uint32_t lvgl_age_ms =
+        (uint32_t)(now_low - s_ui_health_last_lvgl_progress_ms);
+    /* 两条链都在 8 秒窗口内推进时系统健康。 */
+    if ((ui_task_age_ms < APP_UI_HEALTH_STALL_MS) &&
+        (lvgl_age_ms < APP_UI_HEALTH_STALL_MS)) {
+        /* 曾发生停顿时只输出一次恢复证据，正常每秒检查不刷日志。 */
+        if (s_ui_health_stall_active) {
+            /* 恢复日志包含已尝试唤醒次数，便于判断调度增强是否有效。 */
+            ESP_LOGW(
+                APP_TAG,
+                "UI_HEALTH_RECOVERED wake_attempts=%lu ui_task_age_ms=%lu lvgl_age_ms=%lu",
+                (unsigned long)s_ui_health_wake_attempts,
+                (unsigned long)ui_task_age_ms,
+                (unsigned long)lvgl_age_ms);
+            /* 两条链均已恢复推进，结束本次连续停顿。 */
+            s_ui_health_stall_active = false;
+            /* 下一次独立停顿重新从第一次唤醒开始计数。 */
+            s_ui_health_wake_attempts = 0U;
+        }
+        /* 返回；不触发页面重建或整机重启。 */
+        return;
+    }
+    /* 已进入停顿时，每 8 秒最多重试一次，避免 BLE 任务每秒挤满事件队列和串口。 */
+    if (s_ui_health_stall_active &&
+        ((uint32_t)(now_low - s_ui_health_last_wake_ms) < APP_UI_HEALTH_STALL_MS)) {
+        /* 尚未到重试窗口，保留当前业务与显示状态并等待后续节拍。 */
+        return;
+    }
+    /* 通过官方任务名取得 taskLVGL 句柄；未找到时以零余量记录，不执行危险恢复。 */
+    TaskHandle_t lvgl_task_handle = xTaskGetHandle("taskLVGL");
+    /* FreeRTOS 在 ESP-IDF 中以字节报告高水位；零表示 UI 句柄尚未建立。 */
+    const UBaseType_t ui_stack_free_bytes = s_ui_task_handle != NULL
+        ? uxTaskGetStackHighWaterMark(s_ui_task_handle)
+        : 0U;
+    /* 只在停顿路径读取 taskLVGL 高水位，避免正常 1 Hz 监督增加调度开销。 */
+    const UBaseType_t lvgl_stack_free_bytes = lvgl_task_handle != NULL
+        ? uxTaskGetStackHighWaterMark(lvgl_task_handle)
+        : 0U;
+    /* 标记连续停顿已开始，使健康恢复和限频逻辑共享同一状态。 */
+    s_ui_health_stall_active = true;
+    /* 保存本轮唤醒时刻；无符号差值可正确跨越低 32 位回绕。 */
+    s_ui_health_last_wake_ms = now_low;
+    /* 饱和前按自然无符号语义累加；实际 8 秒重试无法在设备寿命内溢出。 */
+    s_ui_health_wake_attempts += 1U;
+    /* 输出稳定键值，串口可区分调度停顿、栈逼近上限和重复唤醒。 */
+    ESP_LOGE(
+        APP_TAG,
+        "UI_HEALTH_STALL ui_task_age_ms=%lu lvgl_age_ms=%lu ui_heartbeat=%lu lvgl_heartbeat=%lu "
+        "ui_stack_free_bytes=%u lvgl_stack_free_bytes=%u wake_attempt=%lu",
+        (unsigned long)ui_task_age_ms,
+        (unsigned long)lvgl_age_ms,
+        (unsigned long)ui_task_heartbeat,
+        (unsigned long)lvgl_heartbeat,
+        (unsigned int)ui_stack_free_bytes,
+        (unsigned int)lvgl_stack_free_bytes,
+        (unsigned long)s_ui_health_wake_attempts);
+    /* 唤醒只向官方端口事件队列投递 USER 事件，不持锁、不刷新页面、不重启设备。 */
+    const board_runtime_result_t wake_status =
+        board_runtime_wake_display_task(&s_board_runtime);
+    /* 队列未就绪或已满时保留错误；下一 8 秒窗口可再次尝试。 */
+    if (wake_status != BOARD_RUNTIME_OK) {
+        /* 输出明确返回码，区分端口队列异常与任务调度延迟。 */
+        ESP_LOGE(APP_TAG, "UI_HEALTH_WAKE_FAILED status=%d", (int)wake_status);
     }
 }
 
@@ -2558,6 +2706,8 @@ static void app_ble_task(void *argument)
         if (APP_BENCH_ALWAYS_ON && !APP_BENCH_DISABLE_BLE && (now_ms >= next_ble_health_ms)) {
             /* 下一检查从当前时刻顺延 1 秒；任务短暂阻塞不会连续补跑旧周期。 */
             next_ble_health_ms = now_ms + UINT64_C(1000);
+            /* BLE 任务独立于 UI/LVGL；在同一秒级节拍监督两条显示执行链。 */
+            app_check_ui_health(now_ms);
             /* 保存启动、同步、广播、连接和射频模式快照。 */
             ble_service_nimble_runtime_status_t runtime_status;
             /* 先尝试恢复异常停止的广播；健康广播和现有连接不会被重启。 */
@@ -3749,17 +3899,16 @@ static bool app_create_tasks(void)
         NULL,
         0);
     /*
-     * UI 任务只消费按值快照并在 BSP LVGL 锁内更新对象，不执行 Flash、NVS 或 ISR 路径。
-     * 其 8 KiB 栈使用板载 8 MB PSRAM，避免产品级页面对象与 NimBLE 争抢片内任务栈。
+     * UI 任务与官方 taskLVGL 一样使用片内栈。计数事件会同时触发 LittleFS 写入；
+     * Flash cache 关闭期间 PSRAM 不可访问，因此外部任务栈会形成偶发非法访问或局部失活风险。
      */
-    const BaseType_t ui_created = xTaskCreateWithCaps(
+    const BaseType_t ui_created = xTaskCreate(
         app_ui_task,
         "ui_render",
         APP_UI_TASK_STACK_BYTES,
         NULL,
         5U,
-        NULL,
-        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        &s_ui_task_handle);
     /* BLE 发布任务。 */
     const BaseType_t ble_created = xTaskCreate(
         app_ble_task,

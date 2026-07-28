@@ -11,11 +11,21 @@
 #include "driver/i2c_master.h"
 /* 引入 ESP-IDF 错误码。 */
 #include "esp_err.h"
+/* 引入任务栈内存能力标志，确保 taskLVGL 栈位于 Flash 缓存关闭时仍可访问的片内 RAM。 */
+#include "esp_heap_caps.h"
+/* 引入官方 LVGL 端口任务配置和用户唤醒事件 API。 */
+#include "esp_lvgl_port.h"
 /* 引入 LVGL 9 输入设备开关 API。 */
 #include "lvgl.h"
 
 /* 固定 I2C 地址探测超时为 50 ms，避免坏设备阻塞启动页。 */
 #define BOARD_RUNTIME_I2C_PROBE_TIMEOUT_MS (50)
+/* taskLVGL 优先级高于 BLE 发布任务 6，低于应用所有者 9 和 QMI 采样任务 10。 */
+#define BOARD_RUNTIME_LVGL_TASK_PRIORITY (7U)
+/* 12 KiB 片内栈覆盖中文页面、触摸与异步刷新调用链，并保留运行余量。 */
+#define BOARD_RUNTIME_LVGL_TASK_STACK_BYTES (12U * 1024U)
+/* 最长睡眠缩短到 100 ms，使触摸和健康唤醒不会被默认 500 ms 等待放大。 */
+#define BOARD_RUNTIME_LVGL_TASK_MAX_SLEEP_MS (100U)
 
 /* 探测单个 7 位 I2C 地址；只判断 ACK，不读写芯片寄存器。 */
 static bool board_runtime_probe_address(
@@ -69,8 +79,37 @@ int board_runtime_backend_init(board_runtime_t *runtime)
     }
     /* 标记真实后端，诊断页据此显示 HARDWARE。 */
     runtime->diagnostics.real_backend = true;
-    /* 厂家 BSP 启动其兼容面板、触摸驱动和 LVGL 任务；具体芯片物料由厂家组件封装。 */
-    lv_display_t *display = bsp_display_start();
+    /*
+     * 复制厂家 bsp_display_start() 的公开默认配置，只覆盖 taskLVGL 调度参数。
+     * 面板初始化、触摸控制器、缓冲尺寸、PSRAM 像素缓冲和异步 flush 路径均保持厂家实现。
+     */
+    bsp_display_cfg_t display_config = {
+        /* 使用 esp_lvgl_port 官方默认值建立完整配置，避免遗漏未来新增字段。 */
+        .lvgl_port_cfg = ESP_LVGL_PORT_INIT_CONFIG(),
+        /* 保持厂家按水平分辨率和 bounce-buffer 高度计算的像素缓冲大小。 */
+        .buffer_size = BSP_LCD_DRAW_BUFF_SIZE,
+        /* 保持厂家单缓冲策略，禁止本次修复同时改变 QSPI 刷新内存模型。 */
+        .double_buffer = BSP_LCD_DRAW_BUFF_DOUBLE,
+        /* 像素缓冲继续放 PSRAM；只有任务栈固定在片内 RAM。 */
+        .flags = {
+            /* 当前厂家 QSPI 路径不要求 LVGL 像素缓冲具备 DMA 能力。 */
+            .buff_dma = false,
+            /* 大型像素缓冲保留在 PSRAM，避免挤占 BLE 和业务任务的片内内存。 */
+            .buff_spiram = true,
+        },
+    };
+    /* 提高 taskLVGL 优先级，避免 125 Hz IMU 与 BLE 发布同时活跃时长期得不到调度。 */
+    display_config.lvgl_port_cfg.task_priority = BOARD_RUNTIME_LVGL_TASK_PRIORITY;
+    /* 扩大 taskLVGL 栈，覆盖复杂中文 UI、触摸和异步刷新调用链。 */
+    display_config.lvgl_port_cfg.task_stack = BOARD_RUNTIME_LVGL_TASK_STACK_BYTES;
+    /* 栈必须位于片内默认内存，Flash 写入暂时关闭缓存时仍可安全执行。 */
+    display_config.lvgl_port_cfg.task_stack_caps =
+        MALLOC_CAP_INTERNAL | MALLOC_CAP_DEFAULT;
+    /* 缩短事件等待上界，使触摸与界面刷新在 100 ms 内获得一次调度机会。 */
+    display_config.lvgl_port_cfg.task_max_sleep_ms =
+        BOARD_RUNTIME_LVGL_TASK_MAX_SLEEP_MS;
+    /* 通过厂家公开配置入口启动显示，不复制或修改面板、触摸初始化实现。 */
+    lv_display_t *display = bsp_display_start_with_config(&display_config);
     /* NULL 表示显示或 LVGL 初始化失败。 */
     if (display == NULL) {
         return -1;
@@ -196,6 +235,20 @@ int board_runtime_backend_set_storage(board_runtime_t *runtime, bool enabled)
     /* 厂家 BSP 使用 GPIO2/1/3 的 1-bit SDMMC 挂载。 */
     const esp_err_t result = enabled ? bsp_sdcard_mount() : bsp_sdcard_unmount();
     /* ESP_OK 表示文件系统状态已切换。 */
+    return result == ESP_OK ? 0 : -1;
+}
+
+/* 向官方 esp_lvgl_port 任务队列发送用户事件，只解除等待而不直接操作页面。 */
+int board_runtime_backend_wake_display_task(board_runtime_t *runtime)
+{
+    /* 未持有显示句柄表示 taskLVGL 尚未成功创建，禁止向空队列报告恢复成功。 */
+    if ((runtime == NULL) || (runtime->platform_display == NULL)) {
+        /* 返回失败供上层保留诊断，不触发整机重启。 */
+        return -1;
+    }
+    /* USER 事件无业务参数，仅用于让 taskLVGL 立即离开事件等待并运行 timer handler。 */
+    const esp_err_t result = lvgl_port_task_wake(LVGL_PORT_EVENT_USER, NULL);
+    /* ESP_OK 表示事件已成功写入官方端口队列。 */
     return result == ESP_OK ? 0 : -1;
 }
 

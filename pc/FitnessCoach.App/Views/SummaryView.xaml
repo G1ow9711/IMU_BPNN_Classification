@@ -1,50 +1,223 @@
 <UserControl x:Class="FitnessCoach.App.Views.SummaryView"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
-    <!-- 总结页按概要和动作明细两行布局。 -->
+    <!-- 总结页先展示本轮成果，再提供动作明细和保存事实。 -->
     <Grid>
-        <!-- 顶部概要自适应，底部表格占剩余空间。 -->
+        <!-- 三行分别承载成果、动作明细和保存状态。 -->
         <Grid.RowDefinitions>
-            <!-- 概要行。 -->
+            <!-- 成果卡按内容高度。 -->
             <RowDefinition Height="Auto" />
-            <!-- 明细行。 -->
+            <!-- 动作明细按实际行数使用有限高度，避免单行数据拉成空白表格。 -->
+            <RowDefinition Height="Auto" />
+            <!-- 完成状态占用剩余空间，形成明确会话收尾。 -->
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
-        <!-- 会话概要卡片。 -->
-        <Border Grid.Row="0" Background="{StaticResource CardBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="14" Padding="20">
-            <!-- 每项占 360 像素并按可用宽度换行，防止目标与双端保存状态被窗口右边界裁掉。 -->
-            <WrapPanel ItemWidth="360">
-                <!-- 设备标识。 -->
-                <TextBlock Text="{Binding DeviceId, StringFormat=设备：{0}}" Margin="8" FontSize="16" TextWrapping="Wrap" />
-                <!-- 会话序号。 -->
-                <TextBlock Text="{Binding SessionSequence, StringFormat=会话：#{0}}" Margin="8" FontSize="16" TextWrapping="Wrap" />
-                <!-- 总时长。 -->
-                <TextBlock Text="{Binding DurationText, StringFormat=时长：{0}}" Margin="8" FontSize="16" TextWrapping="Wrap" />
-                <!-- 总千卡。 -->
-                <TextBlock Text="{Binding CaloriesText, StringFormat=消耗：{0}}" Foreground="{StaticResource AccentBrush}" Margin="8" FontSize="16" TextWrapping="Wrap" />
-                <!-- 显示当前每日千卡目标的完成值和百分比。 -->
-                <TextBlock Text="{Binding GoalProgressText}" Foreground="{StaticResource AccentBrush}" Margin="8" FontSize="16" TextWrapping="Wrap" />
-                <!-- 设备停止 ACK 表示设备端摘要已完成持久化。 -->
-                <TextBlock Text="{Binding DeviceSaveStatus}" Foreground="{StaticResource SecondaryTextBrush}" Margin="8" FontSize="16" TextWrapping="Wrap" />
-                <!-- SessionCompleted 事件只在本地 JSON 保存成功后触发。 -->
-                <TextBlock Text="{Binding LocalSaveStatus}" Foreground="{StaticResource SecondaryTextBrush}" Margin="8" FontSize="16" TextWrapping="Wrap" />
-                <!-- 结束原因。 -->
-                <TextBlock Text="{Binding EndReason, StringFormat=原因：{0}}" Foreground="{StaticResource SecondaryTextBrush}" Margin="8" FontSize="16" TextWrapping="Wrap" />
-            </WrapPanel>
+
+        <!-- 顶部成果卡采用主指标优先的信息层级。 -->
+        <Border Grid.Row="0" Style="{StaticResource CardStyle}">
+            <!-- 左侧会话身份，右侧三项结果。 -->
+            <Grid>
+                <!-- 会话说明占较宽区域，三项指标等宽。 -->
+                <Grid.ColumnDefinitions>
+                    <!-- 会话身份列。 -->
+                    <ColumnDefinition Width="1.25*" />
+                    <!-- 时长指标列。 -->
+                    <ColumnDefinition Width="*" />
+                    <!-- 能量指标列。 -->
+                    <ColumnDefinition Width="*" />
+                    <!-- 目标指标列。 -->
+                    <ColumnDefinition Width="1.1*" />
+                </Grid.ColumnDefinitions>
+                <!-- 会话身份纵向排列。 -->
+                <StackPanel Grid.Column="0">
+                    <!-- 区域标签。 -->
+                    <TextBlock Text="本轮训练" Style="{StaticResource EyebrowTextStyle}" />
+                    <!-- 会话序号为本地与设备记录的共同索引。 -->
+                    <TextBlock Text="{Binding SessionSequence, StringFormat=会话 #{0}}"
+                               FontSize="24"
+                               FontWeight="SemiBold"
+                               Margin="0,6,0,0" />
+                    <!-- 设备标识使用次文字并允许换行。 -->
+                    <TextBlock Text="{Binding DeviceId, StringFormat=设备 {0}}"
+                               Foreground="{StaticResource SecondaryTextBrush}"
+                               TextWrapping="Wrap"
+                               Margin="0,7,20,0" />
+                </StackPanel>
+                <!-- 时长指标使用左分隔线。 -->
+                <Border Grid.Column="1"
+                        BorderBrush="{StaticResource BorderBrush}"
+                        BorderThickness="1,0,0,0"
+                        Padding="24,0">
+                    <!-- 时长标签和值纵向排列。 -->
+                    <StackPanel VerticalAlignment="Center">
+                        <!-- 指标名称。 -->
+                        <TextBlock Text="训练时长" Foreground="{StaticResource SecondaryTextBrush}" FontSize="12" />
+                        <!-- 格式化时长来自设备单调时钟。 -->
+                        <TextBlock Text="{Binding DurationText}" FontSize="23" FontWeight="SemiBold" Margin="0,6,0,0" />
+                    </StackPanel>
+                </Border>
+                <!-- 能量指标使用左分隔线。 -->
+                <Border Grid.Column="2"
+                        BorderBrush="{StaticResource BorderBrush}"
+                        BorderThickness="1,0,0,0"
+                        Padding="24,0">
+                    <!-- 能量标签和值纵向排列。 -->
+                    <StackPanel VerticalAlignment="Center">
+                        <!-- 指标名称。 -->
+                        <TextBlock Text="能量消耗" Foreground="{StaticResource SecondaryTextBrush}" FontSize="12" />
+                        <!-- 总千卡使用强调色。 -->
+                        <TextBlock Text="{Binding CaloriesText}" Foreground="{StaticResource AccentBrush}" FontSize="23" FontWeight="SemiBold" Margin="0,6,0,0" />
+                    </StackPanel>
+                </Border>
+                <!-- 目标进度使用左分隔线。 -->
+                <Border Grid.Column="3"
+                        BorderBrush="{StaticResource BorderBrush}"
+                        BorderThickness="1,0,0,0"
+                        Padding="24,0,0,0">
+                    <!-- 目标标签和值纵向排列。 -->
+                    <StackPanel VerticalAlignment="Center">
+                        <!-- 指标名称。 -->
+                        <TextBlock Text="每日目标" Foreground="{StaticResource SecondaryTextBrush}" FontSize="12" />
+                        <!-- 目标文字允许换行，支持关闭目标状态。 -->
+                        <TextBlock Text="{Binding GoalProgressText}"
+                                   Foreground="{StaticResource AccentBrush}"
+                                   FontSize="15"
+                                   FontWeight="SemiBold"
+                                   TextWrapping="Wrap"
+                                   Margin="0,6,0,0" />
+                    </StackPanel>
+                </Border>
+            </Grid>
         </Border>
-        <!-- 动作明细表。 -->
-        <DataGrid Grid.Row="1" ItemsSource="{Binding Metrics}" Margin="0,16,0,0">
-            <!-- 固定列定义。 -->
+
+        <!-- 动作明细表使用统一数据表格样式。 -->
+        <DataGrid Grid.Row="1"
+                  ItemsSource="{Binding Metrics}"
+                  MinHeight="150"
+                  MaxHeight="260"
+                  VerticalAlignment="Top"
+                  Margin="0,18,0,0">
+            <!-- 列宽按内容重要度稳定分配。 -->
             <DataGrid.Columns>
                 <!-- 动作名称列。 -->
-                <DataGridTextColumn Header="动作" Binding="{Binding ActionName}" Width="*" />
-                <!-- 指标列。 -->
-                <DataGridTextColumn Header="次数/步数/秒" Binding="{Binding MetricText}" Width="*" />
+                <DataGridTextColumn Header="动作" Binding="{Binding ActionName}" Width="1.3*" />
+                <!-- 累计指标列。 -->
+                <DataGridTextColumn Header="完成量" Binding="{Binding MetricText}" Width="*" />
                 <!-- 活动时长列。 -->
-                <DataGridTextColumn Header="活动时长" Binding="{Binding DurationText}" Width="*" />
+                <DataGridTextColumn Header="有效时长" Binding="{Binding DurationText}" Width="*" />
                 <!-- 卡路里列。 -->
-                <DataGridTextColumn Header="卡路里" Binding="{Binding CaloriesText}" Width="*" />
+                <DataGridTextColumn Header="能量消耗" Binding="{Binding CaloriesText}" Width="*" />
             </DataGrid.Columns>
         </DataGrid>
+
+        <!-- 底部完成面板使用剩余空间展示会话已结束和双端保存事实。 -->
+        <Border Grid.Row="2"
+                Background="{StaticResource CardBrush}"
+                BorderBrush="{StaticResource BorderBrush}"
+                BorderThickness="1"
+                CornerRadius="14"
+                Padding="24"
+                Margin="0,18,0,0">
+            <!-- 标题在上，三个完成事实在下方等宽排列。 -->
+            <Grid>
+                <!-- 标题按内容高度，状态区占剩余高度。 -->
+                <Grid.RowDefinitions>
+                    <!-- 完成标题行。 -->
+                    <RowDefinition Height="Auto" />
+                    <!-- 三项状态行。 -->
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+                <!-- 完成状态标题和说明纵向排列。 -->
+                <StackPanel Grid.Row="0">
+                    <!-- 分区标签。 -->
+                    <TextBlock Text="会话状态" Style="{StaticResource EyebrowTextStyle}" />
+                    <!-- 本轮结束标题。 -->
+                    <TextBlock Text="本轮训练已完成"
+                               Style="{StaticResource SectionTitleTextStyle}"
+                               Margin="0,5,0,0" />
+                </StackPanel>
+                <!-- 三项状态使用等宽列和细分隔线。 -->
+                <Grid Grid.Row="1" VerticalAlignment="Center" Margin="0,20,0,0">
+                    <!-- 三列等宽，长文本允许换行。 -->
+                    <Grid.ColumnDefinitions>
+                        <!-- 设备保存列。 -->
+                        <ColumnDefinition Width="*" />
+                        <!-- 本地保存列。 -->
+                        <ColumnDefinition Width="*" />
+                        <!-- 结束原因列。 -->
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <!-- 设备保存状态使用图标、标签和值。 -->
+                    <StackPanel Grid.Column="0" HorizontalAlignment="Center">
+                        <!-- 完成图标来自 Windows 系统字体。 -->
+                        <TextBlock Text="&#xE930;"
+                                   FontFamily="Segoe Fluent Icons"
+                                   Foreground="{StaticResource SuccessBrush}"
+                                   FontSize="28"
+                                   HorizontalAlignment="Center" />
+                        <!-- 状态类别。 -->
+                        <TextBlock Text="设备记录"
+                                   Foreground="{StaticResource SecondaryTextBrush}"
+                                   FontSize="11"
+                                   HorizontalAlignment="Center"
+                                   Margin="0,8,0,0" />
+                        <!-- 设备持久化状态。 -->
+                        <TextBlock Text="{Binding DeviceSaveStatus}"
+                                   FontWeight="SemiBold"
+                                   TextWrapping="Wrap"
+                                   TextAlignment="Center"
+                                   Margin="0,5,0,0" />
+                    </StackPanel>
+                    <!-- 本地保存状态使用左右分隔线。 -->
+                    <Border Grid.Column="1"
+                            BorderBrush="{StaticResource BorderBrush}"
+                            BorderThickness="1,0"
+                            Padding="20,0">
+                        <!-- 本地保存状态纵向排列。 -->
+                        <StackPanel HorizontalAlignment="Center">
+                            <!-- 归档图标表达本地历史记录。 -->
+                            <TextBlock Text="&#xE81C;"
+                                       FontFamily="Segoe Fluent Icons"
+                                       Foreground="{StaticResource AccentBrush}"
+                                       FontSize="28"
+                                       HorizontalAlignment="Center" />
+                            <!-- 状态类别。 -->
+                            <TextBlock Text="本地历史"
+                                       Foreground="{StaticResource SecondaryTextBrush}"
+                                       FontSize="11"
+                                       HorizontalAlignment="Center"
+                                       Margin="0,8,0,0" />
+                            <!-- 本地历史持久化状态。 -->
+                            <TextBlock Text="{Binding LocalSaveStatus}"
+                                       FontWeight="SemiBold"
+                                       TextWrapping="Wrap"
+                                       TextAlignment="Center"
+                                       Margin="0,5,0,0" />
+                        </StackPanel>
+                    </Border>
+                    <!-- 结束原因使用信息图标。 -->
+                    <StackPanel Grid.Column="2" HorizontalAlignment="Center">
+                        <!-- 信息图标表示会话结束原因。 -->
+                        <TextBlock Text="&#xE946;"
+                                   FontFamily="Segoe Fluent Icons"
+                                   Foreground="{StaticResource SecondaryTextBrush}"
+                                   FontSize="28"
+                                   HorizontalAlignment="Center" />
+                        <!-- 状态类别。 -->
+                        <TextBlock Text="结束原因"
+                                   Foreground="{StaticResource SecondaryTextBrush}"
+                                   FontSize="11"
+                                   HorizontalAlignment="Center"
+                                   Margin="0,8,0,0" />
+                        <!-- 会话结束原因。 -->
+                        <TextBlock Text="{Binding EndReason}"
+                                   FontWeight="SemiBold"
+                                   TextWrapping="Wrap"
+                                   TextAlignment="Center"
+                                   Margin="0,5,0,0" />
+                    </StackPanel>
+                </Grid>
+            </Grid>
+        </Border>
     </Grid>
 </UserControl>

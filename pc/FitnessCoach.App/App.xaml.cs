@@ -97,7 +97,7 @@ public partial class App : Application
         catch (Exception exception)
         {
             // 启动失败时展示明确错误，避免黑屏退出。
-            MessageBox.Show($"上位机启动失败：{exception.Message}", "手腕健身动作助手", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"上位机启动失败：{exception.Message}", "ESP32智慧运动助手", MessageBoxButton.OK, MessageBoxImage.Error);
             // 使用非零退出码结束应用。
             Shutdown(1);
         }

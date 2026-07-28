@@ -55,6 +55,11 @@ typedef struct {
     void *implementation;
     /* true 允许页面和文字淡入；false 使用立即切页并禁止所有文字透明度动画。 */
     bool animations_enabled;
+    /*
+     * 保存官方 taskLVGL 完成的 500 ms 健康节拍。
+     * 该 32 位计数器只由 LVGL timer 回调写、由监督任务读；ESP32-S3 对齐的 32 位访问具有原子性。
+     */
+    volatile uint32_t lvgl_heartbeat;
     /* 标记初始化完成。 */
     bool initialized;
 } ui_lvgl_renderer_t;
@@ -77,6 +82,13 @@ ui_lvgl_result_t ui_lvgl_renderer_init(
 ui_lvgl_result_t ui_lvgl_renderer_render(
     ui_lvgl_renderer_t *renderer,
     const ui_context_t *context);
+/*
+ * 读取官方 taskLVGL 健康节拍；计数变化表示定时器、输入读取和刷新循环仍在推进。
+ * 未初始化或空对象返回 0，调用方应提供启动宽限而不是立即判故障。
+ */
+uint32_t ui_lvgl_renderer_get_heartbeat(
+    /* 非空且生命周期覆盖读取操作的渲染器；函数不获取 LVGL 锁。 */
+    const ui_lvgl_renderer_t *renderer);
 /* 启用或禁用页面/文字动画；显示-only 诊断在首帧前关闭，避免分块 QSPI 淡入残影。 */
 ui_lvgl_result_t ui_lvgl_renderer_set_animations_enabled(
     /* 非空且已初始化的渲染器；函数不保存额外指针。 */

@@ -1,10 +1,17 @@
 <UserControl x:Class="FitnessCoach.App.Views.DeviceView"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
-    <!-- 设备页优先显示连接事实，再提供扫描列表和硬件摘要。 -->
-    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-        <!-- 内容限制最大宽度，超宽屏保持适合扫读的行长。 -->
-        <StackPanel MaxWidth="1180" HorizontalAlignment="Left">
+    <!-- 设备页使用全高网格，让扫描列表和硬件摘要占满工作区剩余高度。 -->
+    <Grid MaxWidth="1180"
+          HorizontalAlignment="Stretch"
+          VerticalAlignment="Stretch">
+        <!-- 顶部连接状态按内容高度，下方设备工作区占用全部剩余空间。 -->
+        <Grid.RowDefinitions>
+            <!-- 连接摘要行按内容高度。 -->
+            <RowDefinition Height="Auto" />
+            <!-- 扫描和设备详情行伸展到页面底部。 -->
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
             <!-- 顶部连接摘要卡让用户三秒内确认设备与链路状态。 -->
             <Border Style="{StaticResource CardStyle}" Margin="0,0,0,18">
                 <!-- 左侧显示连接状态，右侧提供常用操作。 -->
@@ -66,7 +73,7 @@
             </Border>
 
             <!-- 下方双列分别承载附近设备和已连接设备详情。 -->
-            <Grid>
+            <Grid Grid.Row="1">
                 <!-- 左侧列表获得更多宽度，右侧摘要保持稳定。 -->
                 <Grid.ColumnDefinitions>
                     <!-- 扫描列表占约六成。 -->
@@ -122,13 +129,15 @@
                                    TextWrapping="Wrap"
                                    Margin="0,10,0,14" />
 
-                        <!-- 候选列表同时展示手柄和环境中的其它蓝牙设备。 -->
-                        <ListBox Grid.Row="2"
-                                 ItemsSource="{Binding NearbyDevices}"
-                                 SelectedItem="{Binding SelectedNearbyDevice, Mode=TwoWay}"
-                                 MinHeight="280"
-                                 MaxHeight="440"
-                                 ScrollViewer.VerticalScrollBarVisibility="Auto">
+                        <!-- 候选列表与空状态共用同一位置，避免无设备时出现无意义白框。 -->
+                        <Grid Grid.Row="2">
+                            <!-- 候选列表同时展示手柄和环境中的其它蓝牙设备。 -->
+                            <ListBox x:Name="NearbyDeviceList"
+                                     ItemsSource="{Binding NearbyDevices}"
+                                     SelectedItem="{Binding SelectedNearbyDevice, Mode=TwoWay}"
+                                     MinHeight="280"
+                                     MaxHeight="440"
+                                     ScrollViewer.VerticalScrollBarVisibility="Auto">
                             <!-- 列表行使用完整宽度和清晰选中态。 -->
                             <ListBox.ItemContainerStyle>
                                 <!-- 自定义行容器。 -->
@@ -221,7 +230,47 @@
                                     </Grid>
                                 </DataTemplate>
                             </ListBox.ItemTemplate>
-                        </ListBox>
+                            </ListBox>
+                            <!-- 空状态只在列表没有任何候选设备时显示。 -->
+                            <StackPanel HorizontalAlignment="Center"
+                                        VerticalAlignment="Center"
+                                        IsHitTestVisible="False">
+                                <!-- 蓝牙图标使用系统字体，保持 Windows 产品一致性。 -->
+                                <TextBlock Text="&#xE702;"
+                                           FontFamily="Segoe Fluent Icons"
+                                           Foreground="{StaticResource AccentBrush}"
+                                           FontSize="30"
+                                           HorizontalAlignment="Center" />
+                                <!-- 空状态主提示。 -->
+                                <TextBlock Text="暂未发现可连接手表"
+                                           FontSize="16"
+                                           FontWeight="SemiBold"
+                                           HorizontalAlignment="Center"
+                                           Margin="0,12,0,0" />
+                                <!-- 空状态恢复动作。 -->
+                                <TextBlock Text="启用真机蓝牙后，点击重新扫描"
+                                           Foreground="{StaticResource SecondaryTextBrush}"
+                                           FontSize="12"
+                                           HorizontalAlignment="Center"
+                                           Margin="0,6,0,0" />
+                                <!-- 根据列表是否有项目切换空状态可见性。 -->
+                                <StackPanel.Style>
+                                    <!-- 默认隐藏，避免候选设备上覆盖提示。 -->
+                                    <Style TargetType="StackPanel">
+                                        <!-- 有项目时折叠空状态。 -->
+                                        <Setter Property="Visibility" Value="Collapsed" />
+                                        <!-- 无项目时显示空状态。 -->
+                                        <Style.Triggers>
+                                            <!-- 读取同一列表的 HasItems 权威事实。 -->
+                                            <DataTrigger Binding="{Binding HasItems, ElementName=NearbyDeviceList}" Value="False">
+                                                <!-- 显示空状态。 -->
+                                                <Setter Property="Visibility" Value="Visible" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </StackPanel.Style>
+                            </StackPanel>
+                        </Grid>
 
                         <!-- 连接所选手柄和限制说明位于列表底部。 -->
                         <Grid Grid.Row="3" Margin="0,14,0,0">
@@ -326,6 +375,5 @@
                     </StackPanel>
                 </Border>
             </Grid>
-        </StackPanel>
-    </ScrollViewer>
+    </Grid>
 </UserControl>

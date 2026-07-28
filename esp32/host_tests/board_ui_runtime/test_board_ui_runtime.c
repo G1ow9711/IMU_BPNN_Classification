@@ -178,6 +178,8 @@ static void test_board_runtime_mock(void)
     /* 请求 PMIC 关机。 */
     CHECK_EQ(BOARD_RUNTIME_OK, board_runtime_request_pmic_shutdown(&runtime));
     CHECK_EQ(1U, external.shutdown_calls);
+    /* Mock 显示已初始化时，健康监督使用的 taskLVGL 唤醒接口必须返回成功。 */
+    CHECK_EQ(BOARD_RUNTIME_OK, board_runtime_wake_display_task(&runtime));
     /* Mock LVGL 锁可用于 presenter/renderer 联调。 */
     CHECK_TRUE(board_runtime_lvgl_lock(&runtime, 10U));
     /* 释放 Mock 锁。 */
@@ -513,6 +515,79 @@ static void test_ui_navigation_commands(void)
     CHECK_TRUE(!ui_command_to_event(UI_COMMAND_FORGET_COMPUTER, 1310U, &event));
 }
 
+/* 验证连续多轮开始、停止和完成不会把页面状态留在不可点击的总结页。 */
+static void test_ui_repeated_session_lifecycle(void)
+{
+    /* 创建冷启动上下文；所有轮次复用同一对象，模拟真机固定页面树的长期生命周期。 */
+    ui_context_t context;
+    /* 初始化 BOOT 状态和默认视图。 */
+    ui_context_init(&context, UINT32_C(0));
+    /* 构造可复用事件对象。 */
+    ui_event_t event = {
+        /* 首事件推进到自检页。 */
+        .type = UI_EVENT_BOOT_READY,
+        /* 使用严格递增的单调毫秒。 */
+        .monotonic_ms = UINT32_C(100),
+    };
+    /* 启动完成必须成功。 */
+    CHECK_EQ(UI_DISPATCH_OK, ui_dispatch_event(&context, &event));
+    /* 自检成功进入主页。 */
+    event.type = UI_EVENT_SELF_TEST_OK;
+    /* 推进单调时间。 */
+    event.monotonic_ms = UINT32_C(200);
+    /* 进入 HOME。 */
+    CHECK_EQ(UI_DISPATCH_OK, ui_dispatch_event(&context, &event));
+    /* 保存后续事件时间；每个动作增加 10 ms，200 轮仍远低于 uint32 上限。 */
+    uint32_t monotonic_ms = UINT32_C(300);
+    /* 连续执行 200 轮，覆盖现场“测试几次后卡住”的重复页面切换压力。 */
+    for (uint32_t round = UINT32_C(0); round < UINT32_C(200); ++round) {
+        /* 主页 START 必须映射为准备事件。 */
+        CHECK_TRUE(ui_command_to_event(UI_COMMAND_START, monotonic_ms, &event));
+        /* 提交开始并进入 PREPARE。 */
+        CHECK_EQ(UI_DISPATCH_OK, ui_dispatch_event(&context, &event));
+        /* 每次循环都必须真正位于准备页。 */
+        CHECK_EQ(UI_STATE_PREPARE, context.state);
+        /* 推进到分类确认时刻。 */
+        monotonic_ms += UINT32_C(10);
+        /* 模拟识别成功进入 RUNNING。 */
+        event.type = UI_EVENT_PREPARE_COMPLETED;
+        /* 保存当前事件时间。 */
+        event.monotonic_ms = monotonic_ms;
+        /* 提交准备完成。 */
+        CHECK_EQ(UI_DISPATCH_OK, ui_dispatch_event(&context, &event));
+        /* 训练页必须可达。 */
+        CHECK_EQ(UI_STATE_RUNNING, context.state);
+        /* 推进到用户点击停止时刻。 */
+        monotonic_ms += UINT32_C(10);
+        /* STOP 只打开确认页。 */
+        CHECK_TRUE(ui_command_to_event(UI_COMMAND_STOP, monotonic_ms, &event));
+        /* 提交停止确认请求。 */
+        CHECK_EQ(UI_DISPATCH_OK, ui_dispatch_event(&context, &event));
+        /* 确认页必须可达。 */
+        CHECK_EQ(UI_STATE_STOP_CONFIRM, context.state);
+        /* 推进到确认停止时刻。 */
+        monotonic_ms += UINT32_C(10);
+        /* CONFIRM_STOP 才结束本轮。 */
+        CHECK_TRUE(ui_command_to_event(UI_COMMAND_CONFIRM_STOP, monotonic_ms, &event));
+        /* 提交停止事件。 */
+        CHECK_EQ(UI_DISPATCH_OK, ui_dispatch_event(&context, &event));
+        /* 每轮都必须进入可点击的总结页。 */
+        CHECK_EQ(UI_STATE_SUMMARY, context.state);
+        /* 推进到用户点击完成时刻。 */
+        monotonic_ms += UINT32_C(10);
+        /* DONE 必须映射为摘要已查看。 */
+        CHECK_TRUE(ui_command_to_event(UI_COMMAND_DONE, monotonic_ms, &event));
+        /* 提交完成事件。 */
+        CHECK_EQ(UI_DISPATCH_OK, ui_dispatch_event(&context, &event));
+        /* 每轮结束必须回到主页，禁止残留总结页或活动会话。 */
+        CHECK_EQ(UI_STATE_HOME, context.state);
+        /* 会话活动位必须清除，下一轮 START 才能正常建立新会话。 */
+        CHECK_TRUE(!context.session_active);
+        /* 为下一轮保留严格递增时间。 */
+        monotonic_ms += UINT32_C(10);
+    }
+}
+
 /* 运行全部主机测试。 */
 int main(void)
 {
@@ -522,6 +597,8 @@ int main(void)
     test_ui_presenter_pages();
     /* 验证设置/诊断导航。 */
     test_ui_navigation_commands();
+    /* 验证 200 轮训练页面和按钮生命周期。 */
+    test_ui_repeated_session_lifecycle();
     /* 验证配对码跨任务显示、超时和清除生命周期。 */
     test_ui_pairing_mailbox_and_lifecycle();
     /* 失败时打印数量并返回非零。 */
