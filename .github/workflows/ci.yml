@@ -33,11 +33,11 @@ jobs:
     steps:
       # 检出当前提交，后续命令都从仓库根运行。
       - name: 检出源码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # 固定 Python 3.12，与本项目训练和本地验证环境保持同代。
       - name: 配置 Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           # 公开门只做语法编译，不下载训练依赖或数据集。
           python-version: "3.12"
@@ -59,11 +59,11 @@ jobs:
     steps:
       # 检出与 Linux 作业相同的当前提交。
       - name: 检出源码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # 安装项目目标框架 .NET 8 SDK 和 Windows Desktop 运行时。
       - name: 配置 .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           # 允许最新 8.0 补丁，目标框架仍固定为 net8.0。
           dotnet-version: "8.0.x"
