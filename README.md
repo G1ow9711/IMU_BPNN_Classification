@@ -2,6 +2,12 @@
 
 [查看教程工程持续集成状态](https://github.com/G1ow9711/IMU_BPNN_Classification/actions/workflows/ci.yml)
 
+## 实际运行演示
+
+[![ESP32 智慧运动助手实际运行演示](docs/assets/video/ESP32智慧运动助手_运行效果封面.jpg)](https://github.com/G1ow9711/IMU_BPNN_Classification/blob/main/docs/assets/video/ESP32%20智慧运动助手.mp4)
+
+**点击封面观看完整视频：[`ESP32 智慧运动助手.mp4`](https://github.com/G1ow9711/IMU_BPNN_Classification/blob/main/docs/assets/video/ESP32%20智慧运动助手.mp4)。** 这段 2 分 57 秒实拍演示覆盖模型训练与导出、双 BP 融合、BLE 连接、手表启动训练、上位机实时曲线、动作识别和逐次计数。
+
 本项目展示一条可落到 ESP32-S3 智能手表的完整机器学习链路：从六轴 IMU 原始数据出发，完成数据清洗、297 项可解释特征、双轻量 BP 分类、单动作会话确认、实时计数、BLE 同步和 Windows 上位机展示。
 
 ```text
@@ -20,6 +26,7 @@ QMI8658 六轴 IMU
 
 ## 导航
 
+- [实际运行演示](#实际运行演示)：先看真实手表、上位机、实时曲线与动作计数怎样协作。
 - [项目现有功能](#项目现有功能)：先了解手表、算法和上位机已经能做什么。
 - [技术栈](#技术栈)：查看 TinyML、ESP32-S3、FreeRTOS、LVGL、BLE 和 C# 怎样协作。
 - [模型训练过程](#模型训练过程)：阅读真实终端截图、训练曲线和最佳 epoch 选择。
