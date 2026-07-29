@@ -38,22 +38,25 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r python\requirements.txt
 ```
 
-把数据放到：
+仓库已公开训练数据：
 
 ```text
-IMU_Dataset/
-└─ imu_dataset_for_final/
-   ├─ good_morning/
-   ├─ jumping_jack/
-   ├─ ...
-   └─ wave/
+Dataset/
+├─ good_morning/
+├─ jumping_jack/
+├─ ...
+├─ wave/
+├─ README.md
+└─ manifest.json
 ```
+
+类别统计、原始量程、SHA-256 和数据限制见 [`Dataset/README.md`](../Dataset/README.md)。
 
 先复现文档图，不训练模型：
 
 ```powershell
 .\.venv\Scripts\python.exe -m python.visualize_action_features `
-  --dataset-dir IMU_Dataset\imu_dataset_for_final `
+  --dataset-dir Dataset `
   --output-dir docs\assets\algorithm
 ```
 
@@ -140,7 +143,7 @@ scan_dataset
 
 计数教程组合三类互补材料：
 
-1. [项目数据集六类时域曲线](../docs/assets/algorithm/01_六类派生信号曲线.png)来自 `imu_dataset_for_final` 的固定文件级验证划分，用于观察开合跳、深蹲、跳跃深蹲、跳跃弓步、挥手和行走的周期形态及文件间差异。
+1. [项目数据集六类时域曲线](../docs/assets/algorithm/01_六类派生信号曲线.png)来自公开 [`Dataset/`](../Dataset/) 的固定文件级验证划分，用于观察开合跳、深蹲、跳跃深蹲、跳跃弓步、挥手和行走的周期形态及文件间差异。
 2. [实时计数算法示意曲线](../docs/assets/algorithm/05_计数算法示意曲线.png)由固件生产常量生成，用于解释自适应端点、完整闭合、步峰重武装和休息冻结；它明确标记为非实测。
 3. [真板深蹲计数事件回放](../docs/assets/algorithm/06_真板深蹲计数事件回放.png)只使用现场 CSV 中的物理量、设备状态和权威 `MetricEvent`，用于核对每次加一的实际时刻。
 
@@ -184,7 +187,7 @@ scan_dataset
 
 ```powershell
 .\.venv\Scripts\python.exe -u python\train_export.py `
-  --dataset-dir IMU_Dataset\imu_dataset_for_final
+  --dataset-dir Dataset
 ```
 
 逐 epoch 日志包含：
@@ -219,7 +222,7 @@ scan_dataset
 
 ```powershell
 .\.venv\Scripts\python.exe -u python\train_export.py `
-  --dataset-dir IMU_Dataset\imu_dataset_for_final `
+  --dataset-dir Dataset `
   --validation-only `
   --window-seconds 2.5
 ```

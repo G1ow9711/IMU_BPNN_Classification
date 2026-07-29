@@ -15,6 +15,9 @@ IMU_Dataset/
 outputs/
 .codex-local/
 
+# Markdown 是公开文档唯一来源；PDF 只保留本地离线副本，不进入 Git。
+*.pdf
+
 # ESP-IDF 可再生依赖与构建状态；保留源码、dependencies.lock、sdkconfig.defaults 和 partitions.csv。
 build/
 esp32/firmware/build*/

@@ -815,7 +815,7 @@ Transfer Data notification 的逻辑帧类型为 7。每条 payload 固定 80 �
 PC 把毛热量转换为千分之一千卡：
 
 $$
-calories\_mcal=\operatorname{round}\left(\frac{gross\_microkcal}{1000}\right)
+calories\_mcal=\mathrm{round}\left(\frac{gross\_microkcal}{1000}\right)
 $$
 
 持续型动作把 `metric_total` 毫秒整除 1000 后显示为秒。所有 `uint64` 字段在转换到 PC v1 的 `uint32` 前必须检查上界，禁止静默截断。
@@ -977,9 +977,9 @@ Manifest v1 发布实际部署的基础 M0 与掩码 M0 两个 SHA。`dual_m0_ma
 设模型输出顺序中的 UTF-8 类名为 $n_0,\ldots,n_{C-1}$。规范输入字节串为：
 
 $$
-B=\operatorname{UTF8}(n_0)\Vert 0x00\Vert
-\operatorname{UTF8}(n_1)\Vert 0x00\Vert\cdots\Vert
-0x00\Vert\operatorname{UTF8}(n_{C-1})
+B=\mathrm{UTF8}(n_0)\Vert 0x00\Vert
+\mathrm{UTF8}(n_1)\Vert 0x00\Vert\cdots\Vert
+0x00\Vert\mathrm{UTF8}(n_{C-1})
 $$
 
 相邻类名之间恰好一个 `0x00`，最后一个类名末尾不加 `0x00`。当前 11 类固定顺序为：

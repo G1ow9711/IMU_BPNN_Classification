@@ -1,0 +1,1433 @@
+{
+  "schema_version": 1,
+  "dataset_name": "imu_dataset_for_final",
+  "published_directory": "Dataset",
+  "source_repository": "https://github.com/G1ow9711/IMU_Datasrt",
+  "sampling_hz": 25,
+  "channel_order": [
+    "gx",
+    "gy",
+    "gz",
+    "ax",
+    "ay",
+    "az",
+    "timestamp_low",
+    "timestamp_high"
+  ],
+  "gyroscope": {
+    "range_dps": [
+      -2000,
+      2000
+    ],
+    "lsb_per_dps": 16.4
+  },
+  "accelerometer": {
+    "range_g": [
+      -8,
+      8
+    ],
+    "lsb_per_g": 4096
+  },
+  "timestamp_note": "两个时间戳字段当前全部为 0；训练按固定 25 Hz 采样周期解释。",
+  "data_files": 189,
+  "metadata_files": 1,
+  "total_rows": 557904,
+  "source_bytes": 18316995,
+  "classes": {
+    "good_morning": {
+      "name_zh": "早安式",
+      "files": 17,
+      "rows": 37728
+    },
+    "jumping_jack": {
+      "name_zh": "开合跳",
+      "files": 18,
+      "rows": 52968
+    },
+    "jumping_lunge": {
+      "name_zh": "跳跃弓步",
+      "files": 15,
+      "rows": 57516
+    },
+    "jumping_squat": {
+      "name_zh": "跳跃深蹲",
+      "files": 16,
+      "rows": 56640
+    },
+    "lunge": {
+      "name_zh": "弓步",
+      "files": 18,
+      "rows": 43956
+    },
+    "sit": {
+      "name_zh": "静坐",
+      "files": 19,
+      "rows": 56736
+    },
+    "squat": {
+      "name_zh": "深蹲",
+      "files": 15,
+      "rows": 41892
+    },
+    "trot": {
+      "name_zh": "小跑",
+      "files": 20,
+      "rows": 53196
+    },
+    "tuck_jump": {
+      "name_zh": "收腹跳",
+      "files": 15,
+      "rows": 53412
+    },
+    "walk": {
+      "name_zh": "行走",
+      "files": 18,
+      "rows": 50688
+    },
+    "wave": {
+      "name_zh": "挥手",
+      "files": 18,
+      "rows": 53172
+    }
+  },
+  "tree_sha256": "0e05b0d3ff767445f57e89936e03bdc1f595caa13c0c93dc7abb1de002fb6591",
+  "tree_sha256_algorithm": "按 UTF-8 相对路径字节升序排列；依次写入 path + NUL + 32 字节文件 SHA-256；最后计算整体 SHA-256；清单自身不参与。",
+  "limitations": [
+    "数据缺少完整受试者 ID，不能证明严格跨人员泛化。",
+    "数据缺少可靠佩戴侧元数据，当前产品验收固定右手腕。",
+    "时间戳字段全部为 0，绝对时间只能由固定 25 Hz 采样率推算。",
+    "数据没有逐次动作完成时刻标签，不能直接作为计数事件真值。"
+  ],
+  "files": [
+    {
+      "path": "good_morning/IMU-2023-05-11-15_37_01_good_morning.txt",
+      "class": "good_morning",
+      "bytes": 92279,
+      "rows": 2664,
+      "sha256": "959c486d8d178562698b32823b9b2b4e5f519e24ec865e530a98e3086b97f21b"
+    },
+    {
+      "path": "good_morning/IMU-2023-05-11-16_40_53_good_morning.txt",
+      "class": "good_morning",
+      "bytes": 101268,
+      "rows": 3000,
+      "sha256": "9b823c789e4551f7392ecc7c1cf728589b2b7d9cd26839c2b261ecba64ada19c"
+    },
+    {
+      "path": "good_morning/IMU-2023-05-11-18_05_41_good_morning.txt",
+      "class": "good_morning",
+      "bytes": 31344,
+      "rows": 972,
+      "sha256": "26600fcbea9fe2f36ac32f52916304d41b451dd2e2c971d6f59f3b86db68265f"
+    },
+    {
+      "path": "good_morning/IMU-2023-06-01-09_45_23_good_morning.txt",
+      "class": "good_morning",
+      "bytes": 77251,
+      "rows": 2268,
+      "sha256": "a7970795a38e5885a7edbf04cb4bb047fe39004aae6128b7bbbb53c54a823f26"
+    },
+    {
+      "path": "good_morning/IMU-2023-06-01-10_13_23_good_morning.txt",
+      "class": "good_morning",
+      "bytes": 48699,
+      "rows": 1500,
+      "sha256": "f80e8d448700f17cee9b7a1b0c31b290c17628dd9c52f1c59168562cdf0c8ad2"
+    },
+    {
+      "path": "good_morning/IMU-2023-06-01-10_56_32_good_morning.txt",
+      "class": "good_morning",
+      "bytes": 78568,
+      "rows": 2292,
+      "sha256": "555fa36f6c26b619ab60d3ab6dc66a0b06287e7005224c5c9c69eca2788b1eb4"
+    },
+    {
+      "path": "good_morning/IMU-2023-06-01-11_30_36_good_morning.txt",
+      "class": "good_morning",
+      "bytes": 86444,
+      "rows": 2520,
+      "sha256": "d509f9cca475ff461851bfbdce00dc92e27c7b31ca0aea74a8b4ab98ae95b2ab"
+    },
+    {
+      "path": "good_morning/IMU-2023-06-01-14_32_45_good_morning.txt",
+      "class": "good_morning",
+      "bytes": 79170,
+      "rows": 2340,
+      "sha256": "a10e79fb01146527d06a469b757b5548d30406fcc1b54136f12c8b5344a0a78e"
+    },
+    {
+      "path": "good_morning/IMU-2023-06-01-15_19_03_good_morning.txt",
+      "class": "good_morning",
+      "bytes": 73425,
+      "rows": 2256,
+      "sha256": "c7f36e25ed7415c211e2a9fc85129409d72499f9745b9693e708e09c0176678a"
+    },
+    {
+      "path": "good_morning/IMU-2023-06-01-15_45_22_good_morning.txt",
+      "class": "good_morning",
+      "bytes": 77186,
+      "rows": 2364,
+      "sha256": "a4e50fd09d1567faf9d5bb1e1f423ae8f897107402e7ad1f33bbbdbe54ee5d7b"
+    },
+    {
+      "path": "good_morning/IMU-2023-06-01-16_35_00_good_morning.txt",
+      "class": "good_morning",
+      "bytes": 75705,
+      "rows": 2328,
+      "sha256": "47c23ad7ec26945d22b49f41982fdbbd52e0927f66888c392c8ad6ffd04f8afc"
+    },
+    {
+      "path": "good_morning/IMU-2023-06-01-16_49_42_good_morning.txt",
+      "class": "good_morning",
+      "bytes": 79939,
+      "rows": 2316,
+      "sha256": "a53ebac59a9a9669b59a7af5e09393cac7c42182b767127da6401e3d7e4bc255"
+    },
+    {
+      "path": "good_morning/IMU-2023-06-01-17_21_40_good_morning.txt",
+      "class": "good_morning",
+      "bytes": 81099,
+      "rows": 2484,
+      "sha256": "aa9d0ece0a9bde9be80b64496592565f15b2510bee6b8bb0bc0b08d8bea1c52c"
+    },
+    {
+      "path": "good_morning/IMU-2023-06-02-10_21_45_good_morning.txt",
+      "class": "good_morning",
+      "bytes": 54841,
+      "rows": 1668,
+      "sha256": "9c66dc2a9247d6bb9df7ea68a0e02e5bd3fd2d8588035039a832618870b3d039"
+    },
+    {
+      "path": "good_morning/IMU-2023-06-02-10_47_26_good_morning.txt",
+      "class": "good_morning",
+      "bytes": 74482,
+      "rows": 2292,
+      "sha256": "41691f6bd3ceac7fcbe1bf069808501ee215bc6565f54892a8e255084d9940ce"
+    },
+    {
+      "path": "good_morning/IMU-2023-06-02-11_33_03_good_morning.txt",
+      "class": "good_morning",
+      "bytes": 73370,
+      "rows": 2316,
+      "sha256": "3350f60826c856ed2711fc7dbd5be82335500ea51394cb6d9c3fe510e1f5f7d2"
+    },
+    {
+      "path": "good_morning/IMU-2023-06-02-14_34_45_good_morning.txt",
+      "class": "good_morning",
+      "bytes": 74309,
+      "rows": 2148,
+      "sha256": "7688d5a7819768c5defd4c4ac2093cac52ab0aa5db5c1371f7632811d345ae41"
+    },
+    {
+      "path": "jumping_jack/IMU-2023-05-11-16_21_06_jumping_jack.txt",
+      "class": "jumping_jack",
+      "bytes": 130031,
+      "rows": 3720,
+      "sha256": "a7b73d253121afe576572c8ef4642bc20d59fdda6634419ddefc1fbd3434da1a"
+    },
+    {
+      "path": "jumping_jack/IMU-2023-05-11-17_43_41_jumping_jack.txt",
+      "class": "jumping_jack",
+      "bytes": 100743,
+      "rows": 2820,
+      "sha256": "ccdf51992b209d238e6aec77ac4758dc4d1280d1c8827526b7ea57dd7b99c9a3"
+    },
+    {
+      "path": "jumping_jack/IMU-2023-05-12-13_59_08_jumping_jack.txt",
+      "class": "jumping_jack",
+      "bytes": 59310,
+      "rows": 1776,
+      "sha256": "fe680f7dee01ad899490d172733ed2a931798139dc102d9db0f3fddafa7e0062"
+    },
+    {
+      "path": "jumping_jack/IMU-2023-05-12-14_02_37_jumping_jack.txt",
+      "class": "jumping_jack",
+      "bytes": 69148,
+      "rows": 2064,
+      "sha256": "2db93f46676fb0cfb26490f128ee2738dd6126933c4d957badd1b18270cfbdb2"
+    },
+    {
+      "path": "jumping_jack/IMU-2023-05-12-14_35_05_jumping_jack.txt",
+      "class": "jumping_jack",
+      "bytes": 114707,
+      "rows": 3192,
+      "sha256": "6acbbb3a8951ef46a0dc3ba3f94bac56400614122bc3c94dad2a3eb467a8285b"
+    },
+    {
+      "path": "jumping_jack/IMU-2023-05-12-15_23_43_jumping_jack.txt",
+      "class": "jumping_jack",
+      "bytes": 110684,
+      "rows": 3012,
+      "sha256": "0c065a6ea417e655df75c9823b20ee2fb4217bdcb5f902a51337348d14050db5"
+    },
+    {
+      "path": "jumping_jack/IMU-2023-05-12-15_54_00_jumping_jack.txt",
+      "class": "jumping_jack",
+      "bytes": 70185,
+      "rows": 1920,
+      "sha256": "dab1f9306708670ee23f0cc451f97866fbe52f8b633f2e442b229012d131c94e"
+    },
+    {
+      "path": "jumping_jack/IMU-2023-05-12-16_46_37_jumping_jack.txt",
+      "class": "jumping_jack",
+      "bytes": 28825,
+      "rows": 816,
+      "sha256": "a91faf7fdabb08db3a0e93f0e46cd66020d7351d5566255020c3a4cee4c66efa"
+    },
+    {
+      "path": "jumping_jack/IMU-2023-05-12-17_44_53_jumping_jack.txt",
+      "class": "jumping_jack",
+      "bytes": 91436,
+      "rows": 2868,
+      "sha256": "7fad12a9dc1e03ceafb47b3fd06f274eb29298e4a6ab3b11d4ad64da53920d1e"
+    },
+    {
+      "path": "jumping_jack/IMU-2023-05-12-18_09_58_jumping_jack.txt",
+      "class": "jumping_jack",
+      "bytes": 127644,
+      "rows": 3708,
+      "sha256": "c98c0d78f370b452ecd7ff1adb09f2d6a45a57507cc862910db5b7510f377c80"
+    },
+    {
+      "path": "jumping_jack/IMU-2023-05-12-18_14_12_jumping_jack.txt",
+      "class": "jumping_jack",
+      "bytes": 120841,
+      "rows": 3708,
+      "sha256": "2312b556b2cb76e4d6aee5636f6ebe77b2f63aad22ce2928d37d6554e2fca1d0"
+    },
+    {
+      "path": "jumping_jack/IMU-2023-05-15-10_45_27_jumping_jack.txt",
+      "class": "jumping_jack",
+      "bytes": 109633,
+      "rows": 3000,
+      "sha256": "569ccfe7b35468b987a4fd038f2296c002c4823c09b993e2443c37156192fadf"
+    },
+    {
+      "path": "jumping_jack/IMU-2023-05-15-11_16_09_jumping_jack.txt",
+      "class": "jumping_jack",
+      "bytes": 110104,
+      "rows": 3012,
+      "sha256": "853c0ffbd78dc8bc54ac49b9198e8a0cba0a8a8b390389f08a6c94dddd8bed36"
+    },
+    {
+      "path": "jumping_jack/IMU-2023-05-15-11_38_56_jumping_jack.txt",
+      "class": "jumping_jack",
+      "bytes": 135884,
+      "rows": 3804,
+      "sha256": "f41eba2f76fdbcc522b56882674bd465318ccb86223c8b56d6fe061d7ea83292"
+    },
+    {
+      "path": "jumping_jack/IMU-2023-05-15-15_55_43_jumping_jack.txt",
+      "class": "jumping_jack",
+      "bytes": 154636,
+      "rows": 4536,
+      "sha256": "6be89842a6f0ccda944005cc781ae52b66762db7316aa8dc05b4e292bd2f98d2"
+    },
+    {
+      "path": "jumping_jack/IMU-2023-05-15-16_23_43_jumping_jack.txt",
+      "class": "jumping_jack",
+      "bytes": 111557,
+      "rows": 2988,
+      "sha256": "3d08d6e42e6761acd05348c6e52e78e9a0ad5d8fd8831ec232f35595eb302ae0"
+    },
+    {
+      "path": "jumping_jack/IMU-2023-05-15-16_45_57_jumping_jack.txt",
+      "class": "jumping_jack",
+      "bytes": 108892,
+      "rows": 3000,
+      "sha256": "d534d97059922312eff74d92297a4b9d7cf4dbc6c0d5d45e0f9d9807f932fe9b"
+    },
+    {
+      "path": "jumping_jack/IMU-2023-05-15-17_16_55_jumping_jack.txt",
+      "class": "jumping_jack",
+      "bytes": 109257,
+      "rows": 3024,
+      "sha256": "84c08ca551cfcf63b2d347c199bee4627be0e1168f01dc3c30f06bba564f5ba2"
+    },
+    {
+      "path": "jumping_lunge/IMU-2023-06-01-09_39_58_jumping_lunge.txt",
+      "class": "jumping_lunge",
+      "bytes": 96177,
+      "rows": 2964,
+      "sha256": "0e9ab91ac4069f7830beeb12632aecd371854f98b11b9c7bd28071a9d5ba992f"
+    },
+    {
+      "path": "jumping_lunge/IMU-2023-06-01-10_09_09_jumping_lunge.txt",
+      "class": "jumping_lunge",
+      "bytes": 97306,
+      "rows": 3012,
+      "sha256": "df38189b6d8665c3ecb49d6dd0f390b47aeccce6e16ed1aac3b607c1db5c20e6"
+    },
+    {
+      "path": "jumping_lunge/IMU-2023-06-01-10_46_39_jumping_lunge.txt",
+      "class": "jumping_lunge",
+      "bytes": 167245,
+      "rows": 5340,
+      "sha256": "579e1f7dd5b479ff7affd3bafb1c8c175507729ef000570c7d7060cdc4baff41"
+    },
+    {
+      "path": "jumping_lunge/IMU-2023-06-01-11_20_05_jumping_lunge.txt",
+      "class": "jumping_lunge",
+      "bytes": 92660,
+      "rows": 2988,
+      "sha256": "dce90a1eaf2b23cc222d1e3f275c509b87f579ee5a53632c0be61a9950a2e0e0"
+    },
+    {
+      "path": "jumping_lunge/IMU-2023-06-01-14_29_10_jumping_lunge.txt",
+      "class": "jumping_lunge",
+      "bytes": 82950,
+      "rows": 2532,
+      "sha256": "077febd4fe93d6f9bec0eea8bae974409425f5c72d786500c0d5e34fea143526"
+    },
+    {
+      "path": "jumping_lunge/IMU-2023-06-01-15_03_26_jumping_lunge.txt",
+      "class": "jumping_lunge",
+      "bytes": 114403,
+      "rows": 3672,
+      "sha256": "9813d038a088cd1d80c084e03613457e03d5bc92d8d848c58b569214125ce89a"
+    },
+    {
+      "path": "jumping_lunge/IMU-2023-06-01-15_31_23_jumping_lunge.txt",
+      "class": "jumping_lunge",
+      "bytes": 90010,
+      "rows": 2844,
+      "sha256": "1259b48c10c3bdfaf04dc3e6877ba9f85fb48ac1998b248953312701e8b1edfe"
+    },
+    {
+      "path": "jumping_lunge/IMU-2023-06-01-16_04_55_jumping_lunge.txt",
+      "class": "jumping_lunge",
+      "bytes": 153461,
+      "rows": 4956,
+      "sha256": "d4c8bf755208a097e10d2b747a63174f1f0baab4365a5396ea216270dba72a06"
+    },
+    {
+      "path": "jumping_lunge/IMU-2023-06-01-16_29_12_jumping_lunge.txt",
+      "class": "jumping_lunge",
+      "bytes": 101960,
+      "rows": 3192,
+      "sha256": "f02468d3fe4f8642280813c96f30ac37cdde5bb3cd404da44c273a713ef39586"
+    },
+    {
+      "path": "jumping_lunge/IMU-2023-06-01-16_43_55_jumping_lunge.txt",
+      "class": "jumping_lunge",
+      "bytes": 125160,
+      "rows": 3828,
+      "sha256": "48cc2e0f7089c96c1f41c31395dc9c54f2c2a9be818eae8b6fd525b0aa2afe2c"
+    },
+    {
+      "path": "jumping_lunge/IMU-2023-06-01-17_16_06_jumping_lunge.txt",
+      "class": "jumping_lunge",
+      "bytes": 141500,
+      "rows": 4404,
+      "sha256": "94bb76b1e35b7d1c7136141c500e5b8816d84257d3e93a322d165106d2b011c2"
+    },
+    {
+      "path": "jumping_lunge/IMU-2023-06-02-10_07_26_jumping_lunge.txt",
+      "class": "jumping_lunge",
+      "bytes": 117515,
+      "rows": 3624,
+      "sha256": "bb866f67b13716ea7afe4e467c94ff2f958eeabe93989d7abba2f4a74c01c7b7"
+    },
+    {
+      "path": "jumping_lunge/IMU-2023-06-02-10_40_06_jumping_lunge.txt",
+      "class": "jumping_lunge",
+      "bytes": 210424,
+      "rows": 6648,
+      "sha256": "cd234dc027a4f659b1feaf12b5ee605475ec45a53089c1e4634077d126a4ace5"
+    },
+    {
+      "path": "jumping_lunge/IMU-2023-06-02-11_25_52_jumping_lunge.txt",
+      "class": "jumping_lunge",
+      "bytes": 99475,
+      "rows": 3072,
+      "sha256": "e69470e394d74ba98058974f05a9a721b46a62e4277076246d16ba330de604fa"
+    },
+    {
+      "path": "jumping_lunge/IMU-2023-06-02-14_10_01_jumping_lunge.txt",
+      "class": "jumping_lunge",
+      "bytes": 142948,
+      "rows": 4440,
+      "sha256": "5f7b2f57a7d5a4d5bd6178361ae7458793f6a0ba739fab224931cffb0a57ef76"
+    },
+    {
+      "path": "jumping_squat/IMU-2023-05-17-16_38_15_jumping_squat.txt",
+      "class": "jumping_squat",
+      "bytes": 78462,
+      "rows": 2376,
+      "sha256": "1d816a1ecf4b1e8252dec7627239190ded9359f7dee1112f45e6d0506c4db339"
+    },
+    {
+      "path": "jumping_squat/IMU-2023-05-17-16_44_38_jumping_squat.txt",
+      "class": "jumping_squat",
+      "bytes": 76970,
+      "rows": 2364,
+      "sha256": "09e5960ba662e3f5e26e021e116a16fa47ec151251f1c70a56669012ae639c95"
+    },
+    {
+      "path": "jumping_squat/IMU-2023-06-01-09_48_38_jumping_squat.txt",
+      "class": "jumping_squat",
+      "bytes": 120546,
+      "rows": 3732,
+      "sha256": "06b6a73a3b22ecf8ae7e4de375e5b894335fdac0ab9ffff8bb66df0f2059fce2"
+    },
+    {
+      "path": "jumping_squat/IMU-2023-06-01-10_16_43_jumping_squat.txt",
+      "class": "jumping_squat",
+      "bytes": 92901,
+      "rows": 2820,
+      "sha256": "6cf927cc495b47ae61dfcf1c93a3e9d99a362e7e5ea69620392d5381d0cfb362"
+    },
+    {
+      "path": "jumping_squat/IMU-2023-06-01-11_00_32_jumping_squat.txt",
+      "class": "jumping_squat",
+      "bytes": 174799,
+      "rows": 5532,
+      "sha256": "dbfd4d877a2ea1cbfc18c3557b25cf12ca1804ffde2c3012b76ebffcfecee0bb"
+    },
+    {
+      "path": "jumping_squat/IMU-2023-06-01-14_36_35_jumping_squat.txt",
+      "class": "jumping_squat",
+      "bytes": 125111,
+      "rows": 3732,
+      "sha256": "3b3f1553217a526548b6fd525f860dc1242b2ac6e1089a7a3b6f9e7be4fd7113"
+    },
+    {
+      "path": "jumping_squat/IMU-2023-06-01-15_14_30_jumping_squat.txt",
+      "class": "jumping_squat",
+      "bytes": 121281,
+      "rows": 3768,
+      "sha256": "6392ddbccd91879b9549ec2fa3ce0743edea86d4584db7272768f3f53e7f6045"
+    },
+    {
+      "path": "jumping_squat/IMU-2023-06-01-15_39_06_jumping_squat.txt",
+      "class": "jumping_squat",
+      "bytes": 80059,
+      "rows": 2340,
+      "sha256": "0e979edad04bb7d2eed4afb9280127d7fd95da3c7179beac8b9c3e619ecb581f"
+    },
+    {
+      "path": "jumping_squat/IMU-2023-06-01-16_54_28_jumping_squat.txt",
+      "class": "jumping_squat",
+      "bytes": 92514,
+      "rows": 2832,
+      "sha256": "266bd5566331ede9e49bfe1d230a49d9a198d9ec202a8547de0ca27361f89d67"
+    },
+    {
+      "path": "jumping_squat/IMU-2023-06-01-17_26_04_jumping_squat.txt",
+      "class": "jumping_squat",
+      "bytes": 145694,
+      "rows": 4536,
+      "sha256": "b596772a869d85f56ff897a2ae8d192a841765d07185d26b09c11ceb0701cc9f"
+    },
+    {
+      "path": "jumping_squat/IMU-2023-06-02-10_14_01_jumping_squat.txt",
+      "class": "jumping_squat",
+      "bytes": 160584,
+      "rows": 4968,
+      "sha256": "95dfb419771f58e96ed7f6021d1af2115f47c8e13b339a87eba367c57c31a7be"
+    },
+    {
+      "path": "jumping_squat/IMU-2023-06-02-10_51_35_jumping_squat.txt",
+      "class": "jumping_squat",
+      "bytes": 134772,
+      "rows": 3936,
+      "sha256": "4e0f4989f667dab64bac6363c31535f24ef25047622ef50bb384f9e4a399561a"
+    },
+    {
+      "path": "jumping_squat/IMU-2023-06-02-11_18_16_jumping_squat.txt",
+      "class": "jumping_squat",
+      "bytes": 81272,
+      "rows": 2460,
+      "sha256": "eb38e9fde6babae0ac83a4a9beb4d27ea6524b434b053c150cdbd52cd8fba9b6"
+    },
+    {
+      "path": "jumping_squat/IMU-2023-06-02-11_49_02_jumping_squat.txt",
+      "class": "jumping_squat",
+      "bytes": 92589,
+      "rows": 2940,
+      "sha256": "3d903a2e84e9aa9ff84ff679cf2d801d3c74260fcecd9ad17e3d1f8249c44f4d"
+    },
+    {
+      "path": "jumping_squat/IMU-2023-06-02-14_20_28_jumping_squat.txt",
+      "class": "jumping_squat",
+      "bytes": 167886,
+      "rows": 5472,
+      "sha256": "d5b614cf3f40828c3104a8359ff1256ae06c67f23a49eafca1e975bb0d56c5b4"
+    },
+    {
+      "path": "jumping_squat/IMU-2023-06-02-14_43_16_jumping_squat.txt",
+      "class": "jumping_squat",
+      "bytes": 94420,
+      "rows": 2832,
+      "sha256": "fa029674d95562645f5acf9768b7fed8203119540544e1806ce89790113fafb1"
+    },
+    {
+      "path": "lunge/IMU-2023-05-11-17_09_27_lunge.txt",
+      "class": "lunge",
+      "bytes": 46304,
+      "rows": 1392,
+      "sha256": "e43b19adca2164b7177fc7ec2e4ee934cbf33648bd0171cb91c9a20af4e06d06"
+    },
+    {
+      "path": "lunge/IMU-2023-05-11-17_11_18_lunge.txt",
+      "class": "lunge",
+      "bytes": 100406,
+      "rows": 2964,
+      "sha256": "46072cfd19cd24ac7cf9ca110426c5a752836627454999ce468b1792570977ff"
+    },
+    {
+      "path": "lunge/IMU-2023-05-11-17_39_46_lunge.txt",
+      "class": "lunge",
+      "bytes": 94750,
+      "rows": 2916,
+      "sha256": "a27f75c570046c0fb8d6c83e3777e1ec5599392722b2cd8c50973c641173f10a"
+    },
+    {
+      "path": "lunge/IMU-2023-05-11-18_16_33_lunge.txt",
+      "class": "lunge",
+      "bytes": 94892,
+      "rows": 3000,
+      "sha256": "5a606e725c51c235eb16615167666de7103ec9eebfc0b29fd04df469cd213d16"
+    },
+    {
+      "path": "lunge/IMU-2023-06-01-09_53_41_lunge.txt",
+      "class": "lunge",
+      "bytes": 73346,
+      "rows": 2352,
+      "sha256": "bb292c6dbb6a4cf1cb613364f206a10d7370f479d9d24b358eddff9c00cc8316"
+    },
+    {
+      "path": "lunge/IMU-2023-06-01-10_25_00_lunge.txt",
+      "class": "lunge",
+      "bytes": 70853,
+      "rows": 2232,
+      "sha256": "c039d2098effca8544eaf039ea00db5b6f1e014e19dcc72779b85053c944ee64"
+    },
+    {
+      "path": "lunge/IMU-2023-06-01-11_16_30_lunge.txt",
+      "class": "lunge",
+      "bytes": 112510,
+      "rows": 3792,
+      "sha256": "30d7dfa94345f8f92f5345b5048b71bec287138c1ad2098174f071775c26b7ce"
+    },
+    {
+      "path": "lunge/IMU-2023-06-01-14_43_47_lunge.txt",
+      "class": "lunge",
+      "bytes": 77145,
+      "rows": 2436,
+      "sha256": "767052f09b17c1e2cace473dbb09a9f5d0f8caa75d2ac84950cc771981a1a23c"
+    },
+    {
+      "path": "lunge/IMU-2023-06-01-14_59_42_lunge.txt",
+      "class": "lunge",
+      "bytes": 69092,
+      "rows": 2268,
+      "sha256": "b527b2571102bb6deea6b1da88ea8d4ecf9dbe774ae2b7cb5473f086780fbf74"
+    },
+    {
+      "path": "lunge/IMU-2023-06-01-15_36_01_lunge.txt",
+      "class": "lunge",
+      "bytes": 75413,
+      "rows": 2292,
+      "sha256": "045b928615d619d1e7ce4a83cd905414c51e9f209fb22542579547c2832c18db"
+    },
+    {
+      "path": "lunge/IMU-2023-06-01-16_01_47_lunge.txt",
+      "class": "lunge",
+      "bytes": 73347,
+      "rows": 2304,
+      "sha256": "b2a1096faa62e80fc03cdcbf4de357691578300611d17caefc00cc58c75ee7fa"
+    },
+    {
+      "path": "lunge/IMU-2023-06-01-16_24_55_lunge.txt",
+      "class": "lunge",
+      "bytes": 71644,
+      "rows": 2292,
+      "sha256": "ce704ea2fe900cd257c5f668d8a937a171f872a880e058d57d84cf2ae8edb96d"
+    },
+    {
+      "path": "lunge/IMU-2023-06-01-16_40_48_lunge.txt",
+      "class": "lunge",
+      "bytes": 70325,
+      "rows": 2280,
+      "sha256": "03435fc124b67db32f63513da9163ee7b577bfa8fd145daf668343f8e28bb65b"
+    },
+    {
+      "path": "lunge/IMU-2023-06-01-17_13_00_lunge.txt",
+      "class": "lunge",
+      "bytes": 70694,
+      "rows": 2268,
+      "sha256": "388b71be9cf28ade1ee30ff8d56a558882fa70cb217096db94ed4c0e773a1a40"
+    },
+    {
+      "path": "lunge/IMU-2023-06-02-10_02_14_lunge.txt",
+      "class": "lunge",
+      "bytes": 69426,
+      "rows": 2244,
+      "sha256": "eadbac9fa4a0d33f1eb8405debaea96b3c8bcd3ca18408913a26f3f8a37d0172"
+    },
+    {
+      "path": "lunge/IMU-2023-06-02-10_36_37_lunge.txt",
+      "class": "lunge",
+      "bytes": 75135,
+      "rows": 2328,
+      "sha256": "67a4f7f58b12d46504f40a555834b5a87de5be3658f7ef16e8c67f5e793dd69b"
+    },
+    {
+      "path": "lunge/IMU-2023-06-02-11_07_47_lunge.txt",
+      "class": "lunge",
+      "bytes": 73457,
+      "rows": 2328,
+      "sha256": "cee3ca8a3ffcf5e98445ce34b72003cef692b208543e21ebfac81581840fa828"
+    },
+    {
+      "path": "lunge/IMU-2023-06-02-14_05_54_lunge.txt",
+      "class": "lunge",
+      "bytes": 70648,
+      "rows": 2268,
+      "sha256": "2c276166e4668b4576051ea0f12060c901a60014937771a44d4d7e1b48cc0009"
+    },
+    {
+      "path": "ReadMe.txt",
+      "class": null,
+      "bytes": 1041,
+      "rows": null,
+      "sha256": "da5acbd07f9530221ac6c9300afa93d7647adb0942bf0efb6347b6f5b9000fa9"
+    },
+    {
+      "path": "sit/IMU-2023-05-11-15_50_29_sit.txt",
+      "class": "sit",
+      "bytes": 83985,
+      "rows": 2904,
+      "sha256": "dad73f9d5f7984197ff74cab78614ede82befe46fce40080ce2b77d98d0c73ff"
+    },
+    {
+      "path": "sit/IMU-2023-05-11-16_32_56_sit.txt",
+      "class": "sit",
+      "bytes": 93657,
+      "rows": 2976,
+      "sha256": "d2f1b18ff17f6dbce03bfdde4e72d4fde65f9bfde51ffe6bcd2540a35f82f72b"
+    },
+    {
+      "path": "sit/IMU-2023-05-11-17_48_39_sit.txt",
+      "class": "sit",
+      "bytes": 85886,
+      "rows": 3036,
+      "sha256": "dec64b7282ddedc2b28181b10df73babef114a7726d75d904eadc9c1f110ce7f"
+    },
+    {
+      "path": "sit/IMU-2023-05-12-10_34_37_sit.txt",
+      "class": "sit",
+      "bytes": 84494,
+      "rows": 3000,
+      "sha256": "68810c92d687d12bc6111b2d8787c57d048178b695f465b4c5f30588edca1689"
+    },
+    {
+      "path": "sit/IMU-2023-05-12-13_35_21_sit.txt",
+      "class": "sit",
+      "bytes": 91425,
+      "rows": 3000,
+      "sha256": "f22006e06eabf0f909b53dd29cbd2a0634c5ebe4ee5ab7fbfb230c47a856e24f"
+    },
+    {
+      "path": "sit/IMU-2023-05-12-14_08_17_sit.txt",
+      "class": "sit",
+      "bytes": 87187,
+      "rows": 3084,
+      "sha256": "6e17cbd3fe1ac51c56fdb76fc81fc7e1ea0f55ca23e5dc2cc0152fa43496486a"
+    },
+    {
+      "path": "sit/IMU-2023-05-12-14_55_39_sit.txt",
+      "class": "sit",
+      "bytes": 74103,
+      "rows": 2472,
+      "sha256": "70df9b214adc342604f064fbaddc7aa8cdc6383fafa895f935164af13652dd26"
+    },
+    {
+      "path": "sit/IMU-2023-05-12-15_00_29_sit.txt",
+      "class": "sit",
+      "bytes": 79721,
+      "rows": 2688,
+      "sha256": "432badc95192d97f8e4b94448d9a864d08333fc45514f32178a0cd91a4298b56"
+    },
+    {
+      "path": "sit/IMU-2023-05-12-15_29_30_sit.txt",
+      "class": "sit",
+      "bytes": 90618,
+      "rows": 3360,
+      "sha256": "1f5f9258459207ac383521dca00cd487af60df09e18a81d837e8ab79eb2adf8f"
+    },
+    {
+      "path": "sit/IMU-2023-05-12-16_13_12_sit.txt",
+      "class": "sit",
+      "bytes": 77608,
+      "rows": 2784,
+      "sha256": "2f7856e4facc433afbfebc1736631d416e00a9d97b719b2d986939e3d60fc774"
+    },
+    {
+      "path": "sit/IMU-2023-05-12-17_23_24_sit.txt",
+      "class": "sit",
+      "bytes": 95089,
+      "rows": 3276,
+      "sha256": "912aec86e3fe0db753a4425d5a3c5a82d00b9846caf1ba0e36b1314bbbb28996"
+    },
+    {
+      "path": "sit/IMU-2023-05-12-17_52_34_sit.txt",
+      "class": "sit",
+      "bytes": 85976,
+      "rows": 3012,
+      "sha256": "e439cffae2da107b759700b525c0cde80d2b665d99d05ecb32d0fb07ffa4bb79"
+    },
+    {
+      "path": "sit/IMU-2023-05-15-10_29_25_sit.txt",
+      "class": "sit",
+      "bytes": 80278,
+      "rows": 3060,
+      "sha256": "4a3db344575c5fd5d96fbadbd7ed9397c09800878fadd9d9cd866c2608b542c1"
+    },
+    {
+      "path": "sit/IMU-2023-05-15-11_00_20_sit.txt",
+      "class": "sit",
+      "bytes": 86628,
+      "rows": 2976,
+      "sha256": "a29fac5e130cf9f47065e27a9ed2d043b86040ea05265045e93819ea836fdb02"
+    },
+    {
+      "path": "sit/IMU-2023-05-15-11_29_10_sit.txt",
+      "class": "sit",
+      "bytes": 84388,
+      "rows": 3012,
+      "sha256": "10c9416c4731e1cc8ceafa66583d597f6bdecc1abee0fa26619179a0cd5dc859"
+    },
+    {
+      "path": "sit/IMU-2023-05-15-15_44_03_sit.txt",
+      "class": "sit",
+      "bytes": 88139,
+      "rows": 3012,
+      "sha256": "13389bbdd8f2400d7fc7b975e7866f2c65f90537376db7580409252dffd556ed"
+    },
+    {
+      "path": "sit/IMU-2023-05-15-16_11_51_sit.txt",
+      "class": "sit",
+      "bytes": 91777,
+      "rows": 3036,
+      "sha256": "9921eaa4330c80075beb36433316e177eb8aad20e686b51734253529a84bf539"
+    },
+    {
+      "path": "sit/IMU-2023-05-15-16_32_13_sit.txt",
+      "class": "sit",
+      "bytes": 88956,
+      "rows": 3012,
+      "sha256": "22669271fc64d1a0ab693e5e35d9635722a4425354eabd1ffbd0cb8a42db69d7"
+    },
+    {
+      "path": "sit/IMU-2023-05-15-16_59_24_sit.txt",
+      "class": "sit",
+      "bytes": 91226,
+      "rows": 3036,
+      "sha256": "061001958808f7d5b0a65eb7e66673ad2f126bbd6fb1e8c1ca5918e190893b00"
+    },
+    {
+      "path": "squat/IMU-2023-05-11-17_21_40_squat.txt",
+      "class": "squat",
+      "bytes": 61535,
+      "rows": 1800,
+      "sha256": "73a6534555e56a40d95541e70aa627dde441d5cc955d651dd7703cb86d273053"
+    },
+    {
+      "path": "squat/IMU-2023-05-11-17_29_48_squat.txt",
+      "class": "squat",
+      "bytes": 102984,
+      "rows": 3024,
+      "sha256": "9ebc4a0c5cc955fc1daa507287942f08a92496f863851cfc9b88798f40408f27"
+    },
+    {
+      "path": "squat/IMU-2023-05-11-18_13_17_squat.txt",
+      "class": "squat",
+      "bytes": 50938,
+      "rows": 1524,
+      "sha256": "8306df02ea59903e7bc93531089822f36b56fadd1dbc4044d365485954f85a4b"
+    },
+    {
+      "path": "squat/IMU-2023-05-12-13_39_07_squat.txt",
+      "class": "squat",
+      "bytes": 102032,
+      "rows": 3084,
+      "sha256": "dd01d08066d8154f1d4ff6b0336faac1167c7dd12468b16cc19a04571ae86456"
+    },
+    {
+      "path": "squat/IMU-2023-05-12-14_11_46_squat.txt",
+      "class": "squat",
+      "bytes": 73106,
+      "rows": 2172,
+      "sha256": "9ce92b3e1a39314dbc40b688f937267281bb1c10dba25b3549fd616c9b7e267f"
+    },
+    {
+      "path": "squat/IMU-2023-05-12-15_14_02_squat.txt",
+      "class": "squat",
+      "bytes": 106384,
+      "rows": 3012,
+      "sha256": "e8013c0935a9462a965655fae68a86d4b078263fae5304e716ef97c8f67f1012"
+    },
+    {
+      "path": "squat/IMU-2023-05-12-17_37_23_squat.txt",
+      "class": "squat",
+      "bytes": 96751,
+      "rows": 2976,
+      "sha256": "d6935c3d802ad7b8bc33c70af56339445b8e49872c3d2a5150b1bbd4844c7bd7"
+    },
+    {
+      "path": "squat/IMU-2023-05-12-18_03_35_squat.txt",
+      "class": "squat",
+      "bytes": 94739,
+      "rows": 2748,
+      "sha256": "8e0e5652ee0c7ad12ac81c8631747150f260d25354c9d589fd44eb283979a375"
+    },
+    {
+      "path": "squat/IMU-2023-05-15-10_19_06_squat.txt",
+      "class": "squat",
+      "bytes": 106081,
+      "rows": 3132,
+      "sha256": "a95e5716743273d79efdc2d1c326794828904c899c75653ea9a10bca291b5830"
+    },
+    {
+      "path": "squat/IMU-2023-05-15-10_57_02_squat.txt",
+      "class": "squat",
+      "bytes": 105201,
+      "rows": 3048,
+      "sha256": "169a873cd3d9a826707609311babbd41921c4c31be62d7591f20b2bc69c95501"
+    },
+    {
+      "path": "squat/IMU-2023-05-15-11_26_10_squat.txt",
+      "class": "squat",
+      "bytes": 105745,
+      "rows": 3144,
+      "sha256": "ec78a47b1b0fbe38506ef7212549500fa15236a33b6e57e7bbe7bd3ebaa9c02a"
+    },
+    {
+      "path": "squat/IMU-2023-05-15-15_40_44_squat.txt",
+      "class": "squat",
+      "bytes": 101168,
+      "rows": 3012,
+      "sha256": "6745696ea88a507e8c47c60cda7782fc271922bf7f270c491025d07b823d4c67"
+    },
+    {
+      "path": "squat/IMU-2023-05-15-16_08_37_squat.txt",
+      "class": "squat",
+      "bytes": 107269,
+      "rows": 3036,
+      "sha256": "44373e5c88f36f5520c40b54ae75a53cdd6301954975588e3b741669a07e98ee"
+    },
+    {
+      "path": "squat/IMU-2023-05-15-16_29_08_squat.txt",
+      "class": "squat",
+      "bytes": 106726,
+      "rows": 3096,
+      "sha256": "da91260f5ba7a4bd60c7264dc678b010024f46d179bb1a565e3977aa5e6b472c"
+    },
+    {
+      "path": "squat/IMU-2023-05-15-16_56_18_squat.txt",
+      "class": "squat",
+      "bytes": 105830,
+      "rows": 3084,
+      "sha256": "2ce85083cf6e73817e00b4a0d2dd152062175c24932c47064af7928d423344e2"
+    },
+    {
+      "path": "trot/IMU-2023-05-11-16_55_30_trot.txt",
+      "class": "trot",
+      "bytes": 28407,
+      "rows": 828,
+      "sha256": "2706fe976282db22180cf8f045e1cb3780e73bf31bf80ffad30a8b2e8f3d1903"
+    },
+    {
+      "path": "trot/IMU-2023-05-11-16_57_16_trot.txt",
+      "class": "trot",
+      "bytes": 101969,
+      "rows": 3000,
+      "sha256": "5ec99b9b56395e80cc625ed98d5bcfead8f81d3f3885e119545283da531af5e4"
+    },
+    {
+      "path": "trot/IMU-2023-05-11-17_58_10_trot.txt",
+      "class": "trot",
+      "bytes": 61545,
+      "rows": 1836,
+      "sha256": "7d7cc683698204e4e230923dd19a039de9f22ed4d4955117122bb97cf942896d"
+    },
+    {
+      "path": "trot/IMU-2023-05-12-10_46_54_trot.txt",
+      "class": "trot",
+      "bytes": 103502,
+      "rows": 3024,
+      "sha256": "a811bc633acb65b6b3c9a6da4abf74d598760c96f856f6b2907a67e75140408c"
+    },
+    {
+      "path": "trot/IMU-2023-05-12-13_55_26_trot.txt",
+      "class": "trot",
+      "bytes": 102145,
+      "rows": 3036,
+      "sha256": "36708bb4dd55966a7207e2233b2e4797a12db4abc4c4b116b7fa1999db7666b8"
+    },
+    {
+      "path": "trot/IMU-2023-05-12-14_22_56_trot.txt",
+      "class": "trot",
+      "bytes": 65589,
+      "rows": 1908,
+      "sha256": "b8b1c5f4b8996437d94583f4c6bfa1b17212756a25874f09d2db2ed5c1f767c0"
+    },
+    {
+      "path": "trot/IMU-2023-05-12-14_26_33_trot.txt",
+      "class": "trot",
+      "bytes": 105823,
+      "rows": 3072,
+      "sha256": "c5323bc47d7a080e2289fe74204f6cecaf77163636af6185d157a7a304e5cf73"
+    },
+    {
+      "path": "trot/IMU-2023-05-12-15_05_20_trot.txt",
+      "class": "trot",
+      "bytes": 105899,
+      "rows": 3120,
+      "sha256": "2fcdec7bfb58a9a442f23a458e2f4776a20262de1d7c03c446caa331b9bcc77b"
+    },
+    {
+      "path": "trot/IMU-2023-05-12-15_33_44_trot.txt",
+      "class": "trot",
+      "bytes": 44655,
+      "rows": 1272,
+      "sha256": "b45f8547bbe0465191286eaa4e99f19b5330c8d1425bd50e83abe607dc5a61dc"
+    },
+    {
+      "path": "trot/IMU-2023-05-12-15_34_48_trot.txt",
+      "class": "trot",
+      "bytes": 98027,
+      "rows": 2808,
+      "sha256": "057027a533d7d0ff074a2d5f4988447215262fe31516b9b589f915745c7ccaf3"
+    },
+    {
+      "path": "trot/IMU-2023-05-12-16_24_55_trot.txt",
+      "class": "trot",
+      "bytes": 101835,
+      "rows": 2928,
+      "sha256": "370a1a3ee0ed3566d519662ec9ac603201c985a94e43fe960cd495a5fa4a4a51"
+    },
+    {
+      "path": "trot/IMU-2023-05-12-17_29_29_trot.txt",
+      "class": "trot",
+      "bytes": 87778,
+      "rows": 2544,
+      "sha256": "8a81caa219fdf5c8ccdd6367a8c96730d9925d1dacda570a81285bc98817c9ec"
+    },
+    {
+      "path": "trot/IMU-2023-05-12-17_56_22_trot.txt",
+      "class": "trot",
+      "bytes": 91459,
+      "rows": 2604,
+      "sha256": "638b99bd40938259e639363f21cfe64f7e3456d7c6de6eb807c82e38384f14e0"
+    },
+    {
+      "path": "trot/IMU-2023-05-15-10_39_51_trot.txt",
+      "class": "trot",
+      "bytes": 101426,
+      "rows": 3012,
+      "sha256": "25868ca1cbc3591c1a4491151677b872109e8dcd7c7f7cc4f3a22dc4e521b79e"
+    },
+    {
+      "path": "trot/IMU-2023-05-15-11_12_09_trot.txt",
+      "class": "trot",
+      "bytes": 100031,
+      "rows": 3024,
+      "sha256": "d43227b5501fd95c3ce55ee82bc6d68341739d91dca30e4ae176b4b8ad12b86b"
+    },
+    {
+      "path": "trot/IMU-2023-05-15-11_35_57_trot.txt",
+      "class": "trot",
+      "bytes": 99625,
+      "rows": 3012,
+      "sha256": "226aa497703de2fa78280e6cd7e95d54565d78f0a13bda1ff172f5e059c77a46"
+    },
+    {
+      "path": "trot/IMU-2023-05-15-15_51_34_trot.txt",
+      "class": "trot",
+      "bytes": 107427,
+      "rows": 3048,
+      "sha256": "7358c0e6d893f9f17c6ecfbe9cb4385c56752c6b473f56aaac4d83a5a29d328d"
+    },
+    {
+      "path": "trot/IMU-2023-05-15-16_17_05_trot.txt",
+      "class": "trot",
+      "bytes": 107757,
+      "rows": 3024,
+      "sha256": "680e9a189f4b6d936bbb0501ec930bc720fdecca49823dadfd71df5d794cb45b"
+    },
+    {
+      "path": "trot/IMU-2023-05-15-16_37_44_trot.txt",
+      "class": "trot",
+      "bytes": 102571,
+      "rows": 3024,
+      "sha256": "d2ce4a74fa419f94f9f88a396f3a0e2d481cbdb339dea2231527d1ab56cf1bd5"
+    },
+    {
+      "path": "trot/IMU-2023-05-15-17_09_44_trot.txt",
+      "class": "trot",
+      "bytes": 105531,
+      "rows": 3072,
+      "sha256": "ca5a62a70006d4c69bccdc45c2ce2d95e489ac64a3023c387e1e6fa8a98ecf40"
+    },
+    {
+      "path": "tuck_jump/IMU-2023-05-11-16_46_30_tuck_jump.txt",
+      "class": "tuck_jump",
+      "bytes": 83575,
+      "rows": 2640,
+      "sha256": "0f1dd3e0c276d54d6aff3a2e465e247a0461b0e52fbae60eb017ee54cc3d76f8"
+    },
+    {
+      "path": "tuck_jump/IMU-2023-06-01-09_58_11_tuck_jump.txt",
+      "class": "tuck_jump",
+      "bytes": 138549,
+      "rows": 4476,
+      "sha256": "7cf7c37254534e1c7b0ff739043e7321b7dc6d6e1d87019894a5d7eb7c40d81d"
+    },
+    {
+      "path": "tuck_jump/IMU-2023-06-01-10_35_41_tuck_jump.txt",
+      "class": "tuck_jump",
+      "bytes": 43414,
+      "rows": 1332,
+      "sha256": "ea43d6c39102c3cfb5f1f20d079f22ab7c7242581141055a513ba3dac1a105e8"
+    },
+    {
+      "path": "tuck_jump/IMU-2023-06-01-11_09_42_tuck_jump.txt",
+      "class": "tuck_jump",
+      "bytes": 129737,
+      "rows": 4176,
+      "sha256": "5d9d61f5f5ed90c72565fd4db9a597a3bd09eb9877477f8ad4e0dafcb528c93f"
+    },
+    {
+      "path": "tuck_jump/IMU-2023-06-01-14_49_24_tuck_jump.txt",
+      "class": "tuck_jump",
+      "bytes": 72191,
+      "rows": 2196,
+      "sha256": "8818de4520bbe1e91ceb9c77c2062a60ca3b290950d9e5c87ff0889ce304cab0"
+    },
+    {
+      "path": "tuck_jump/IMU-2023-06-01-15_23_00_tuck_jump.txt",
+      "class": "tuck_jump",
+      "bytes": 166798,
+      "rows": 5268,
+      "sha256": "ec9867da96c35565ec5f0be0b5f0324801ec626d6840d9adbe63b2d533dc48a8"
+    },
+    {
+      "path": "tuck_jump/IMU-2023-06-01-15_49_40_tuck_jump.txt",
+      "class": "tuck_jump",
+      "bytes": 114686,
+      "rows": 3552,
+      "sha256": "26cf4ad58a9ab80b3096fdc120e2b3160fec4f4b4b93408f52dfd11b0678d75a"
+    },
+    {
+      "path": "tuck_jump/IMU-2023-06-01-16_11_38_tuck_jump.txt",
+      "class": "tuck_jump",
+      "bytes": 292257,
+      "rows": 9336,
+      "sha256": "fb376b7bdbe50bbe23b5dc1eb3cfd406d4ba1b0521226d3623a4ea74054295fb"
+    },
+    {
+      "path": "tuck_jump/IMU-2023-06-01-17_01_58_tuck_jump.txt",
+      "class": "tuck_jump",
+      "bytes": 167177,
+      "rows": 5268,
+      "sha256": "e11adefc543e80ceb5817e625819041231c1e715e1e330e7854b8406cbb8cb63"
+    },
+    {
+      "path": "tuck_jump/IMU-2023-06-01-17_40_48_tuck_jump.txt",
+      "class": "tuck_jump",
+      "bytes": 129180,
+      "rows": 4044,
+      "sha256": "188e882b740357d4098cdaa254310f1c96cf50b02a739925cbeecc01c39b2f5e"
+    },
+    {
+      "path": "tuck_jump/IMU-2023-06-02-10_27_58_tuck_jump.txt",
+      "class": "tuck_jump",
+      "bytes": 99738,
+      "rows": 3120,
+      "sha256": "929307b3ebfdf2237d01a68db65c86e2d62d47fcba85092f1db50991edaffd43"
+    },
+    {
+      "path": "tuck_jump/IMU-2023-06-02-10_57_20_tuck_jump.txt",
+      "class": "tuck_jump",
+      "bytes": 29479,
+      "rows": 864,
+      "sha256": "1bf659f22a91df6b9f97afb3c3f6415a785d6d8d8bb8a4e3f090f3ffa5e690de"
+    },
+    {
+      "path": "tuck_jump/IMU-2023-06-02-11_36_46_tuck_jump.txt",
+      "class": "tuck_jump",
+      "bytes": 75928,
+      "rows": 2316,
+      "sha256": "e50c141214979886abc4a7225ac3a27e40ff026533120595a5b38bd402524305"
+    },
+    {
+      "path": "tuck_jump/IMU-2023-06-02-11_45_53_tuck_jump.txt",
+      "class": "tuck_jump",
+      "bytes": 75668,
+      "rows": 2388,
+      "sha256": "9caf042b0033c609b3064b6df95d690d2cce9c3c01fe03989fe8ec45330d9d7e"
+    },
+    {
+      "path": "tuck_jump/IMU-2023-06-02-14_48_37_tuck_jump.txt",
+      "class": "tuck_jump",
+      "bytes": 77839,
+      "rows": 2436,
+      "sha256": "a313105226063c394ba7e074e4b9fa692b726a463afaeda3999925494364db0c"
+    },
+    {
+      "path": "walk/IMU-2023-05-11-16_43_43_walk.txt",
+      "class": "walk",
+      "bytes": 99918,
+      "rows": 3000,
+      "sha256": "034ce24a84a43c314b1ff506e67ed1f780f224c0c2e409423bda50fad1c800d0"
+    },
+    {
+      "path": "walk/IMU-2023-05-11-17_18_31_walk.txt",
+      "class": "walk",
+      "bytes": 103366,
+      "rows": 3024,
+      "sha256": "ff3d363e5bd283c055659d26a646576c38caf2fb1338cbde43cdbbff9290c346"
+    },
+    {
+      "path": "walk/IMU-2023-05-11-17_51_44_walk.txt",
+      "class": "walk",
+      "bytes": 30863,
+      "rows": 960,
+      "sha256": "aee2e02f57eaf3797978cc843b4ac1fe03aebab25793633ad8c04a301de347e4"
+    },
+    {
+      "path": "walk/IMU-2023-05-11-17_55_40_walk.txt",
+      "class": "walk",
+      "bytes": 52330,
+      "rows": 1644,
+      "sha256": "60610e50546eb7462e3779349e7b467e7709d57f6687d76ffd111c4bbbee9962"
+    },
+    {
+      "path": "walk/IMU-2023-05-12-10_40_14_walk.txt",
+      "class": "walk",
+      "bytes": 96050,
+      "rows": 2988,
+      "sha256": "a2f4abd3d4a10b0f350bd5d4c49104d1529f16b70f2baa5a9bb067a5ee6e6007"
+    },
+    {
+      "path": "walk/IMU-2023-05-12-14_19_31_walk.txt",
+      "class": "walk",
+      "bytes": 102180,
+      "rows": 3048,
+      "sha256": "b51860baba79100b89155d06535f91efd6b778f5da11f56ad4f00221649c722d"
+    },
+    {
+      "path": "walk/IMU-2023-05-12-15_08_08_walk.txt",
+      "class": "walk",
+      "bytes": 105377,
+      "rows": 3084,
+      "sha256": "c0bda3ac74dffd6b04a4c862c0b87e5f9e81f8f6ef41643788fc5b61a895e971"
+    },
+    {
+      "path": "walk/IMU-2023-05-12-15_39_55_walk.txt",
+      "class": "walk",
+      "bytes": 100398,
+      "rows": 3024,
+      "sha256": "26addd5a3f255a855e09b34866b4bae71cdd9ec8a3025b2fb4b24c327bcda0ab"
+    },
+    {
+      "path": "walk/IMU-2023-05-12-16_22_16_walk.txt",
+      "class": "walk",
+      "bytes": 103441,
+      "rows": 3156,
+      "sha256": "df01a44c94bf46602d1ccb4ef4fc640e2d34c58c24700ffdf280f34c2828cf62"
+    },
+    {
+      "path": "walk/IMU-2023-05-12-17_32_13_walk.txt",
+      "class": "walk",
+      "bytes": 92565,
+      "rows": 2832,
+      "sha256": "4b1d5e7159f635d7484ec2eaa8dcd5a837d769ecb4dc67def2aa25c26843c7ab"
+    },
+    {
+      "path": "walk/IMU-2023-05-12-17_58_50_walk.txt",
+      "class": "walk",
+      "bytes": 97612,
+      "rows": 2820,
+      "sha256": "702e5d807c94392c3049f945096cb7035c3411eb3152ddc9874f29f4fec0cb1c"
+    },
+    {
+      "path": "walk/IMU-2023-05-15-10_36_38_walk.txt",
+      "class": "walk",
+      "bytes": 97630,
+      "rows": 2976,
+      "sha256": "a02d40dab3d42d3fc5077efbb61f06f902c836b53fdf4110cb93e81bfd3d87f7"
+    },
+    {
+      "path": "walk/IMU-2023-05-15-11_04_20_walk.txt",
+      "class": "walk",
+      "bytes": 102087,
+      "rows": 3012,
+      "sha256": "36b431454074778f9c08e5ae42306ffca9568b95da6ff505a7d18f4df976f94d"
+    },
+    {
+      "path": "walk/IMU-2023-05-15-11_33_28_walk.txt",
+      "class": "walk",
+      "bytes": 94962,
+      "rows": 2820,
+      "sha256": "26008d61aae33273aeaef6d7a75c886eb0b5486ef8276275a9766cebd1b655d3"
+    },
+    {
+      "path": "walk/IMU-2023-05-15-15_48_19_walk.txt",
+      "class": "walk",
+      "bytes": 102895,
+      "rows": 3072,
+      "sha256": "fec9cb0733db31dc36fed580f961efc3bdf9e66c3b10e74f123dc67e3dcc1df9"
+    },
+    {
+      "path": "walk/IMU-2023-05-15-16_14_23_walk.txt",
+      "class": "walk",
+      "bytes": 104132,
+      "rows": 3024,
+      "sha256": "d8c2568b297c2f966567a277b10a8a910a5e9c00179ee697c8ffc6a8802a97be"
+    },
+    {
+      "path": "walk/IMU-2023-05-15-16_34_51_walk.txt",
+      "class": "walk",
+      "bytes": 102334,
+      "rows": 3168,
+      "sha256": "322e26ee348a9317d61a14c753624fb32f4919fb9bbda8edf778c519d49fd823"
+    },
+    {
+      "path": "walk/IMU-2023-05-15-17_05_23_walk.txt",
+      "class": "walk",
+      "bytes": 102110,
+      "rows": 3036,
+      "sha256": "228018b6086d541383ba17437b8b76ba8aaf9e0addcfa1214ecba6291afd1707"
+    },
+    {
+      "path": "wave/IMU-2023-05-11-16_52_35_wave.txt",
+      "class": "wave",
+      "bytes": 101977,
+      "rows": 2784,
+      "sha256": "813782851128c77f4d94afb584b7c3ffe62b5855dcee1b94a087e488147a7a98"
+    },
+    {
+      "path": "wave/IMU-2023-05-11-17_35_11_wave.txt",
+      "class": "wave",
+      "bytes": 103056,
+      "rows": 3000,
+      "sha256": "3901f09273cde5f8b367e5d53da267961547fb530727376bb2e3e48df5a4efd2"
+    },
+    {
+      "path": "wave/IMU-2023-05-11-18_09_49_wave.txt",
+      "class": "wave",
+      "bytes": 100665,
+      "rows": 3060,
+      "sha256": "eff709a4e4743fcdda16ed06778f6c4266107721d0764d15116c42189ab5392e"
+    },
+    {
+      "path": "wave/IMU-2023-05-12-10_43_38_wave.txt",
+      "class": "wave",
+      "bytes": 106649,
+      "rows": 2976,
+      "sha256": "9517a2f3eab1102407858e1ff00e37c9229654a94220cc085a0c0d801bfa773f"
+    },
+    {
+      "path": "wave/IMU-2023-05-12-13_46_06_wave.txt",
+      "class": "wave",
+      "bytes": 56999,
+      "rows": 1596,
+      "sha256": "de97dc900d5f61c62f8e8efdb9896d87af4a25511f3309fc36549ddd0a88a808"
+    },
+    {
+      "path": "wave/IMU-2023-05-12-13_48_13_wave.txt",
+      "class": "wave",
+      "bytes": 107686,
+      "rows": 3000,
+      "sha256": "d22e31586fc37504f2c5c9ce426084649c8c1a88f32995ba290c24297e6e2ce2"
+    },
+    {
+      "path": "wave/IMU-2023-05-12-15_18_55_wave.txt",
+      "class": "wave",
+      "bytes": 106436,
+      "rows": 3072,
+      "sha256": "19917cc6a76cdaf35dfda7bb5238985bee41545121a307710df5fb8288ff5a6c"
+    },
+    {
+      "path": "wave/IMU-2023-05-12-15_58_11_wave.txt",
+      "class": "wave",
+      "bytes": 96871,
+      "rows": 2796,
+      "sha256": "53a959ae38249dff49df2c1b8dc045698501c8d04e09974e826203c40002e92a"
+    },
+    {
+      "path": "wave/IMU-2023-05-12-16_34_20_wave.txt",
+      "class": "wave",
+      "bytes": 99835,
+      "rows": 2868,
+      "sha256": "3eaf8fc413420c444c642caab1441a3f7158ad93e8e743367217ee4ca8efd774"
+    },
+    {
+      "path": "wave/IMU-2023-05-12-17_40_54_wave.txt",
+      "class": "wave",
+      "bytes": 117951,
+      "rows": 3384,
+      "sha256": "81174f7c466eb2b9ebc4fcbe22216481cc3721e463394ec9e2367ad261a5429e"
+    },
+    {
+      "path": "wave/IMU-2023-05-12-18_06_17_wave.txt",
+      "class": "wave",
+      "bytes": 108974,
+      "rows": 3048,
+      "sha256": "9f1c895fc652aa80b838c46f437d80fa8422e23991cd2262a3f96d81ff03aeab"
+    },
+    {
+      "path": "wave/IMU-2023-05-15-10_50_15_wave.txt",
+      "class": "wave",
+      "bytes": 108240,
+      "rows": 3072,
+      "sha256": "fe7538780494d4f7bcc0c534a0dda774f97e2dff8d1c3d68378317f04959feaa"
+    },
+    {
+      "path": "wave/IMU-2023-05-15-11_07_45_wave.txt",
+      "class": "wave",
+      "bytes": 100623,
+      "rows": 3072,
+      "sha256": "c9f11350710d4d0344fd1e573238651c99acdcf30c8fa5c7a0b8f4a411313588"
+    },
+    {
+      "path": "wave/IMU-2023-05-15-11_43_08_wave.txt",
+      "class": "wave",
+      "bytes": 106068,
+      "rows": 3096,
+      "sha256": "c89a01eba7adc546fd650d39ea8a87ce31ef423611443417ed2245038ccd2470"
+    },
+    {
+      "path": "wave/IMU-2023-05-15-16_00_32_wave.txt",
+      "class": "wave",
+      "bytes": 111784,
+      "rows": 3168,
+      "sha256": "bb0d3d3edf5a1da729f4335d25d03928d0d2e21a95fcbd1a8b361ef02bc46454"
+    },
+    {
+      "path": "wave/IMU-2023-05-15-16_20_09_wave.txt",
+      "class": "wave",
+      "bytes": 104699,
+      "rows": 3036,
+      "sha256": "9dfff860a290b5ca20e69d1a3b92d6e111ce24410af13d8512e66ef09659002e"
+    },
+    {
+      "path": "wave/IMU-2023-05-15-16_42_24_wave.txt",
+      "class": "wave",
+      "bytes": 107216,
+      "rows": 3096,
+      "sha256": "55ff29e6b0738a441fc2ba4f99ba76473d02a8eba79450c22bcf455971559606"
+    },
+    {
+      "path": "wave/IMU-2023-05-15-17_12_52_wave.txt",
+      "class": "wave",
+      "bytes": 107791,
+      "rows": 3048,
+      "sha256": "2763c02e489ce2c2e53d5050ca3dd7ad90c83cc9efaf5f63a8182eb6542e68a0"
+    }
+  ]
+}

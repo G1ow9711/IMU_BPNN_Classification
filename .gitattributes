@@ -12,6 +12,9 @@
 *.yml text eol=lf
 *.yaml text eol=lf
 
+# 公开训练数据必须保持采集文件原始字节，禁止 Git 自动改写换行。
+/Dataset/**/*.txt -text
+
 *.png binary
 *.jpg binary
 *.jpeg binary

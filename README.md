@@ -27,6 +27,7 @@ QMI8658 六轴 IMU
 ## 导航
 
 - [实际运行演示](#实际运行演示)：先看真实手表、上位机、实时曲线与动作计数怎样协作。
+- [公开训练数据集](#数据合同)：查看根 [`Dataset/`](Dataset/) 中的 11 类、189 个动作记录及完整性清单。
 - [项目现有功能](#项目现有功能)：先了解手表、算法和上位机已经能做什么。
 - [技术栈](#技术栈)：查看 TinyML、ESP32-S3、FreeRTOS、LVGL、BLE 和 C# 怎样协作。
 - [模型训练过程](#模型训练过程)：阅读真实终端截图、训练曲线和最佳 epoch 选择。
@@ -67,7 +68,7 @@ QMI8658 六轴 IMU
 
 - PowerShell 主机测试：在不接真表时覆盖固件领域算法、BLE 帧、状态机、存储和 LVGL 运行边界。
 - GitHub Actions：在 Linux 检查 Python 公共源码，在 Windows 构建并运行 ESP32 主机测试和 WPF 回归。
-- Markdown、Mermaid、KaTeX 与 PDF：同一份教程源文件同时用于 GitHub 阅读和离线 A4 文档。
+- Markdown、Mermaid 与 GitHub 数学公式：教程直接在仓库中阅读、审查和维护，不提交重复的 PDF 副本。
 
 ## 项目现有功能
 
@@ -146,7 +147,7 @@ QMI8658 六轴 IMU
 
 ### 从数据集曲线到实时计数
 
-上面的六类时域图直接来自项目数据集 `IMU_Dataset/imu_dataset_for_final` 的固定文件级验证划分。实线是同类文件的中位数，阴影是文件间四分位区间，不是人工挑选的“标准动作模板”。开合跳、深蹲、跳跃深蹲、跳跃弓步、挥手和行走在幅度、节奏和冲击上有差异，同一类别内部也有明显变化；这正是固件使用在线方向学习、自适应幅度门和时间迟滞，而不依赖单一固定波形的原因。
+上面的六类时域图直接来自公开项目数据集 [`Dataset/`](Dataset/) 的固定文件级验证划分。实线是同类文件的中位数，阴影是文件间四分位区间，不是人工挑选的“标准动作模板”。开合跳、深蹲、跳跃深蹲、跳跃弓步、挥手和行走在幅度、节奏和冲击上有差异，同一类别内部也有明显变化；这正是固件使用在线方向学习、自适应幅度门和时间迟滞，而不依赖单一固定波形的原因。
 
 ![实时计数算法示意曲线](docs/assets/algorithm/05_计数算法示意曲线.png)
 
@@ -160,6 +161,7 @@ QMI8658 六轴 IMU
 
 ```text
 IMU_BPNN_Classification/
+├─ Dataset/                    公开训练数据、格式说明与 SHA-256 清单
 ├─ python/                     数据、特征、训练、模型导出与可视化
 ├─ esp32/                      ESP32-S3 固件、模型包、主机测试与烧录入口
 ├─ pc/                         .NET 8 WPF 上位机、BLE、Mock、历史与测试
@@ -171,12 +173,12 @@ IMU_BPNN_Classification/
 ├─ shared/                     跨端共享协议与合同
 ├─ README.md                   教程入口
 ├─ LICENSE                     Apache License 2.0
-└─ .gitignore                  本地数据、环境、缓存和构建输出规则
+└─ .gitignore                  本地扩展数据、环境、缓存和构建输出规则
 ```
 
-数据集、虚拟环境、训练输出、ESP-IDF 构建目录和本机缓存不提交 Git。正式源码、文档图和图表清单放在上述固定目录，不使用临时文件作为教程依赖。
+基础训练数据已公开在 [`Dataset/`](Dataset/)；本地扩展数据仍放在被忽略的 `IMU_Dataset/`。虚拟环境、训练输出、ESP-IDF 构建目录和本机缓存不提交 Git。正式源码、数据、文档图和清单都使用上述固定目录，不依赖临时文件。
 
-每份公开 Markdown 都有同目录同名 PDF，例如 [`README.pdf`](README.pdf) 和 [`docs/从0复刻完整教程.pdf`](docs/从0复刻完整教程.pdf)。Markdown 是可评审、可修改的源文件；PDF 用于离线阅读和打印，两者内容由同一轮构建生成。
+公开教程以 Markdown 为唯一文档来源。仓库不提交 PDF 副本，避免同一内容形成两套版本；需要离线阅读时可在 GitHub 下载 Markdown，或由读者自行打印为 PDF。
 
 ## 10 分钟快速开始
 
@@ -195,14 +197,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File pc\tools\run.ps1
 
 ### 路径 B：有数据，复现特征图
 
-要求 Python 3.10 以上。先把数据集放到 `IMU_Dataset/imu_dataset_for_final/`，目录下每个动作一个子目录。
+要求 Python 3.10 以上。仓库已包含 [`Dataset/`](Dataset/)；目录下每个动作一个子目录，无需另行下载或复制。
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r python\requirements.txt
 
 .\.venv\Scripts\python.exe -m python.visualize_action_features `
-  --dataset-dir IMU_Dataset\imu_dataset_for_final `
+  --dataset-dir Dataset `
   --output-dir docs\assets\algorithm
 ```
 
@@ -212,7 +214,7 @@ python -m venv .venv
 
 ```powershell
 .\.venv\Scripts\python.exe -u python\train_export.py `
-  --dataset-dir IMU_Dataset\imu_dataset_for_final
+  --dataset-dir Dataset
 ```
 
 训练逐 epoch 输出损失、验证准确率、宏平均 F1、逐类召回率、最弱类别和早停状态。详细学习路线见 [`python/README.md`](python/README.md)。
@@ -253,7 +255,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File `
 
 ## 数据合同
 
-基础数据集来源：[G1ow9711/IMU_Datasrt](https://github.com/G1ow9711/IMU_Datasrt)。
+基础数据已经保存在根 [`Dataset/`](Dataset/)；格式、类别统计、限制和文件级 SHA-256 见 [`Dataset/README.md`](Dataset/README.md) 与 [`Dataset/manifest.json`](Dataset/manifest.json)。原始来源为 [G1ow9711/IMU_Datasrt](https://github.com/G1ow9711/IMU_Datasrt)。
 
 每个 TXT 文件包含 `N×8` 数据：
 
