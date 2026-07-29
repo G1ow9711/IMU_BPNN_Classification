@@ -136,6 +136,26 @@ scan_dataset
 
 完整方法和数据指纹见[图表可复现清单](../docs/assets/algorithm/figure_manifest.json)。
 
+## 计数曲线与事件回放
+
+计数教程组合三类互补材料：
+
+1. [项目数据集六类时域曲线](../docs/assets/algorithm/01_六类派生信号曲线.png)来自 `imu_dataset_for_final` 的固定文件级验证划分，用于观察开合跳、深蹲、跳跃深蹲、跳跃弓步、挥手和行走的周期形态及文件间差异。
+2. [实时计数算法示意曲线](../docs/assets/algorithm/05_计数算法示意曲线.png)由固件生产常量生成，用于解释自适应端点、完整闭合、步峰重武装和休息冻结；它明确标记为非实测。
+3. [真板深蹲计数事件回放](../docs/assets/algorithm/06_真板深蹲计数事件回放.png)只使用现场 CSV 中的物理量、设备状态和权威 `MetricEvent`，用于核对每次加一的实际时刻。
+
+项目数据集没有逐次计数标签，因此生成器不会在数据集曲线上伪造事件。要回放自己的 44 列上位机日志：
+
+```powershell
+.\.venv\Scripts\python.exe python\visualize_counting_process.py `
+  --field-log logs\IMU_全部缓存.csv `
+  --session-id 81 `
+  --output-dir docs\assets\algorithm `
+  --manifest docs\assets\algorithm\counting_curve_manifest.json
+```
+
+生成器会检查会话、设备单调时间、六轴物理量和累计事件连续性。公开清单只记录源文件名、SHA-256、会话摘要、生产常量和输出哈希；原始现场 CSV、蓝牙地址和设备标识不进入图片或仓库。
+
 ## 297 项特征
 
 当前输入按固定顺序分成六组：
@@ -178,7 +198,22 @@ scan_dataset
 
 ![逐 epoch 训练日志示例](../docs/assets/training/训练日志示例.png)
 
-日志每个 epoch 都显示当前训练损失、验证准确率、宏平均 F1、11 类召回率和最弱类别；训练结束还会明确最佳 epoch、早停原因及实际恢复的检查点，便于确认模型选择依据，不只查看最终一行准确率。
+![逐 epoch 训练曲线](../docs/assets/training/training_curve_candidate_184.png)
+
+截图与曲线来自同一份真实历史候选日志：184 维特征、2.5 秒窗口、78 个 epoch，验证规则选择第 33 个 epoch。曲线没有平滑或补齐指标，四个面板分别显示训练目标、总体验证指标、弱类 F1 和弱类召回率。它说明怎样观察训练和早停，不代表当前部署模型；该候选记录了 `target_reached=false` 与 `header_export_skipped=true`，没有进入固件。
+
+当前部署仍以 [`dual_m0_manifest.json`](../esp32/include/dual_m0_manifest.json) 的 297 维双 M0 为准。训练曲线的输入日志 SHA-256 和候选摘要位于 [`training_curve_manifest.json`](../docs/assets/training/training_curve_manifest.json)。
+
+训练完成后，可对任意同格式日志生成自己的曲线：
+
+```powershell
+.\.venv\Scripts\python.exe python\visualize_training_history.py `
+  --log outputs\training_console.log `
+  --output outputs\training_curve.png `
+  --manifest outputs\training_curve_manifest.json
+```
+
+生成器严格读取日志中的总损失、交叉熵、准确率、宏 F1、弱类指标、最弱类别指标、最佳 epoch 和早停状态。输入日志字段缺失、epoch 重复或编码损坏时直接失败，不生成看似正常的图片。
 
 只运行验证模式、不触碰测试：
 

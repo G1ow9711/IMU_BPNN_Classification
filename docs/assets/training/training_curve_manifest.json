@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "asset": "training_curve_candidate_184.png",
+  "source_log_name": "training_console.log",
+  "source_log_sha256": "51fa825526e690949133504d2c34ae3d77302e7924886f0620a151550069f1ec",
+  "epoch_records": 78,
+  "candidate_training_summary": {
+    "class_count": 11,
+    "file_count": 189,
+    "feature_dim": 184,
+    "window_seconds": 2.5,
+    "best_window_seconds": 2.5,
+    "final_val_acc": 0.9054,
+    "final_val_f1": 0.9033,
+    "test_acc": 0.9314,
+    "test_f1": 0.9182,
+    "target_reached": false,
+    "header_export_skipped": true,
+    "best_epoch": 33,
+    "epoch_count": 78
+  },
+  "purpose": "历史候选训练过程示例，不代表当前固件部署性能",
+  "deployed_contract": {
+    "manifest": "esp32/include/dual_m0_manifest.json",
+    "feature_dim": 297,
+    "model": "双 M0 融合"
+  },
+  "fields": [
+    "epoch",
+    "loss",
+    "ce",
+    "val_acc",
+    "val_f1",
+    "val_weak_f1",
+    "val_worst_f1",
+    "val_weak_recall",
+    "val_min_recall",
+    "best_epoch",
+    "patience_left"
+  ]
+}

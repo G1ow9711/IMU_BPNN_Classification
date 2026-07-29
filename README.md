@@ -18,6 +18,50 @@ QMI8658 六轴 IMU
 
 部署模型不使用 CNN、RNN、LSTM 或 Transformer。教程关注数据合同、可解释特征、验证隔离、嵌入式数值一致性和产品状态机怎样共同闭环。
 
+## 导航
+
+- [项目现有功能](#项目现有功能)：先了解手表、算法和上位机已经能做什么。
+- [技术栈](#技术栈)：查看 TinyML、ESP32-S3、FreeRTOS、LVGL、BLE 和 C# 怎样协作。
+- [模型训练过程](#模型训练过程)：阅读真实终端截图、训练曲线和最佳 epoch 选择。
+- [仓库结构](#仓库结构)：找到 Python、ESP32、PC、共享协议和文档入口。
+- [10 分钟快速开始](#10-分钟快速开始)：按“Mock 上位机、数据与训练、真表烧录”选择路径。
+- [数据与算法合同](#数据合同)：核对六轴顺序、单位、窗口、297 维特征和双 M0。
+- [文档学习路线](#文档学习路线)：进入完整教程或按算法、系统、通信、硬件、测试专题阅读。
+- [测试](#测试)：运行公开源码、固件主机替身和上位机回归。
+- [许可证与第三方边界](#许可证与第三方边界)：确认 Apache-2.0 及外部资源的授权范围。
+
+## 技术栈
+
+这个仓库不是单一模型示例。训练、端侧推理、实时系统、图形界面和桌面应用共同组成产品闭环。
+
+**TinyML 与模型工程**
+
+- Python 3、NumPy、scikit-learn、PyTorch：文件级数据划分、窗口清洗、297 项特征、双轻量 BP 训练和验证。
+- Matplotlib：生成特征对比图与逐 epoch 训练曲线；图片同时保存数据或日志 SHA-256 清单。
+- TinyML 部署：把标准化参数、类别顺序、两套 M0 权重和纯 C 前向函数冻结为 ESP32 可编译工件，不在手表上运行 Python 或训练框架。
+
+**ESP32-S3 固件**
+
+- ESP32-S3 双核 Xtensa LX7：32 位 RISC 处理器。这里的 RISC 指 Xtensa 指令集，不是 RISC-V。
+- ESP-IDF 5.5.4 与 C11：构建固件、驱动硬件、链接模型和生成四段可烧录镜像。
+- FreeRTOS：分离 25 Hz 采样、应用状态所有者、BLE 发布、LVGL 界面和存储任务；通过有界队列传递事件。
+- LVGL 9.5 与 Waveshare BSP：驱动 410×502 AMOLED、触摸、页面生命周期和中文字体子集。
+- QMI8658、AXP2101、PCF85063：分别提供六轴 IMU、电源/电量和 RTC 能力。
+- ESP-NimBLE / BLE GATT：传输能力清单、实时指标、分类诊断、控制响应、历史摘要和断线补传。
+- LittleFS：保存会话摘要、配置和断线待补数据。
+
+**Windows 上位机**
+
+- C# 12、.NET 8、WPF 与 XAML：实现设备、实时训练、总结、历史、设置和诊断页面。
+- Windows.Devices.Bluetooth：发现、配对和连接真表 BLE GATT；Mock 会话允许没有硬件时复现 UI 与业务流程。
+- 分层工程：Domain 保存业务合同，Bluetooth 处理协议与传输，Infrastructure 管理本地持久化，App 负责 MVVM 状态和界面。
+
+**质量与发布**
+
+- PowerShell 主机测试：在不接真表时覆盖固件领域算法、BLE 帧、状态机、存储和 LVGL 运行边界。
+- GitHub Actions：在 Linux 检查 Python 公共源码，在 Windows 构建并运行 ESP32 主机测试和 WPF 回归。
+- Markdown、Mermaid、KaTeX 与 PDF：同一份教程源文件同时用于 GitHub 阅读和离线 A4 文档。
+
 ## 项目现有功能
 
 - 手表点击开始后，自动确认本轮主动作并保持该动作类型。
@@ -63,6 +107,18 @@ QMI8658 六轴 IMU
 
 这也是修改项目时的检查顺序。不要先调最后一个阈值，再回头猜前面的单位、窗口或时间轴是否正确。
 
+## 模型训练过程
+
+训练脚本把每个 epoch 的复合损失、交叉熵、验证准确率、宏平均 F1、弱类指标、最弱类别召回率、最佳 epoch 和剩余早停耐心值写到控制台。终端日志让训练进行到哪一步可见；曲线用于判断损失是否收敛、总体指标是否掩盖弱类，以及最佳检查点是否早于最后一轮。
+
+![逐 epoch 训练终端截图](docs/assets/training/训练日志示例.png)
+
+![历史候选训练曲线](docs/assets/training/training_curve_candidate_184.png)
+
+两张图来自同一份真实历史候选日志：184 维特征、2.5 秒窗口、78 个 epoch，验证规则选择第 33 个 epoch。候选结束时记录的验证准确率为 `0.9054`、宏平均 F1 为 `0.9033`；测试集准确率为 `0.9314`、宏平均 F1 为 `0.9182`。该轮没有达到弱类发布门，日志明确记录 `target_reached=false` 和 `header_export_skipped=true`，因此没有导出到手表。
+
+这组资产只用来讲解训练过程，不代表当前固件性能。当前部署以 [`dual_m0_manifest.json`](esp32/include/dual_m0_manifest.json) 为准：297 维特征、11 类、25 Hz、62 点窗口，以及基础 M0 `0.85` / 掩码 M0 `0.15` 的固定融合。曲线的输入日志 SHA-256、字段和候选摘要见 [`training_curve_manifest.json`](docs/assets/training/training_curve_manifest.json)；通用生成器位于 [`python/visualize_training_history.py`](python/visualize_training_history.py)。
+
 ## 用真实数据直观看特征
 
 生成器使用固定文件级验证划分中的全部记录。每个采集文件先聚合，再进行类别统计，使长记录不会因窗口更多而获得更高权重。图中分位区间保留动作幅度、节奏和执行差异。
@@ -81,6 +137,18 @@ QMI8658 六轴 IMU
 
 图表的数据集指纹、文件划分、窗口参数、阈值、文件级聚合方法和限制记录在[图表可复现清单](docs/assets/algorithm/figure_manifest.json)。生成代码位于 [`python/visualize_action_features.py`](python/visualize_action_features.py)。
 
+### 从数据集曲线到实时计数
+
+上面的六类时域图直接来自项目数据集 `IMU_Dataset/imu_dataset_for_final` 的固定文件级验证划分。实线是同类文件的中位数，阴影是文件间四分位区间，不是人工挑选的“标准动作模板”。开合跳、深蹲、跳跃深蹲、跳跃弓步、挥手和行走在幅度、节奏和冲击上有差异，同一类别内部也有明显变化；这正是固件使用在线方向学习、自适应幅度门和时间迟滞，而不依赖单一固定波形的原因。
+
+![实时计数算法示意曲线](docs/assets/algorithm/05_计数算法示意曲线.png)
+
+上图把生产固件中的计数状态画成曲线。上半部分说明重复动作必须依次越过正、负自适应端点并完成闭合，休息尾段即使有微小噪声也不会增加累计值；下半部分说明行走和小跑只有在动态加速度越过触发门、随后回落并重新武装后才接受下一步。该图由固件常量确定，是算法示意，不冒充实测数据。
+
+![真板深蹲计数事件回放](docs/assets/algorithm/06_真板深蹲计数事件回放.png)
+
+真板回放只使用上位机导出的物理量、设备状态和设备权威 `MetricEvent`。图中的五条红线分别对应五次真实加一；停止运动后的尾段累计保持为 5。项目数据集没有逐次计数标签，因此数据集曲线用于解释动作形态与个体差异，真板日志用于验证事件时刻，两者不能互相替代。生成器位于 [`python/visualize_counting_process.py`](python/visualize_counting_process.py)，参数、源数据哈希和不发布原始现场 CSV 的约束见[计数曲线清单](docs/assets/algorithm/counting_curve_manifest.json)。
+
 ## 仓库结构
 
 ```text
@@ -90,10 +158,12 @@ IMU_BPNN_Classification/
 ├─ pc/                         .NET 8 WPF 上位机、BLE、Mock、历史与测试
 ├─ docs/
 │  ├─ assets/algorithm/        正式算法图和可复现清单
+│  ├─ assets/training/         训练终端截图、曲线和来源清单
 │  ├─ assets/ui/               PC 与手表界面截图及生成清单
 │  └─ *.md                     领域文档、索引与完整复刻教程
 ├─ shared/                     跨端共享协议与合同
 ├─ README.md                   教程入口
+├─ LICENSE                     Apache License 2.0
 └─ .gitignore                  本地数据、环境、缓存和构建输出规则
 ```
 
@@ -139,6 +209,17 @@ python -m venv .venv
 ```
 
 训练逐 epoch 输出损失、验证准确率、宏平均 F1、逐类召回率、最弱类别和早停状态。详细学习路线见 [`python/README.md`](python/README.md)。
+
+训练完成后可把日志转换为四联图：
+
+```powershell
+.\.venv\Scripts\python.exe python\visualize_training_history.py `
+  --log outputs\training_console.log `
+  --output outputs\training_curve.png `
+  --manifest outputs\training_curve_manifest.json
+```
+
+生成器接受 PowerShell 常见的 UTF-8 或带 BOM 的 UTF-16 日志。它不重新训练、不平滑或补齐指标，只把日志中的逐 epoch 数值画出来。
 
 ### 路径 C：有手表，构建并烧录
 
@@ -269,14 +350,15 @@ GitHub Actions 在每次 `main` 更新和拉取请求中执行 Python 公开语�
 - 数据不提交仓库；正式图和清单提交到 `docs/assets/algorithm/`；
 - 不把 `.codex-local/`、`outputs/`、`build/`、虚拟环境或临时日志加入 Git。
 
-## 开源发布清单
+## 许可证与第三方边界
 
-代码和教程结构已按公开仓库阅读方式整理。正式对外发布前仍需：
+仓库自有代码、文档和项目生成资产采用 [Apache License 2.0](LICENSE)。使用、修改或再分发时以 `LICENSE` 正文为准。
 
-- 由仓库所有者选择并添加合适的开源许可证 `LICENSE`；
-- 检查数据集、字体、图标、第三方 BSP 和依赖的许可证及再分发条件；
-- 确认模型权重与图表所用数据具有发布授权；
-- 补充贡献规范、行为准则、安全问题报告方式和版本发布说明；
-- 在发布标签中记录模型清单、固件哈希、上位机版本和已完成的真板验收范围。
+Apache-2.0 不会自动改变外部资源的授权：
 
-许可证必须由仓库所有者在确认源码、数据、模型和第三方依赖的授权边界后选择。
+- Waveshare BSP、ESP-IDF、LVGL、NimBLE、Python 和 .NET 依赖保留各自许可证；
+- 字体、图标或其它第三方素材按其来源文件和上游说明使用；
+- 训练数据来自独立数据仓库，不随本仓库发布，也不因本仓库采用 Apache-2.0 而改变授权；
+- 再分发固件、上位机包、模型或教程资产前，应同时保留适用的第三方版权、专利、商标和归属声明。
+
+发布版本还应记录模型清单、固件 SHA-256、上位机版本和已完成的真板验收范围。安全问题、贡献规范和版本发布说明可随社区协作继续补充，但不影响当前 Apache-2.0 授权生效。

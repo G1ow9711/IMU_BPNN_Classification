@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "generator": "python/visualize_counting_process.py",
+  "schematic": {
+    "asset": "05_计数算法示意曲线.png",
+    "asset_sha256": "02aed876c57376f94a79a1d6e557cfcb4bedc81d0b5ee841f06ffc660ddcc7d6",
+    "kind": "production-rule schematic, not measurement",
+    "sample_rate_hz": 25,
+    "direction_learn_dps": 26.0,
+    "direction_threshold_min_dps": 27.0,
+    "direction_threshold_max_dps": 72.0,
+    "direction_threshold_ratio": 0.45,
+    "scale_rise_alpha": 0.25,
+    "scale_fall_alpha": 0.01,
+    "step_peak_delta_g": 0.16,
+    "step_rearm_delta_g": 0.0
+  },
+  "field_replay": {
+    "asset": "06_真板深蹲计数事件回放.png",
+    "asset_sha256": "6976ea99c8f9180c7409bcbbb6de859e4efcb192a51ab21fcb184b87909f80af",
+    "source_csv_name": "IMU_全部缓存_20260724_011114.csv",
+    "source_csv_sha256": "06afe79a3f6857846f59bda235d1a6db050cc01dad9b1c10ac5f2f2dd22cf857",
+    "raw_csv_published": false,
+    "session_id": 81,
+    "sample_count": 461,
+    "duration_seconds": 18.52,
+    "stable_actions": [
+      "深蹲"
+    ],
+    "event_count": 5,
+    "event_relative_seconds": [
+      2.36,
+      4.28,
+      6.32,
+      8.44,
+      11.4
+    ],
+    "event_totals": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "final_authoritative_total": 5,
+    "published_fields": [
+      "relative_seconds",
+      "gyro_magnitude_dps",
+      "acceleration_magnitude_g",
+      "device_state",
+      "authoritative_total",
+      "metric_event_time"
+    ],
+    "excluded_fields": [
+      "UTC receive time",
+      "device identifier",
+      "BLE address",
+      "raw CSV rows"
+    ]
+  },
+  "implementation_refs": [
+    "esp32/firmware/components/motion_phase/include/motion_phase.h",
+    "esp32/firmware/components/motion_phase/motion_phase.c",
+    "esp32/firmware/components/fitness_core/src/fitness_core.c",
+    "docs/算法原理、训练与实时计数.md"
+  ]
+}
