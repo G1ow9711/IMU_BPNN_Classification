@@ -1,4 +1,4 @@
-# 手腕 IMU 健身动作识别与实时计数教程
+# ESP32 智慧运动助手：从论文到 TinyML 手表落地
 
 [查看教程工程持续集成状态](https://github.com/G1ow9711/IMU_BPNN_Classification/actions/workflows/ci.yml)
 
@@ -8,7 +8,7 @@
 
 **点击封面观看完整视频：[`ESP32 智慧运动助手.mp4`](https://github.com/G1ow9711/IMU_BPNN_Classification/blob/main/docs/assets/video/ESP32%20智慧运动助手.mp4)。** 这段 2 分 57 秒实拍演示覆盖模型训练与导出、双 BP 融合、BLE 连接、手表启动训练、上位机实时曲线、动作识别和逐次计数。
 
-本项目展示一条可落到 ESP32-S3 智能手表的完整机器学习链路：从六轴 IMU 原始数据出发，完成数据清洗、297 项可解释特征、双轻量 BP 分类、单动作会话确认、实时计数、BLE 同步和 Windows 上位机展示。
+这不是一个孤立的分类脚本，而是一份从论文研究问题出发，经过数据集建设、算法设计、模型训练、ESP32-S3 端侧部署、智能手表交互和 Windows 上位机开发，最终落到真实硬件验证的完整开源教程。工程从六轴 IMU 原始数据出发，完成数据清洗、297 项可解释特征、双轻量 BP 分类、单动作会话确认、实时计数、BLE 同步和跨端展示。
 
 ```text
 QMI8658 六轴 IMU
@@ -27,6 +27,8 @@ QMI8658 六轴 IMU
 ## 导航
 
 - [实际运行演示](#实际运行演示)：先看真实手表、上位机、实时曲线与动作计数怎样协作。
+- [从论文到产品的完整技术路线](#从论文到产品完整技术路线)：理解研究依据、工程取舍和每一阶段的可验证产物。
+- [硬件平台与实物](#硬件平台与实物)：查看整板原理、PCB 布局、主板实物和手表界面。
 - [公开训练数据集](#数据合同)：查看根 [`Dataset/`](Dataset/) 中的 11 类、189 个动作记录及完整性清单。
 - [项目现有功能](#项目现有功能)：先了解手表、算法和上位机已经能做什么。
 - [技术栈](#技术栈)：查看 TinyML、ESP32-S3、FreeRTOS、LVGL、BLE 和 C# 怎样协作。
@@ -35,9 +37,68 @@ QMI8658 六轴 IMU
 - [10 分钟快速开始](#10-分钟快速开始)：按“Mock 上位机、数据与训练、真表烧录”选择路径。
 - [数据与算法合同](#数据合同)：核对六轴顺序、单位、窗口、297 维特征和双 M0。
 - [文档学习路线](#文档学习路线)：进入完整教程或按算法、系统、通信、硬件、测试专题阅读。
-- [参考论文](docs/ReferencePaper/)：阅读可穿戴 IMU、动作计数和 TinyML 端侧部署的开放获取论文及项目关联说明。
+- [参考文献](#参考文献)：按论文格式查看正文引用、DOI 和仓库内开放获取原文。
 - [测试](#测试)：运行公开源码、固件主机替身和上位机回归。
 - [许可证与第三方边界](#许可证与第三方边界)：确认 Apache-2.0 及外部资源的授权范围。
+
+## 从论文到产品：完整技术路线
+
+本项目按“研究问题—可复现实验—受限设备部署—真实产品验证”的顺序组织。论文提供问题定义和方法依据，项目代码负责实现自己的数据合同、模型和产品状态机；论文报告的指标不等于本项目结果，本项目的训练曲线、测试门和真板日志也不反向冒充论文复现。
+
+```mermaid
+flowchart LR
+    A["论文与问题定义"] --> B["公开数据集与数据合同"]
+    B --> C["特征工程与双 BP 训练"]
+    C --> D["ESP32-S3 纯 C 端侧部署"]
+    D --> E["AMOLED、BLE 与 WPF 上位机"]
+    E --> F["真板识别、逐次计数与验收"]
+```
+
+### 1. 论文：定义问题和工程边界
+
+可穿戴 IMU 研究说明，动作识别可以从惯性信号中提取时域、频域和非平稳特征，再交给 BP 神经网络分类 [1]；健身系统还必须把“识别动作类别”和“计算重复次数”作为相连但不同的任务 [2]。佩戴位置、个体动作差异和运动噪声会改变信号分布 [3]，连续实时场景还要面对背景活动、静止尾段和错误触发 [4]。TinyML 研究进一步给出端侧本地推理在延迟、隐私和通信成本上的价值，同时提醒模型必须适应微控制器的内存与算力约束 [5]。
+
+这些文献共同决定了本项目的四条边界：使用手腕六轴 IMU 而不是摄像头；分类与计数解耦；不把单一标准动作波形写成固定模板；模型训练在 PC 完成，ESP32 只执行冻结后的本地推理。
+
+### 2. 数据集：把动作差异变成可学习样本
+
+公开 [`Dataset/`](Dataset/) 保存 11 类原始 TXT 记录。训练入口先统一 `gx、gy、gz、ax、ay、az` 的通道、单位和时间轴，再按采集文件划分训练、验证和测试，避免同一长记录切出的重叠窗口同时落入不同集合。文件级划分和类内分位区间保留不同人的速度、幅度与姿态差异，避免模型只记住某一次“标准动作”。数据格式、类别和 SHA-256 清单见 [`Dataset/README.md`](Dataset/README.md)。
+
+### 3. 算法与训练：从信号到可解释双 BP
+
+每个 62 点窗口被转换为 297 项特征，覆盖幅度、离散变化、相关性、频谱、冲击、重力相对方向和阶段结构。多特征加 BP 的思路受到文献 [1] 启发，但 297 维特征、六分支结构、基础 M0 / 掩码 M0、`0.85 / 0.15` logits 融合、文件级验证和弱类门均是本项目实现。训练输出不仅看总体准确率，还同时记录宏平均 F1、逐类召回率、最弱类别和最佳 epoch；模型通过验证后才导出标准化参数、类别顺序和 C 权重。
+
+### 4. ESP32 部署：把离线模型变成实时固件
+
+Python 导出物在 ESP32-S3 上由纯 C 完成特征提取、标准化和两套 M0 前向，不依赖 Python 或云端服务。C/Python 逐值一致性测试确保端侧结果没有因特征顺序、浮点误差或权重布局发生漂移。FreeRTOS 把 25 Hz 采样、模型推理、计数、BLE、LVGL 和存储拆成有界任务；这种“离线训练、设备本地推理”的结构对应 TinyML 对低延迟和资源受限部署的要求 [5]。
+
+### 5. 产品开发：手表负责即时反馈，上位机负责可视化和追溯
+
+手表用 AMOLED 展示连接、电量、主动作、次数和训练状态；BLE GATT 传输设备能力、实时指标、分类诊断、控制响应和历史摘要。C# / .NET 8 WPF 上位机负责设备发现、实时曲线、动作示范、训练总结、历史记录和 CSV 导出。协议、状态枚举和单位由 [`shared/protocol/`](shared/protocol/) 约束，避免固件与上位机各自解释同一字段。
+
+### 6. 真板闭环：分类、计数和休息抑制必须同时成立
+
+一轮训练只选择一个主动作：初始窗口负责确认计数器，后续低置信度、异类窗口、静止或休息只冻结计数，不更换主动作，也不增加次数。重复动作在完整相位闭合后逐次加一，行走和小跑按重新武装后的步态脉冲计数。发布验证由数据集验证集、Python/C 数值一致性、ESP32 主机状态机测试、WPF 回归和真板日志共同组成；10 次动作的产品验收允许误差为 ±2 次。该边界吸收了文献对连续流背景活动和重复计数的关注 [2], [4]，但最终结论只以本仓库证据为准。
+
+## 硬件平台与实物
+
+硬件采用 Waveshare `ESP32-S3-Touch-AMOLED-2.06`。ESP32-S3 负责模型推理和实时任务，QMI8658 提供六轴惯性数据，AXP2101 提供电源与电量信息，410×502 AMOLED 与触摸控制器承担端侧交互。下面四张图依次连接“电气功能—器件布局—实物装配—产品界面”，原图、尺寸和 SHA-256 见 [`docs/assets/hardware/README.md`](docs/assets/hardware/README.md)。
+
+<p align="center">
+  <img src="docs/assets/hardware/01_整板原理图.png" alt="ESP32-S3 智能手表整板原理图" width="48%">
+  <img src="docs/assets/hardware/02_PCB外形与器件布局.png" alt="ESP32-S3 智能手表 PCB 外形与器件布局" width="42%">
+</p>
+
+<p align="center"><em>图 1　整板功能连接图（左）与 PCB 外形、器件布局图（右）。外形图用于器件定位，不能替代电气原理图。</em></p>
+
+<p align="center">
+  <img src="docs/assets/hardware/03_PCB与器件实物.jpg" alt="ESP32-S3 智能手表主板与器件实物" width="46%">
+  <img src="docs/assets/hardware/04_手表训练入口实拍.jpg" alt="ESP32 智慧运动助手手表训练入口实拍" width="46%">
+</p>
+
+<p align="center"><em>图 2　主板、QMI8658、电池与表壳实拍（左），以及“ESP32 智慧运动助手”训练入口实拍（右）。</em></p>
+
+原理图中保留了厂家硬件能力和扩展接口；它不表示当前产品固件启用了全部外设。例如板上虽有 `Motor` 接口，当前真表没有振动马达，产品反馈只使用 AMOLED 和 BLE。
 
 ## 技术栈
 
@@ -169,6 +230,7 @@ IMU_BPNN_Classification/
 ├─ docs/
 │  ├─ ReferencePaper/          开放获取参考论文、引用信息与许可证边界
 │  ├─ assets/algorithm/        正式算法图和可复现清单
+│  ├─ assets/hardware/         原理图、PCB 布局、实物和手表界面原图
 │  ├─ assets/training/         训练终端截图、曲线和来源清单
 │  ├─ assets/ui/               PC 与手表界面截图及生成清单
 │  └─ *.md                     领域文档、索引与完整复刻教程
@@ -358,8 +420,18 @@ GitHub Actions 在每次 `main` 更新和拉取请求中执行 Python 公开语�
 - 算法和特征修改：同步 Python、生成 C、测试、算法总文档和图表；
 - 协议修改：同步 ESP32、PC、共享合同、测试和通信文档；
 - UI 或硬件修改：遵守 Waveshare 官方 BSP/LVGL 锁与真板 A/B 规则；
-- 数据不提交仓库；正式图和清单提交到 `docs/assets/algorithm/`；
+- 根 `Dataset/` 保存已公开、已核验的基础训练数据；本地扩展数据、现场日志、模型输出和验证临时文件不提交仓库；
 - 不把 `.codex-local/`、`outputs/`、`build/`、虚拟环境或临时日志加入 Git。
+
+## 参考文献
+
+正文采用编号制引用。下列论文用于研究背景、设计取舍和验证边界；本项目没有把论文模型、数据或指标直接当作自己的实验结果。开放获取原文及逐文件许可说明见 [`docs/ReferencePaper/README.md`](docs/ReferencePaper/README.md)。
+
+1. H. Xu, J. Liu, H. Hu, and Y. Zhang, “Wearable Sensor-Based Human Activity Recognition Method with Multi-Features Extracted from Hilbert-Huang Transform,” *Sensors*, vol. 16, no. 12, art. 2048, 2016. [DOI](https://doi.org/10.3390/s16122048) · [开放获取 PDF](docs/ReferencePaper/Li_2016_Wearable_IMU_BPNN_Multi_Features.pdf)
+2. A. Soro, G. Brunner, S. Tanner, and R. Wattenhofer, “Recognition and Repetition Counting for Complex Physical Exercises with Deep Learning,” *Sensors*, vol. 19, no. 3, art. 714, 2019. [DOI](https://doi.org/10.3390/s19030714) · [开放获取 PDF](docs/ReferencePaper/Soro_2019_Exercise_Recognition_and_Repetition_Counting.pdf)
+3. S. Ishii, A. Yokokubo, M. Luimula, and G. Lopez, “ExerSense: Physical Exercise Recognition and Counting Algorithm from Wearables Robust to Positioning,” *Sensors*, vol. 21, no. 1, art. 91, 2021. [DOI](https://doi.org/10.3390/s21010091) · [开放获取 PDF](docs/ReferencePaper/Ishii_2021_ExerSense.pdf)
+4. Ł. Czekaj, M. Kowalewski, J. Domaszewicz, R. Kitłowski, M. Szwoch, and W. Duch, “Real-Time Sensor-Based Human Activity Recognition for eFitness and eHealth Platforms,” *Sensors*, vol. 24, no. 12, art. 3891, 2024. [DOI](https://doi.org/10.3390/s24123891) · [开放获取 PDF](docs/ReferencePaper/Czekaj_2024_Real_Time_Sensor_Based_HAR.pdf)
+5. N. N. Alajlan and D. M. Ibrahim, “TinyML: Enabling of Inference Deep Learning Models on Ultra-Low-Power IoT Edge Devices for AI Applications,” *Micromachines*, vol. 13, no. 6, art. 851, 2022. [DOI](https://doi.org/10.3390/mi13060851) · [开放获取 PDF](docs/ReferencePaper/Alajlan_2022_TinyML_Edge_Inference.pdf)
 
 ## 许可证与第三方边界
 
@@ -370,7 +442,7 @@ Apache-2.0 不会自动改变外部资源的授权：
 - Waveshare BSP、ESP-IDF、LVGL、NimBLE、Python 和 .NET 依赖保留各自许可证；
 - 字体、图标或其它第三方素材按其来源文件和上游说明使用；
 - `docs/ReferencePaper/` 中的开放获取论文保留各自作者版权和 CC BY 4.0 许可；引用与再分发要求见该目录 README；
-- 训练数据来自独立数据仓库，不随本仓库发布，也不因本仓库采用 Apache-2.0 而改变授权；
+- 根 [`Dataset/`](Dataset/) 已随仓库公开并保留自身来源与清单说明；本地扩展数据和现场日志不公开，也不因本仓库采用 Apache-2.0 而改变其原有权利边界；
 - 再分发固件、上位机包、模型或教程资产前，应同时保留适用的第三方版权、专利、商标和归属声明。
 
 发布版本还应记录模型清单、固件 SHA-256、上位机版本和已完成的真板验收范围。安全问题、贡献规范和版本发布说明可随社区协作继续补充，但不影响当前 Apache-2.0 授权生效。
