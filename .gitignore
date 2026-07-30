@@ -17,6 +17,9 @@ outputs/
 
 # Markdown 是公开文档唯一来源；PDF 只保留本地离线副本，不进入 Git。
 *.pdf
+# 参考论文按各自 CC BY 4.0 许可证公开，不属于项目生成文档 PDF。
+!docs/ReferencePaper/
+!docs/ReferencePaper/*.pdf
 
 # ESP-IDF 可再生依赖与构建状态；保留源码、dependencies.lock、sdkconfig.defaults 和 partitions.csv。
 build/
