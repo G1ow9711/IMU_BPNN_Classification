@@ -8,6 +8,22 @@
 
 **点击封面观看完整视频：[`ESP32 智慧运动助手.mp4`](https://github.com/G1ow9711/IMU_BPNN_Classification/blob/main/docs/assets/video/ESP32%20智慧运动助手.mp4)。** 这段 2 分 57 秒实拍演示覆盖模型训练与导出、双 BP 融合、BLE 连接、手表启动训练、上位机实时曲线、动作识别和逐次计数。
 
+## 四个动作动态演示
+
+下面四段 GIF 来自同一套真实演示流程：右侧真人完成动作，左侧上位机同步显示识别类别、设备权威计数和六轴曲线。点击任一动态图可打开原始尺寸。GIF 用于直观展示交互过程，不替代验证集指标或真板验收报告。
+
+<p align="center">
+  <a href="docs/assets/demo/01_开合跳.gif"><img src="docs/assets/demo/01_开合跳.gif" alt="开合跳识别与实时计数动态演示" width="48%"></a>
+  <a href="docs/assets/demo/02_挥手.gif"><img src="docs/assets/demo/02_挥手.gif" alt="挥手识别与实时计数动态演示" width="48%"></a>
+</p>
+<p align="center"><strong>开合跳</strong>（左） · <strong>挥手</strong>（右）</p>
+
+<p align="center">
+  <a href="docs/assets/demo/03_深蹲.gif"><img src="docs/assets/demo/03_深蹲.gif" alt="深蹲识别与实时计数动态演示" width="48%"></a>
+  <a href="docs/assets/demo/04_跳跃深蹲.gif"><img src="docs/assets/demo/04_跳跃深蹲.gif" alt="跳跃深蹲识别与实时计数动态演示" width="48%"></a>
+</p>
+<p align="center"><strong>深蹲</strong>（左） · <strong>跳跃深蹲</strong>（右）</p>
+
 这不是一个孤立的分类脚本，而是一份从论文研究问题出发，经过数据集建设、算法设计、模型训练、ESP32-S3 端侧部署、智能手表交互和 Windows 上位机开发，最终落到真实硬件验证的完整开源教程。工程从六轴 IMU 原始数据出发，完成数据清洗、297 项可解释特征、双轻量 BP 分类、单动作会话确认、实时计数、BLE 同步和跨端展示。
 
 ```text
@@ -27,6 +43,7 @@ QMI8658 六轴 IMU
 ## 导航
 
 - [实际运行演示](#实际运行演示)：先看真实手表、上位机、实时曲线与动作计数怎样协作。
+- [四个动作动态演示](#四个动作动态演示)：直接观看开合跳、挥手、深蹲和跳跃深蹲的识别、计数与曲线联动。
 - [从论文到产品的完整技术路线](#从论文到产品完整技术路线)：理解研究依据、工程取舍和每一阶段的可验证产物。
 - [硬件平台与实物](#硬件平台与实物)：查看整板原理、PCB 布局、主板实物和手表界面。
 - [公开训练数据集](#数据合同)：查看根 [`Dataset/`](Dataset/) 中的 11 类、189 个动作记录及完整性清单。
@@ -230,6 +247,7 @@ IMU_BPNN_Classification/
 ├─ docs/
 │  ├─ ReferencePaper/          开放获取参考论文、引用信息与许可证边界
 │  ├─ assets/algorithm/        正式算法图和可复现清单
+│  ├─ assets/demo/             首页四动作动态演示与来源清单
 │  ├─ assets/hardware/         原理图、PCB 布局、实物和手表界面原图
 │  ├─ assets/training/         训练终端截图、曲线和来源清单
 │  ├─ assets/ui/               PC 与手表界面截图及生成清单
